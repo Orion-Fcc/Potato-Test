@@ -1,0 +1,166 @@
+# Potato Test full stack: Postgres + Redis + API (serves SPA + REST/SSE) +
+# Celery worker (runs test cases as browsers + GitLab issue sync) + beat.
+# Config comes from .env (see .env.example). One image (built once) runs
+# api/worker/beat via different CMDs.
+#
+# Global browser budget = the worker's --concurrency (each case == one browser).
+# Set MAX_GLOBAL_CONCURRENCY in .env; ~0.5 GB RAM per slot (default 16 ≈ 8 GB).
+#
+#   docker build -f Dockerfile.base -t potato-test-base:latest .   # once (deps + Chromium)
+#   docker compose build          # builds the app image on top of the base
+#   docker compose up -d
+#   open http://localhost:8000
+
+x-app: &app
+  image: potato:latest
+  build:
+    context: .
+    dockerfile: Dockerfile
+  env_file: .env
+  environment:
+    - DATABASE_URL=postgresql+asyncpg://potato:${POSTGRES_PASSWORD:-potato}@db:5432/potato
+    - REDIS_URL=redis://redis:6379/0
+    - ARTIFACT_DIR=/app/artifacts
+    - PROFILE_DIR=/app/profiles  # workspace-scoped persistent browser profiles (volume above)
+    - ANONYMIZED_TELEMETRY=false  # browser-use telemetry -> no outbound in the container
+    # 出网代理（LLM 网关、Feishu、GitLab）。宿主机靠 http://127.0.0.1:60375 出网，容器没有它
+    # 就握不上 TLS（报 UNEXPECTED_EOF_WHILE_READING），助手会直接回 "Connection error"。
+    # 这里显式注入；换机器/换代理端口后改 .env 的 CONTAINER_HTTP_PROXY 即可，不用动本文件。
+    - HTTP_PROXY=${CONTAINER_HTTP_PROXY:-http://host.docker.internal:60375}
+    - HTTPS_PROXY=${CONTAINER_HTTP_PROXY:-http://host.docker.internal:60375}
+    - http_proxy=${CONTAINER_HTTP_PROXY:-http://host.docker.internal:60375}
+    - https_proxy=${CONTAINER_HTTP_PROXY:-http://host.docker.internal:60375}
+    # 内网被测系统与容器互访必须绕过代理，否则请求会被代理吞掉
+    - NO_PROXY=localhost,127.0.0.1,::1,db,redis,api,worker,beat,feishu,192.0.2.10,.local
+    - no_proxy=localhost,127.0.0.1,::1,db,redis,api,worker,beat,feishu,192.0.2.10,.local
+  extra_hosts:
+    - "host.docker.internal:host-gateway"  # Linux/WSL 引擎下也能解析到宿主机代理
+  volumes:
+    - artifacts:/app/artifacts
+    # Workspace-scoped persistent browser profiles (cookies/localStorage/sessionStorage/
+    # IndexedDB/HTTP cache). Named volume, NOT a bind mount: Chromium writes thousands of
+    # small files and a bind mount across the Windows/WSL boundary is dramatically slower.
+    # Wiped with:  docker compose down -v   (or the admin "reset browser state" action)
+    - profiles:/app/profiles
+    - ./app:/app/app:ro  # 本地源码覆盖：改代码后 docker compose restart 即可，无需 rebuild
+    - ./web/dist:/app/web_dist:ro  # 本地构建的前端覆盖：web/ 下 pnpm build 后 restart api 即可，无需 rebuild
+  # If the app under test lives on an internal domain, point the containers at a
+  # resolver that can answer for it, e.g.:
+  #   dns: ["10.0.0.2", "8.8.8.8"]
+  depends_on:
+    db:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+  restart: unless-stopped
+  networks: [tp-net]
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      - POSTGRES_USER=potato
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-potato}
+      - POSTGRES_DB=potato
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U potato"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks: [tp-net]
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks: [tp-net]
+
+  api:
+    <<: *app
+    container_name: potato-test-api
+    ports:
+      - "18000:8000"
+    # entrypoint runs `alembic upgrade head` (RUN_MIGRATIONS defaults to 1)
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+  worker:
+    <<: *app
+    container_name: potato-test-worker
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://potato:${POSTGRES_PASSWORD:-potato}@db:5432/potato
+      - REDIS_URL=redis://redis:6379/0
+      - RUN_MIGRATIONS=0
+      - ARTIFACT_DIR=/app/artifacts  # runs write video/history here (shared volume)
+      - ANONYMIZED_TELEMETRY=false  # browser-use telemetry -> no outbound in the container
+    # each case == one browser, so --concurrency IS the global browser budget
+    command: ["celery", "-A", "app.celery_app.celery", "worker", "-l", "info", "--concurrency=${MAX_GLOBAL_CONCURRENCY:-16}"]
+    # SIGTERM starts a celery warm shutdown, which waits for the cases it is running.
+    # Docker's default 10s then SIGKILLs them: a deploy mid-run silently dropped six cases
+    # of run 44 (they are acked already, so nothing redelivers them). Long enough for a
+    # case to hit its timeout; `docker compose up -d` will wait that long during a run.
+    stop_grace_period: 12m
+    # celery process serves no HTTP — disable the image's curl :8000 healthcheck
+    healthcheck:
+      disable: true
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_started
+
+  beat:
+    <<: *app
+    container_name: potato-test-beat
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://potato:${POSTGRES_PASSWORD:-potato}@db:5432/potato
+      - REDIS_URL=redis://redis:6379/0
+      - RUN_MIGRATIONS=0
+    command: ["celery", "-A", "app.celery_app.celery", "beat", "-l", "info"]
+    healthcheck:
+      disable: true
+    depends_on:
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_started
+
+  # Feishu bot: long-connection (WebSocket) event worker. Dials OUT to Feishu —
+  # no public callback URL. Needs internet egress to open.feishu.cn. Waits until
+  # the bot is configured (System settings / env) before connecting.
+  feishu:
+    <<: *app
+    container_name: potato-test-feishu
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://potato:${POSTGRES_PASSWORD:-potato}@db:5432/potato
+      - RUN_MIGRATIONS=0
+    command: ["python", "-m", "app.feishu_ws"]
+    healthcheck:
+      disable: true
+    depends_on:
+      db:
+        condition: service_healthy
+      api:
+        condition: service_started
+
+volumes:
+  pgdata:
+  artifacts:
+  profiles:
+
+networks:
+  tp-net:
+    driver: bridge

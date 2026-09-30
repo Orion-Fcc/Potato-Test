@@ -1,0 +1,502 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ============================================================================
+   Design tokens — light default; dark via [data-theme=dark] or system.
+   Everything downstream reads these, so a change here re-skins the whole app.
+   ========================================================================= */
+:root {
+  color-scheme: light;
+
+  /* brand accent hue — a preset theme only overrides this (see [data-accent]);
+     the whole brand-* ramp is built from it and works in both light + dark */
+  --brand-h: 163; /* emerald (default) */
+
+  /* -- surfaces: a 3-step elevation ramp, cool-neutral, very low chroma ------- */
+  --surface: oklch(0.984 0.003 265);
+  --panel: oklch(1 0 0);
+  --panel2: oklch(0.972 0.004 265);
+  --panel3: oklch(0.955 0.005 265);
+  --line: oklch(0.925 0.005 265);
+  --line-strong: oklch(0.875 0.007 265);
+
+  /* -- ink: a 4-step text ramp so hierarchy is deliberate, not accidental ---- */
+  --text: oklch(0.235 0.014 265);
+  --muted: oklch(0.545 0.012 265);
+  --ink-900: oklch(0.235 0.014 265);
+  --ink-700: oklch(0.405 0.014 265);
+  --ink-500: oklch(0.545 0.012 265);
+  --ink-400: oklch(0.645 0.011 265);
+
+  /* -- brand ramp ------------------------------------------------------------ */
+  --brand-50: oklch(0.962 0.032 var(--brand-h));
+  --brand-100: oklch(0.9 0.062 var(--brand-h));
+  --brand-200: oklch(0.84 0.09 var(--brand-h));
+  --brand-500: oklch(0.705 0.148 var(--brand-h));
+  --brand-600: oklch(0.638 0.158 var(--brand-h));
+  --brand-700: oklch(0.55 0.148 var(--brand-h));
+  --on-brand: oklch(0.995 0.008 var(--brand-h));
+
+  /* -- status: tint pairs (background + foreground) for badges and callouts -- */
+  --ok-bg: oklch(0.948 0.045 155);
+  --ok-fg: oklch(0.408 0.128 155);
+  --bad-bg: oklch(0.955 0.042 25);
+  --bad-fg: oklch(0.487 0.188 25);
+  --warn-bg: oklch(0.955 0.055 78);
+  --warn-fg: oklch(0.452 0.115 68);
+  --info-bg: oklch(0.952 0.04 250);
+  --info-fg: oklch(0.44 0.14 255);
+
+  /* solid status fills — gauges, bars, dots */
+  --ok: oklch(0.635 0.148 155);
+  --bad: oklch(0.585 0.196 25);
+  --warn: oklch(0.735 0.148 70);
+
+  /* -- elevation: panel sheen + a 3-step shadow ramp ------------------------- */
+  --panel-top: oklch(1 0 0);
+  --hover: color-mix(in oklch, var(--brand-50) 52%, transparent);
+  --shadow-1: 0 1px 2px -1px color-mix(in oklch, var(--ink-900) 9%, transparent);
+  --shadow-2:
+    0 1px 2px -1px color-mix(in oklch, var(--ink-900) 8%, transparent),
+    0 4px 10px -5px color-mix(in oklch, var(--ink-900) 9%, transparent);
+  --shadow-3:
+    0 2px 4px -2px color-mix(in oklch, var(--ink-900) 10%, transparent),
+    0 12px 28px -12px color-mix(in oklch, var(--ink-900) 18%, transparent);
+  --shadow-4:
+    0 4px 8px -4px color-mix(in oklch, var(--ink-900) 12%, transparent),
+    0 24px 56px -20px color-mix(in oklch, var(--ink-900) 26%, transparent);
+
+  --radius: 0.875rem;
+}
+
+/* dark values, shared by explicit choice and system preference.
+   Any element with data-theme=dark scopes the dark tokens. */
+[data-theme="dark"] {
+  color-scheme: dark;
+  --surface: oklch(0.155 0.008 265);
+  --panel: oklch(0.196 0.009 265);
+  --panel2: oklch(0.235 0.01 265);
+  --panel3: oklch(0.272 0.011 265);
+  --line: oklch(0.298 0.011 265);
+  --line-strong: oklch(0.375 0.013 265);
+  --text: oklch(0.945 0.006 265);
+  --muted: oklch(0.685 0.012 265);
+  --ink-900: oklch(0.955 0.006 265);
+  --ink-700: oklch(0.83 0.011 265);
+  --ink-500: oklch(0.685 0.012 265);
+  --ink-400: oklch(0.585 0.012 265);
+  --brand-50: oklch(0.325 0.048 var(--brand-h));
+  --brand-100: oklch(0.4 0.07 var(--brand-h));
+  --brand-200: oklch(0.47 0.09 var(--brand-h));
+  --brand-500: oklch(0.73 0.148 var(--brand-h));
+  --brand-600: oklch(0.71 0.148 var(--brand-h));
+  --brand-700: oklch(0.8 0.125 var(--brand-h));
+  --on-brand: oklch(0.17 0.028 var(--brand-h));
+  --ok-bg: oklch(0.29 0.062 155);
+  --ok-fg: oklch(0.865 0.14 155);
+  --bad-bg: oklch(0.295 0.085 25);
+  --bad-fg: oklch(0.84 0.14 25);
+  --warn-bg: oklch(0.3 0.065 72);
+  --warn-fg: oklch(0.87 0.125 78);
+  --info-bg: oklch(0.3 0.06 250);
+  --info-fg: oklch(0.85 0.11 250);
+  --ok: oklch(0.755 0.162 155);
+  --bad: oklch(0.685 0.185 25);
+  --warn: oklch(0.805 0.148 75);
+  --panel-top: oklch(0.238 0.01 265);
+  --hover: color-mix(in oklch, var(--brand-50) 52%, transparent);
+  --shadow-1: 0 1px 2px -1px oklch(0 0 0 / 0.36);
+  --shadow-2: 0 1px 2px -1px oklch(0 0 0 / 0.34), 0 4px 10px -5px oklch(0 0 0 / 0.4);
+  --shadow-3: 0 2px 4px -2px oklch(0 0 0 / 0.4), 0 12px 28px -12px oklch(0 0 0 / 0.55);
+  --shadow-4: 0 4px 8px -4px oklch(0 0 0 / 0.45), 0 24px 56px -20px oklch(0 0 0 / 0.7);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]):not([data-theme="dark"]) {
+    color-scheme: dark;
+    --surface: oklch(0.155 0.008 265);
+    --panel: oklch(0.196 0.009 265);
+    --panel2: oklch(0.235 0.01 265);
+    --panel3: oklch(0.272 0.011 265);
+    --line: oklch(0.298 0.011 265);
+    --line-strong: oklch(0.375 0.013 265);
+    --text: oklch(0.945 0.006 265);
+    --muted: oklch(0.685 0.012 265);
+    --ink-900: oklch(0.955 0.006 265);
+    --ink-700: oklch(0.83 0.011 265);
+    --ink-500: oklch(0.685 0.012 265);
+    --ink-400: oklch(0.585 0.012 265);
+    --brand-50: oklch(0.325 0.048 var(--brand-h));
+    --brand-100: oklch(0.4 0.07 var(--brand-h));
+    --brand-200: oklch(0.47 0.09 var(--brand-h));
+    --brand-500: oklch(0.73 0.148 var(--brand-h));
+    --brand-600: oklch(0.71 0.148 var(--brand-h));
+    --brand-700: oklch(0.8 0.125 var(--brand-h));
+    --on-brand: oklch(0.17 0.028 var(--brand-h));
+    --ok-bg: oklch(0.29 0.062 155);
+    --ok-fg: oklch(0.865 0.14 155);
+    --bad-bg: oklch(0.295 0.085 25);
+    --bad-fg: oklch(0.84 0.14 25);
+    --warn-bg: oklch(0.3 0.065 72);
+    --warn-fg: oklch(0.87 0.125 78);
+    --info-bg: oklch(0.3 0.06 250);
+    --info-fg: oklch(0.85 0.11 250);
+    --ok: oklch(0.755 0.162 155);
+    --bad: oklch(0.685 0.185 25);
+    --warn: oklch(0.805 0.148 75);
+    --panel-top: oklch(0.238 0.01 265);
+    --hover: color-mix(in oklch, var(--brand-50) 52%, transparent);
+    --shadow-1: 0 1px 2px -1px oklch(0 0 0 / 0.36);
+    --shadow-2: 0 1px 2px -1px oklch(0 0 0 / 0.34), 0 4px 10px -5px oklch(0 0 0 / 0.4);
+    --shadow-3: 0 2px 4px -2px oklch(0 0 0 / 0.4), 0 12px 28px -12px oklch(0 0 0 / 0.55);
+    --shadow-4: 0 4px 8px -4px oklch(0 0 0 / 0.45), 0 24px 56px -20px oklch(0 0 0 / 0.7);
+  }
+}
+
+/* ---- preset accent themes — override only the brand hue (both modes) ---- */
+[data-accent="emerald"] { --brand-h: 163; }
+[data-accent="blue"] { --brand-h: 250; }
+[data-accent="violet"] { --brand-h: 292; }
+[data-accent="amber"] { --brand-h: 70; }
+[data-accent="rose"] { --brand-h: 18; }
+
+/* ============================================================================
+   Base
+   ========================================================================= */
+* {
+  border-color: var(--line);
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--surface);
+  color: var(--text);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  font-family:
+    ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "PingFang SC",
+    "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+}
+
+h1, h2, h3 {
+  letter-spacing: -0.015em;
+}
+
+::selection {
+  background: var(--brand-100);
+  color: var(--ink-900);
+}
+
+button, a, input, textarea, [role="button"] {
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* a single quiet focus ring used everywhere */
+:focus-visible {
+  outline: 2px solid color-mix(in oklch, var(--brand-500) 70%, transparent);
+  outline-offset: 1px;
+}
+
+/* numbers line up in any tabular context by default via .tp-num */
+.tp-num {
+  font-variant-numeric: tabular-nums;
+}
+
+/* ============================================================================
+   Headings
+   ========================================================================= */
+.tp-h1 {
+  background-image: linear-gradient(
+    100deg,
+    color-mix(in oklch, var(--ink-900) 96%, var(--brand-600)) 0%,
+    color-mix(in oklch, var(--ink-900) 80%, var(--brand-500)) 100%
+  );
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: var(--ink-900);
+}
+
+/* an eyebrow label above a page title */
+.tp-eyebrow {
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--ink-400);
+}
+
+/* ============================================================================
+   Surfaces
+   ========================================================================= */
+.tp-card {
+  position: relative;
+  border-radius: var(--radius);
+  background-image: linear-gradient(
+    180deg,
+    color-mix(in oklch, var(--panel-top) 60%, var(--panel)) 0%,
+    var(--panel) 46%,
+    var(--panel) 100%
+  );
+  box-shadow: var(--shadow-2);
+}
+
+.tp-card-hover {
+  transition:
+    box-shadow 0.2s ease,
+    border-color 0.2s ease,
+    transform 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+.tp-card-hover:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-3);
+}
+
+/* an inset panel that sits *inside* a card — one step down the elevation ramp */
+.tp-inset {
+  background: color-mix(in oklch, var(--panel2) 70%, transparent);
+  border: 1px solid var(--line);
+  border-radius: calc(var(--radius) - 0.25rem);
+}
+
+/* ============================================================================
+   KPI tiles
+   ========================================================================= */
+.tp-kpi {
+  position: relative;
+  overflow: hidden;
+}
+/* a soft brand wash in the top-right corner — replaces the old hard left rail */
+.tp-kpi::after {
+  content: "";
+  position: absolute;
+  top: -60%;
+  right: -30%;
+  width: 70%;
+  height: 170%;
+  background: radial-gradient(
+    circle at 50% 50%,
+    color-mix(in oklch, var(--brand-500) 13%, transparent),
+    transparent 68%
+  );
+  pointer-events: none;
+}
+.tp-kpi-num {
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.028em;
+  font-size: 1.65rem;
+  line-height: 1.12;
+}
+
+/* ============================================================================
+   Tables
+   ========================================================================= */
+.tp-thead th {
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  font-size: 0.6875rem;
+  color: var(--ink-400);
+  background: color-mix(in oklch, var(--panel2) 60%, transparent);
+}
+.tp-thead th:first-child { border-top-left-radius: calc(var(--radius) - 0.25rem); }
+.tp-thead th:last-child { border-top-right-radius: calc(var(--radius) - 0.25rem); }
+
+/* Header row + header border, so the markup is just `class="tp-thead"`.
+   Previously every table repeated `tp-thead border-b border-[var(--line)] text-left`. */
+.tp-thead {
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+}
+
+.tp-row {
+  transition: background-color 0.12s ease;
+  border-bottom: 1px solid var(--line);
+}
+.tp-row:last-child {
+  border-bottom: 0;
+}
+.tp-row:hover {
+  background: var(--hover);
+}
+
+/* ============================================================================
+   Inline alerts
+   Shared by error/warning banners in drawers, settings sections and pages.
+   ========================================================================= */
+.tp-alert {
+  border-radius: 0.5rem;
+  padding: 0.5rem 0.75rem;
+}
+.tp-alert-bad {
+  background: var(--bad-bg);
+  color: var(--bad-fg);
+  font-size: 0.875rem;
+  line-height: 1.25rem;
+}
+.tp-alert-warn {
+  background: var(--warn-bg);
+  color: var(--warn-fg);
+  font-size: 0.75rem;
+  line-height: 1rem;
+}
+
+/* Border-between-rows for non-<tr> lists (grid/block rows in the run report,
+   the notification menu and the feedback table body). */
+.tp-divide-row {
+  border-bottom: 1px solid var(--line);
+}
+.tp-divide-row:last-child {
+  border-bottom: 0;
+}
+
+/* ============================================================================
+   App chrome
+   ========================================================================= */
+.tp-sidebar {
+  background-image: linear-gradient(
+    180deg,
+    color-mix(in oklch, var(--panel-top) 45%, var(--panel)) 0%,
+    var(--panel) 26%,
+    var(--panel) 100%
+  );
+}
+.tp-topbar {
+  background: color-mix(in oklch, var(--panel) 82%, transparent);
+  backdrop-filter: saturate(1.5) blur(10px);
+  -webkit-backdrop-filter: saturate(1.5) blur(10px);
+}
+
+/* a nav section label */
+.tp-nav-label {
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-400);
+}
+
+/* active nav item — tinted pill + a left rail */
+.tp-nav-active {
+  background-image: linear-gradient(
+    90deg,
+    color-mix(in oklch, var(--brand-50) 100%, transparent) 0%,
+    color-mix(in oklch, var(--brand-50) 55%, transparent) 100%
+  );
+}
+
+/* ============================================================================
+   Page enter + motion
+   ========================================================================= */
+@keyframes tp-page-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: none; }
+}
+.tp-page {
+  animation: tp-page-in 0.26s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+/* stagger children of a page section */
+@keyframes tp-rise {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: none; }
+}
+.tp-rise > * {
+  animation: tp-rise 0.34s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+.tp-rise > *:nth-child(1) { animation-delay: 0.01s; }
+.tp-rise > *:nth-child(2) { animation-delay: 0.05s; }
+.tp-rise > *:nth-child(3) { animation-delay: 0.09s; }
+.tp-rise > *:nth-child(4) { animation-delay: 0.13s; }
+.tp-rise > *:nth-child(5) { animation-delay: 0.17s; }
+.tp-rise > *:nth-child(n + 6) { animation-delay: 0.2s; }
+
+/* modal */
+@keyframes tp-overlay-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes tp-pop-in {
+  from { opacity: 0; transform: translateY(10px) scale(0.975); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes tp-overlay-out { from { opacity: 1; } to { opacity: 0; } }
+@keyframes tp-pop-out {
+  from { opacity: 1; transform: none; }
+  to { opacity: 0; transform: translateY(6px) scale(0.98); }
+}
+.tp-overlay { animation: tp-overlay-in 0.16s ease-out both; }
+.tp-pop { animation: tp-pop-in 0.2s cubic-bezier(0.16, 1, 0.3, 1) both; }
+.tp-overlay-out { animation: tp-overlay-out 0.14s ease-in both; }
+.tp-pop-out { animation: tp-pop-out 0.14s ease-in both; }
+
+/* progress + toast */
+@keyframes tp-indeterminate {
+  from { transform: translateX(-120%); }
+  to { transform: translateX(320%); }
+}
+.tp-indeterminate { animation: tp-indeterminate 1.3s cubic-bezier(0.4, 0, 0.2, 1) infinite; }
+
+@keyframes toast-in {
+  from { opacity: 0; transform: translateX(1rem) scale(0.98); }
+  to { opacity: 1; transform: none; }
+}
+.toast-in { animation: toast-in 0.2s cubic-bezier(0.16, 1, 0.3, 1) both; }
+
+/* skeleton loading (lazy route chunks) */
+.tp-skel {
+  position: relative;
+  overflow: hidden;
+  border-radius: 0.5rem;
+  background: color-mix(in oklch, var(--panel3) 85%, transparent);
+}
+.tp-skel::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background: linear-gradient(
+    90deg,
+    transparent,
+    color-mix(in oklch, var(--panel) 70%, transparent),
+    transparent
+  );
+  animation: tp-shimmer 1.35s ease-in-out infinite;
+}
+@keyframes tp-shimmer {
+  to { transform: translateX(100%); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tp-page, .tp-rise > *, .tp-overlay, .tp-pop,
+  .tp-overlay-out, .tp-pop-out, .toast-in, .tp-indeterminate {
+    animation: none !important;
+  }
+  .tp-skel::after { animation: none; display: none; }
+  .tp-card-hover { transition: box-shadow 0.18s ease, border-color 0.18s ease; }
+  .tp-card-hover:hover { transform: none; }
+}
+
+/* ============================================================================
+   Scrollbars
+   ========================================================================= */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in oklch, var(--ink-500) 28%, transparent) transparent;
+}
+*::-webkit-scrollbar { width: 10px; height: 10px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb {
+  background: color-mix(in oklch, var(--ink-500) 26%, transparent);
+  border: 3px solid transparent;
+  background-clip: content-box;
+  border-radius: 999px;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in oklch, var(--ink-500) 45%, transparent);
+  background-clip: content-box;
+}
+*::-webkit-scrollbar-corner { background: transparent; }

@@ -1,0 +1,26 @@
+__pycache__/
+*.py[cod]
+.venv/
+.env
+.env.*
+!.env.example
+*.db
+*.db-journal
+# auto-generated Fernet key (see app/crypto.py) — never commit, it decrypts stored creds
+.potato-secret.key
+profiles/
+artifacts/
+auth.json
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+.DS_Store
+
+web/node_modules/
+web/dist/
+web/tsconfig.tsbuildinfo
+
+*.png
+# but keep app icons served by the web app
+!web/public/*.png
+!docs/screenshots/*.png

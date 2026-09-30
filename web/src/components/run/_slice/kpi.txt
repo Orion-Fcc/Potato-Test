@@ -1,0 +1,62 @@
+/** The four headline tiles above the results table. */
+function RunKpis({
+  run,
+  summary,
+  active,
+  duration,
+  runningCount,
+}: {
+  run: Run | null;
+  summary: Run["summary"];
+  active: boolean;
+  duration: string | null;
+  runningCount: number;
+}) {
+  const { t } = useTranslation();
+  return (
+    <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+      <Tile
+        label={t("Pass rate")}
+        value={summary ? pct(summary.pass_rate) : "—"}
+        sub={summary ? t("{{p}}/{{n}} passed", { p: summary.passed, n: summary.total }) : t("computed when done")}
+      />
+      <Tile
+        label={t("Progress")}
+        value={run ? `${run.processed_count}/${run.total_count}` : "—"}
+        sub={
+          active
+            ? runningCount
+              ? t("{{n}} running", { n: runningCount })
+              : t("in progress")
+            : t("done")
+        }
+      />
+      <Tile
+        label={t("Duration")}
+        value={duration ?? (active && run?.started_at ? fmtSpan(run.started_at, new Date().toISOString()) : "—")}
+        sub={
+          !active && duration
+            ? `${fmtClock(run?.started_at)} → ${fmtClock(run?.finished_at)}`
+            : active
+              ? t("elapsed · running")
+              : ""
+        }
+      />
+      <Tile
+        label={t("Flaky")}
+        value={summary ? String(summary.flaky) : "—"}
+        sub={summary ? (summary.flaky > 0 ? t("passed after retry") : t("none")) : t("computed when done")}
+      />
+    </div>
+  );
+}
+
+function Tile({ label, value, sub }: { label: string; value: string; sub?: string }) {
+  return (
+    <Card className="p-4">
+      <div className="text-xs text-ink-500">{label}</div>
+      <div className="mt-1.5 text-2xl font-semibold text-ink-900">{value}</div>
+      {sub ? <div className="mt-1.5 text-[11.5px] text-ink-500">{sub}</div> : null}
+    </Card>
+  );
+}

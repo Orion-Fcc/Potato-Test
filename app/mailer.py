@@ -1,0 +1,71 @@
+"""System SMTP sender (invite + password-reset emails). Sends from a
+fixed system address via an SMTP relay (port 25, unauthenticated by default);
+SSL/STARTTLS/login stay config-gated for other deployments. Best-effort — a send
+failure is logged, never raised, so the caller still returns its copyable link."""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import smtplib
+from email.mime.text import MIMEText
+
+from app.config import get_settings
+
+log = logging.getLogger("potato-test.mailer")
+
+
+def _send_sync(to: str, subject: str, body: str) -> None:
+    s = get_settings()
+    msg = MIMEText(body, "plain", "utf-8")
+    msg["Subject"] = subject
+    msg["From"] = s.email_from
+    msg["To"] = to
+    client = (
+        smtplib.SMTP_SSL(s.email_host, s.email_port, timeout=15)
+        if s.email_use_ssl
+        else smtplib.SMTP(s.email_host, s.email_port, timeout=15)
+    )
+    try:
+        if s.email_use_tls:
+            client.starttls()
+        if s.email_host_user:
+            client.login(s.email_host_user, s.email_host_password)
+        client.sendmail(s.email_from, [to], msg.as_string())
+    finally:
+        try:
+            client.quit()
+        except Exception:  # noqa: BLE001 - quit best-effort; the send already happened
+            pass
+
+
+async def send_email(to: str, subject: str, body: str) -> bool:
+    """Returns True if the SMTP handoff succeeded, False otherwise (never raises)."""
+    try:
+        await asyncio.to_thread(_send_sync, to, subject, body)
+        return True
+    except Exception:
+        log.warning("email to %s failed (relay unreachable?)", to, exc_info=True)
+        return False
+
+
+def reset_email_body(link: str, hours: int) -> tuple[str, str]:
+    subject = "Potato Test 密码重置 / Reset your Potato Test password"
+    body = (
+        f"我们收到了重置该 Potato Test 账号密码的请求。\n\n"
+        f"点击链接设置新密码(有效期 {hours} 小时，仅可使用一次):\n{link}\n\n"
+        f"如果不是你本人操作，忽略这封邮件即可，密码不会改变。\n\n"
+        f"Open the link to set a new Potato Test password (valid {hours}h, single use):\n{link}\n"
+        f"If you didn't request this, ignore this email — nothing changes.\n"
+    )
+    return subject, body
+
+
+def invite_email_body(inviter: str, link: str) -> tuple[str, str]:
+    subject = "Potato Test 邀请 / You've been invited to Potato Test"
+    body = (
+        f"{inviter} 邀请你加入 Potato Test 测试平台。\n\n"
+        f"点击链接设置密码并激活账号(有效期 7 天):\n{link}\n\n"
+        f"{inviter} invited you to Potato Test. Open the link to set your password:\n{link}\n"
+    )
+    return subject, body

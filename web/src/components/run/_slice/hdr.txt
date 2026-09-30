@@ -1,0 +1,89 @@
+function RunHeader({
+  pid,
+  runId,
+  run,
+  duration,
+  envName,
+  active,
+  cancelling,
+  counts,
+  onCancel,
+  onRerun,
+  onDelete,
+}: {
+  pid: string | undefined;
+  runId: number;
+  run: Run | null;
+  duration: string | null;
+  envName: string | null;
+  active: boolean;
+  cancelling: boolean;
+  counts: { passed: number; failed: number; error: number };
+  onCancel: () => void;
+  onRerun: (mode?: "failing" | "error") => void;
+  onDelete: () => void;
+}) {
+  const { t } = useTranslation();
+  return (
+    <div className="flex flex-wrap items-center gap-3">
+      <Link to={pid ? `/projects/${pid}/runs` : "/"} className="text-sm text-ink-500 hover:text-ink-900">
+        {t("← Runs")}
+      </Link>
+      <h1 className="text-xl font-semibold text-ink-900">{run?.name ?? `Run #${runId}`}</h1>
+      {run && <Badge status={run.status} />}
+      {run && (
+        <span className="text-xs text-ink-500">
+          {duration ? `${t("Duration")} ${duration} · ` : ""}
+          {fmtClock(run.started_at)}
+          {run.finished_at ? ` → ${fmtClock(run.finished_at)}` : ""} · {t("Concurrency")} {run.concurrency}
+          {run.ran_by_label ? ` · ${t("run by")} ${run.ran_by_label}` : ""}
+          {envName ? ` · 🌐 ${envName}` : ""}
+        </span>
+      )}
+      <div className="ml-auto flex gap-2">
+        {run && !active && (
+          <a href={api.runExportUrl(runId)}>
+            <Button size="sm" variant="outline">
+              {t("Export CSV")}
+            </Button>
+          </a>
+        )}
+        {active && (
+          <Button size="sm" variant="danger" disabled={cancelling} onClick={onCancel}>
+            {cancelling ? (
+              <>
+                <Loader2 size={13} className="animate-spin" />
+                {t("Cancelling…")}
+              </>
+            ) : (
+              <>
+                <Square size={12} />
+                {t("Stop run")}
+              </>
+            )}
+          </Button>
+        )}
+        {run && !active && counts.failed + counts.error > 0 && (
+          <Button size="sm" onClick={() => onRerun("failing")}>
+            {t("Re-run failed ({{n}})", { n: counts.failed + counts.error })}
+          </Button>
+        )}
+        {run && !active && counts.error > 0 && counts.failed > 0 && (
+          <Button size="sm" variant="outline" onClick={() => onRerun("error")}>
+            {t("Re-run errors ({{n}})", { n: counts.error })}
+          </Button>
+        )}
+        {run && !active && (
+          <Button size="sm" variant="outline" onClick={() => onRerun()}>
+            {t("Re-run this suite")}
+          </Button>
+        )}
+        {run && !active && (
+          <Button size="sm" variant="danger" onClick={onDelete}>
+            {t("Delete")}
+          </Button>
+        )}
+      </div>
+    </div>
+  );
+}

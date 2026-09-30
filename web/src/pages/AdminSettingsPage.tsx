@@ -154,6 +154,30 @@ export function AdminSettingsPage() {
             {t("The OpenAI-compatible endpoint and models behind the browser agent and the judge. Changes apply to new runs — no redeploy.")}
           </div>
         </div>
+
+        {/* What the platform is ACTUALLY using right now. Only an admin sees this page, so
+            there is no reason to hide the model behind the input boxes: the saved value and
+            the inherited .env default look identical otherwise, and "which model ran that
+            case?" is the single most common question when a verdict looks wrong. */}
+        <div className="rounded-lg bg-[var(--panel2)] px-3 py-2 text-xs text-ink-700">
+          <div className="font-medium">{t("Currently in use")}</div>
+          <div className="mt-1 grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5">
+            <span className="text-ink-500">{t("Endpoint")}</span>
+            <span className="break-all font-mono">{llm?.base_url || t("(not set)")}</span>
+            <span className="text-ink-500">{t("Model (judge + default)")}</span>
+            <span className="break-all font-mono">{llm?.model || t("(not set)")}</span>
+            <span className="text-ink-500">{t("Agent model")}</span>
+            <span className="break-all font-mono">
+              {llm?.agent_model || llm?.model || t("(not set)")}
+              {!llm?.agent_model && llm?.model ? t(" (inherited)") : ""}
+            </span>
+            <span className="text-ink-500">{t("API key")}</span>
+            <span className="font-mono">
+              {llm?.api_key_set ? t("set") : t("not set — calls will likely be rejected")}
+            </span>
+          </div>
+        </div>
+
         <Field label={t("Base URL (OpenAI-compatible)")}>
           <Input value={llmBaseUrl} onChange={(e) => setLlmBaseUrl(e.target.value)}
             placeholder="https://api.openai.com/v1" />

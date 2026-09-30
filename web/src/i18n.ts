@@ -561,6 +561,13 @@ const zh: Record<string, string> = {
   "Model": "模型",
   "Connection failed.": "连接失败。",
   "Could not load settings:": "加载设置失败：",
+  "Currently in use": "当前实际使用中",
+  "Endpoint": "接口地址",
+  "Agent model": "Agent 模型",
+  " (inherited)": "（继承默认模型）",
+  "set": "已设置",
+  "not set — calls will likely be rejected": "未设置 —— 调用大概率会被拒绝",
+  "(not set)": "（未设置）",
   "Global GitLab token": "全局 GitLab 令牌",
   "An api-scope token used for GitLab sync across all projects. Projects then only pick a GitLab project.":
     "用于全部项目 GitLab 同步的 api 权限令牌；配置后各项目只需选择对应的 GitLab 项目。",

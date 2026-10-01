@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -387,3 +387,42 @@ class AppSetting(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
     )
+
+
+class KnowledgeChunk(Base):
+    """One retrieval unit of a project's spec/knowledge document.
+
+    Why this exists instead of the old single `proj_<pid>_knowledge` AppSetting string:
+    a merged spec doc is easily 500k+ characters. Holding it in one text column meant
+    every `search_knowledge` call re-split the whole thing and scored every paragraph
+    in memory — cost grew linearly with document size, and the upload path had to cap
+    the text at 400k chars to stay usable. Chunks make both bounded: retrieval only
+    ever touches `limit` rows, and nothing is truncated on the way in.
+
+    Chunks are split on blank lines (paragraph/table-row boundaries) with a soft size
+    ceiling, so a chunk is roughly one meaningful block of the source document.
+    `heading` carries the nearest preceding markdown heading, which is what makes a
+    hit readable on its own ("§4.3 单位、属地和价格" beats "line 20241").
+    """
+
+    __tablename__ = "knowledge_chunk"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(
+        ForeignKey("project.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    # Position in the document, so hits can be shown in source order and a merge
+    # (re-upload / paste) can replace a project's chunks deterministically.
+    chunk_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    # 1-based line number of the chunk's first line in the original document — kept so
+    # the assistant can cite a location the operator can actually find.
+    line_no: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    # Nearest preceding markdown heading, truncated; "" when the doc has none.
+    heading: Mapped[str] = mapped_column(String(400), nullable=False, default="")
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    chars: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # Provenance for re-upload/dedup: source filename when it came from a file.
+    source: Mapped[str] = mapped_column(String(400), nullable=False, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+    __table_args__ = (Index("ix_knowledge_chunk_proj_idx", "project_id", "chunk_index"),)

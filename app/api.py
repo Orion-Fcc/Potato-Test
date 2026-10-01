@@ -147,6 +147,39 @@ async def _project_access(request: Request, pid: int, min_role: str) -> str:
     return role
 
 
+# Bounded read chunk. `await file.read()` with no argument buffers the entire body
+# before anything can judge it, so a 2 GB post would OOM the server before hitting
+# the size check. Read in pieces and stop as soon as the cap is passed.
+_UPLOAD_CHUNK = 4 * 1024 * 1024
+
+
+async def _read_upload_capped(file: UploadFile, max_bytes: int) -> bytes:
+    """Read an upload into memory, refusing to exceed `max_bytes`.
+
+    Rejects early on the declared Content-Length (cheap, and usually correct), then
+    enforces the real limit while streaming so a lying/missing header can't get past.
+    """
+    declared = file.size
+    if declared is not None and declared > max_bytes:
+        raise HTTPException(
+            413,
+            f"文件过大（{declared / 1024 / 1024:.1f} MB），上限 {max_bytes // 1024 // 1024} MB",
+        )
+
+    buf = bytearray()
+    while True:
+        piece = await file.read(_UPLOAD_CHUNK)
+        if not piece:
+            break
+        buf.extend(piece)
+        if len(buf) > max_bytes:
+            raise HTTPException(
+                413,
+                f"文件过大（超过 {max_bytes // 1024 // 1024} MB），请拆分后再上传",
+            )
+    return bytes(buf)
+
+
 # ---- auth ----
 def _iso(dt: datetime | None) -> str | None:
     return dt.isoformat() if dt else None
@@ -1180,26 +1213,35 @@ async def project_assistant(pid: int, body: AssistantIn, request: Request) -> di
 
 @router.get("/projects/{pid}/knowledge")
 async def get_project_knowledge(pid: int, request: Request) -> dict:
-    """The project's spec/knowledge text — searched by the assistant's search_knowledge tool."""
+    """The project's spec/knowledge text — searched by the assistant's search_knowledge tool.
+
+    Reassembled from chunks for the editor. Nothing on the assistant path calls this;
+    it would defeat the point of chunking (see app/knowledge.py).
+    """
     await _project_access(request, pid, "viewer")
-    from app.settings_store import get_setting
+    from app import knowledge
 
     async with db_session() as s:
         await _get_project_or_404(s, pid)
-        text = await get_setting(s, f"proj_{pid}_knowledge")
-    return {"text": text or "", "chars": len(text or "")}
+        text = await knowledge.get_all_text(s, pid)
+        st = await knowledge.stats(s, pid)
+    return {"text": text, "chars": st["chars"], **st}
 
 
 @router.put("/projects/{pid}/knowledge")
 async def set_project_knowledge(pid: int, body: KnowledgeIn, request: Request) -> dict:
-    """Replace the project's spec/knowledge text (paste or upload the requirement doc)."""
+    """Replace the project's spec/knowledge text (paste or upload the requirement doc).
+
+    Stored as chunks, not one row: retrieval cost then depends on the query, not on
+    how large the document is.
+    """
     await _project_access(request, pid, "editor")
-    from app.settings_store import set_setting
+    from app import knowledge
 
     async with db_session() as s:
         await _get_project_or_404(s, pid)
-        await set_setting(s, f"proj_{pid}_knowledge", body.text or "")
-    return {"chars": len(body.text or "")}
+        res = await knowledge.replace_knowledge(s, pid, body.text or "", source="paste")
+    return res
 
 
 @router.post("/projects/{pid}/knowledge/extract")
@@ -1209,9 +1251,12 @@ async def extract_project_knowledge(pid: int, request: Request, file: UploadFile
     The SPA appends the returned text to the spec box and then PUTs /knowledge, so
     the operator can see what was extracted before it becomes the assistant's
     knowledge. Formats: md/txt/json/csv/docx/pdf/xlsx/html/rtf, plus any plain text.
+
+    The upload is read in bounded pieces and rejected on the declared length first, so
+    a 500 MB body cannot be buffered into memory before the size check runs.
     """
     await _project_access(request, pid, "editor")
-    data = await file.read()
+    data = await _read_upload_capped(file, docparse.MAX_UPLOAD_BYTES)
     try:
         res = docparse.extract(file.filename or "", data)
     except docparse.UnsupportedDocument as e:
@@ -1226,6 +1271,34 @@ async def extract_project_knowledge(pid: int, request: Request, file: UploadFile
         "truncated": res.truncated,
         "warnings": res.warnings,
     }
+
+
+@router.post("/projects/{pid}/knowledge/append")
+async def append_project_knowledge(pid: int, body: KnowledgeIn, request: Request) -> dict:
+    """Add text to the project's knowledge without replacing what is already there.
+
+    Uploading several documents into one project is the normal case; this avoids the
+    SPA having to read back a multi-megabyte document, concatenate, and write it all
+    again on every added file.
+    """
+    await _project_access(request, pid, "editor")
+    from app import knowledge
+
+    async with db_session() as s:
+        await _get_project_or_404(s, pid)
+        res = await knowledge.append_knowledge(s, pid, body.text or "", source="upload")
+    return res
+
+
+@router.post("/projects/{pid}/knowledge/search")
+async def search_project_knowledge(pid: int, request: Request, body: KnowledgeIn) -> dict:
+    """Preview what the assistant's search_knowledge tool would return for a query."""
+    await _project_access(request, pid, "viewer")
+    from app import knowledge
+
+    async with db_session() as s:
+        await _get_project_or_404(s, pid)
+    return await knowledge.search(pid, body.text or "")
 
 
 @router.get("/projects/{pid}/stats")
@@ -1661,7 +1734,7 @@ async def case_results(cid: int, request: Request) -> list[dict]:
 @router.post("/projects/{pid}/testcases/import")
 async def import_cases(pid: int, request: Request, file: UploadFile = File(...)) -> dict:
     """Bulk-import test cases from an .xlsx (the only supported format)."""
-    data = await file.read()
+    data = await _read_upload_capped(file, docparse.MAX_UPLOAD_BYTES)
     try:
         records = excel.parse_workbook(data)
     except Exception as e:

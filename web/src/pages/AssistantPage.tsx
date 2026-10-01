@@ -19,10 +19,17 @@ interface Msg {
 
 const chatKey = (pid: number) => `tp.assistant.chat.${pid}`;
 
+/** How much of the extracted document we echo into the textarea after an upload.
+ *  The full text is already saved server-side; pulling a 20 MB corpus into a
+ *  <textarea> just to show it is what made large uploads unusable before. */
+const KB_PREVIEW_CHARS = 200_000;
+
 /**
  * In-app assistant — an OPERATOR with a knowledge base:
  *  - POST /api/projects/:pid/assistant  → LLM + tools (generic `potato-test_api`, search_knowledge, create_case…)
- *  - GET/PUT /api/projects/:pid/knowledge → the project's spec/requirement text it can search
+ *  - GET/PUT/POST /api/projects/:pid/knowledge[/append] → the spec/requirement text it searches
+ *    Stored as chunks server-side (app/knowledge.py), so a large merged spec stays intact
+ *    and search cost does not grow with document size.
  * The chat is persisted per project in localStorage so reloads don't lose it.
  */
 export function AssistantPage() {
@@ -43,6 +50,10 @@ export function AssistantPage() {
   const [kbSaving, setKbSaving] = useState(false);
   const [kbBusy, setKbBusy] = useState(false);
   const [kbNote, setKbNote] = useState<string | null>(null);
+  /** True when the textarea holds only the first KB_PREVIEW_CHARS of the saved corpus.
+   *  Saving from this state would silently discard the rest, so it is blocked until the
+   *  operator explicitly acknowledges it. */
+  const [kbPreviewOnly, setKbPreviewOnly] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
 
   // --- persist chat per project ---
@@ -67,8 +78,12 @@ export function AssistantPage() {
     api
       .getKnowledge(projectId)
       .then((r) => {
-        setKb(r.text);
+        // The corpus can be tens of MB. Put a bounded preview in the textarea (which is
+        // the only editable surface) and keep the true size in kbChars — the saved text
+        // itself is never truncated.
+        setKb(r.text.length > KB_PREVIEW_CHARS ? r.text.slice(0, KB_PREVIEW_CHARS) : r.text);
         setKbChars(r.chars);
+        setKbPreviewOnly(r.text.length > KB_PREVIEW_CHARS);
         setKbOpen(r.chars === 0); // nudge to fill it in when empty
       })
       .catch(() => {});
@@ -79,10 +94,22 @@ export function AssistantPage() {
   }, [turns, busy]);
 
   async function saveKb() {
+    // Guard the one destructive path: when only a preview is loaded, "保存" would
+    // replace a multi-MB corpus with its first 200k chars. Append (upload) is safe and
+    // unaffected; a deliberate full rewrite is the only thing blocked here.
+    if (kbPreviewOnly) {
+      const ok = window.confirm(
+        t(
+          "当前编辑框只载入了前 20 万字符的预览。若直接保存，超出的部分会被删除。确定要保存吗？",
+        ),
+      );
+      if (!ok) return;
+    }
     setKbSaving(true);
     try {
       const r = await api.setKnowledge(projectId, kb);
       setKbChars(r.chars);
+      setKbPreviewOnly(false);
     } catch (e) {
       setErr(String(e));
     } finally {
@@ -99,30 +126,37 @@ export function AssistantPage() {
     setKbBusy(true);
     setErr(null);
     setKbNote(null);
-    let next = kb;
     const imported: string[] = [];
     const problems: string[] = [];
+    // Each extracted document is appended server-side. Doing it file-by-file (rather
+    // than building one giant local string and PUTting it) is what lets a 100 MB spec
+    // through: the browser never has to hold the whole merged document, and the API
+    // never receives it back as one request body.
     for (const f of files) {
       try {
         const r = await api.extractKnowledge(projectId, f);
-        next = `${next.trimEnd()}${next.trim() ? "\n\n" : ""}## ${r.filename}\n${r.text}\n`;
-        imported.push(`${r.filename} · ${r.chars.toLocaleString()} ${t("chars")}${r.truncated ? ` · ${t("truncated")}` : ""}`);
+        const block = `## ${r.filename}\n${r.text}\n`;
+        const saved = await api.appendKnowledge(projectId, block);
+        const added = r.chars.toLocaleString();
+        imported.push(
+          `${r.filename} · ${added} ${t("chars")}${r.truncated ? ` · ${t("truncated")}` : ""}`,
+        );
         if (r.warnings.length > 0) problems.push(`${r.filename}: ${r.warnings.join("; ")}`);
+        setKbChars(saved.chars);
+        // Show the head of the new document so the operator can eyeball what landed,
+        // without pulling the entire multi-MB corpus into the textarea.
+        setKb((prev) => {
+          const head = r.text.slice(0, KB_PREVIEW_CHARS);
+          const more = r.text.length > KB_PREVIEW_CHARS ? "\n\n…（其余内容已保存，展开预览可查看前 20 万字符）" : "";
+          const base = prev.trimEnd();
+          return `${base}${base ? "\n\n" : ""}${block.slice(0, head.length)}${more}`;
+        });
       } catch (e) {
         problems.push(`${f.name}: ${e instanceof Error ? e.message : String(e)}`);
       }
     }
-    setKb(next);
     setKbOpen(true);
-    if (imported.length > 0) {
-      try {
-        const r = await api.setKnowledge(projectId, next);
-        setKbChars(r.chars);
-        setKbNote(`${t("Imported")}: ${imported.join("、")}`);
-      } catch (e) {
-        setErr(String(e));
-      }
-    }
+    if (imported.length > 0) setKbNote(`${t("Imported")}: ${imported.join("、")}`);
     if (problems.length > 0) setErr(problems.join("；"));
     setKbBusy(false);
     if (fileRef.current) fileRef.current.value = ""; // allow re-picking the same file

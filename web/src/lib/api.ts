@@ -520,11 +520,31 @@ export const api = {
       body: JSON.stringify(b),
       ...o,
     }),
-  getKnowledge: (pid: number, o?: Opts) => req<{ text: string; chars: number }>(`/projects/${pid}/knowledge`, o),
+  getKnowledge: (pid: number, o?: Opts) =>
+    req<{ text: string; chars: number; chunks: number }>(`/projects/${pid}/knowledge`, o),
   setKnowledge: (pid: number, text: string) =>
-    req<{ chars: number }>(`/projects/${pid}/knowledge`, {
+    req<{ chars: number; chunks: number }>(`/projects/${pid}/knowledge`, {
       method: "PUT",
       body: JSON.stringify({ text }),
+    }),
+  /** Add to the project's knowledge without replacing it — used by upload so the SPA
+   *  never has to read back (and re-send) a multi-megabyte document. */
+  appendKnowledge: (pid: number, text: string) =>
+    req<{ chars: number; chunks: number }>(`/projects/${pid}/knowledge/append`, {
+      method: "POST",
+      body: JSON.stringify({ text }),
+    }),
+  /** Preview what the assistant's search_knowledge tool returns for a query. */
+  searchKnowledge: (pid: number, query: string) =>
+    req<{
+      query: string;
+      matched_blocks: number;
+      total_blocks: number;
+      hits: { line: number; heading: string; text: string }[];
+      note?: string;
+    }>(`/projects/${pid}/knowledge/search`, {
+      method: "POST",
+      body: JSON.stringify({ text: query }),
     }),
   /** Upload a spec document (docx/pdf/xlsx/html/rtf/txt/md/csv/json) and get its
    *  text back. Does not save — the caller appends it to the spec box and PUTs. */

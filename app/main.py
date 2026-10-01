@@ -63,11 +63,39 @@ async def _fail_orphaned_runs() -> None:
         )
 
 
+async def _backfill_knowledge_chunks() -> None:
+    """Move legacy `proj_<pid>_knowledge` settings into the chunk table, once.
+
+    Knowledge used to live in one AppSetting row and the assistant re-split it on every
+    search. The new model stores chunks (see app/knowledge.py); existing projects would
+    otherwise look empty. Idempotent — a project that already has chunks is skipped, so
+    this is safe on every boot.
+    """
+    import logging
+
+    from sqlalchemy import select
+
+    from app import knowledge
+    from app.db import db_session
+    from app.models import Project
+
+    log = logging.getLogger("potato-test.boot")
+    try:
+        async with db_session() as s:
+            pids = (await s.execute(select(Project.id))).scalars().all()
+            moved = await knowledge.backfill_from_settings(s, list(pids))
+        if moved:
+            log.info("knowledge backfill: %s project(s) migrated to chunks", moved)
+    except Exception as exc:  # noqa: BLE001 — a failed migration must not block boot
+        log.warning("knowledge backfill skipped: %s", exc)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
     await _seed_admin()
     await _fail_orphaned_runs()
+    await _backfill_knowledge_chunks()
     yield
 
 

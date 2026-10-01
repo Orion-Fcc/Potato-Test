@@ -437,51 +437,22 @@ def _slug(text: str, fallback: str = "document") -> str:
     return (s[:80] or fallback)
 
 
-async def _knowledge_text(pid: int) -> str:
-    """The project's spec/knowledge text (AppSetting `proj_<pid>_knowledge`)."""
+async def _knowledge_search(pid: int, query: str, limit: int = 8) -> dict:
+    """Search this project's chunked knowledge.
+
+    Was: read the whole `proj_<pid>_knowledge` string, split every line into a
+    paragraph in Python, score them all. For the 461,690-char merged spec that is
+    ~20k paragraphs re-split and re-scored on every single tool call, and the
+    string itself was capped at 400k chars so the tail could not be found at all.
+    Now the split happens once at write time and the DB narrows the candidates.
+    """
     try:
-        from app.db import db_session
-        from app.settings_store import get_setting
+        from app.knowledge import search
 
-        async with db_session() as s:
-            return (await get_setting(s, f"proj_{pid}_knowledge")) or ""
-    except Exception as exc:
-        log.warning("assistant: knowledge read failed: %s", exc)
-        return ""
-
-
-def _search_text(text: str, query: str, limit: int = 8) -> dict:
-    """Keyword search over the project's knowledge; returns the best-matching blocks."""
-    terms = [t for t in re.split(r"[\s,，。;；、/|]+", query or "") if t]
-    paras: list[tuple[int, str]] = []
-    buf: list[str] = []
-    start = 1
-    for i, line in enumerate(text.splitlines(), 1):
-        if line.strip():
-            if not buf:
-                start = i
-            buf.append(line)
-        elif buf:
-            paras.append((start, "\n".join(buf)))
-            buf = []
-    if buf:
-        paras.append((start, "\n".join(buf)))
-
-    scored = []
-    for ln, p in paras:
-        low = p.lower()
-        score = sum(1 for t in terms if t.lower() in low)
-        if score:
-            scored.append((score, ln, p))
-    scored.sort(key=lambda x: (-x[0], x[1]))
-    hits = [{"line": ln, "text": p[:900]} for _, ln, p in scored[:limit]]
-    return {
-        "query": query,
-        "matched_blocks": len(scored),
-        "total_blocks": len(paras),
-        "hits": hits,
-        "note": "命中为空说明资料里没有；不要臆造。" if not hits else "按相关度返回的片段。",
-    }
+        return await search(pid, query, limit)
+    except Exception as exc:  # noqa: BLE001 — a knowledge lookup must never kill a turn
+        log.warning("assistant: knowledge search failed: %s", exc)
+        return {"error": f"资料检索失败：{exc}", "hits": [], "matched_blocks": 0}
 
 
 # Paths that are about the platform as a whole, not a workspace. Reading them from inside
@@ -539,12 +510,13 @@ async def _run_tool(name: str, args: dict, pid: int) -> dict:
             return scope_err
         return await _api(method, path, args.get("body") or None)
     if name == "search_knowledge":
-        text = await _knowledge_text(pid)
-        if not text.strip():
+        query = str(args.get("query", ""))
+        res = await _knowledge_search(pid, query)
+        if not res.get("total_blocks"):
             return {
                 "error": "该项目还没上传『需规/资料』。请在助手页右侧的『需规 / 资料』里粘贴或上传，再让我检索。",
             }
-        return _search_text(text, str(args.get("query", "")))
+        return res
     if name == "list_cases":
         data = await _api("GET", f"/api/projects/{pid}/testcases")
         rows = data if isinstance(data, list) else []

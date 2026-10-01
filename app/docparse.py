@@ -25,8 +25,17 @@ import re
 from dataclasses import dataclass, field
 
 # ---- limits ---------------------------------------------------------------
-MAX_UPLOAD_BYTES = 25 * 1024 * 1024  # 25 MB — a spec doc is never bigger
-MAX_OUTPUT_CHARS = 400_000  # ~400k chars of knowledge is plenty for retrieval
+# 100 MB. Raised from 25 MB together with the move to chunked knowledge storage:
+# the old 25 MB cap and the 400k-char output cap existed only because the whole
+# document had to fit in one `AppSetting.text` row and was re-split on every
+# search. Chunks remove both reasons, so a merged multi-document spec (the
+# 461,690-char 资源管理使用.md is the case that started this) now survives intact.
+MAX_UPLOAD_BYTES = 100 * 1024 * 1024
+
+# Kept as a genuine last-resort guard against a pathological file (a 100 MB
+# spreadsheet can expand to hundreds of MB of text), NOT as a normal truncation.
+# Set far above any real spec so the warning below should never fire in practice.
+MAX_OUTPUT_CHARS = 50_000_000
 
 # ---- format table ---------------------------------------------------------
 # ext -> (kind, label)
@@ -111,9 +120,15 @@ def _clean(text: str) -> str:
 
 
 def _cap(text: str, result_warnings: list[str]) -> tuple[str, bool]:
+    """Last-resort guard. Should never fire for a real document now that knowledge is
+    stored as chunks — if it does, the extracted text is genuinely pathological
+    (e.g. a 100 MB spreadsheet), and we say so instead of silently dropping it."""
     if len(text) <= MAX_OUTPUT_CHARS:
         return text, False
-    result_warnings.append(f"text truncated at {MAX_OUTPUT_CHARS:,} characters")
+    result_warnings.append(
+        f"extracted text exceeded {MAX_OUTPUT_CHARS:,} characters "
+        f"({len(text):,}) and was cut — split the document and upload in parts"
+    )
     return text[:MAX_OUTPUT_CHARS], True
 
 

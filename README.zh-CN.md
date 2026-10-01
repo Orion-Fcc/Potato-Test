@@ -65,6 +65,11 @@ LLM 裁判根据证据（录像、截图、操作轨迹）判定通过/失败。
 
 **Windows**：双击 `start-potato.bat` 即可（自动建 venv、装依赖、必要时构建前端、打开浏览器）。手动方式：
 
+> **端口**：默认 `18080`。若被占用，启动器会**自动向后找一个空闲端口**，
+> 所以残留容器或别的服务不会阻塞启动。想指定端口就传参数：`start-potato.bat 19000`。
+> （`18000` 是原始默认值，常被旧的 Docker 部署占着；那种情况下占用者会显示为
+> Docker Desktop 的 `com.docker.backend.exe`，而不是 Python 进程。）
+
 ```bat
 python -m venv .venv
 .venv\Scripts\python -m pip install fastapi "uvicorn[standard]" "sqlalchemy[asyncio]" aiosqlite ^
@@ -72,7 +77,7 @@ python -m venv .venv
     openpyxl playwright
 .venv\Scripts\python -m playwright install chromium
 copy .env.example .env
-.venv\Scripts\python -m uvicorn app.main:app --port 18000
+.venv\Scripts\python -m uvicorn app.main:app --port 18080
 ```
 
 **macOS / Linux**
@@ -83,10 +88,10 @@ pip install fastapi "uvicorn[standard]" "sqlalchemy[asyncio]" aiosqlite pydantic
     httpx openai sse-starlette python-multipart cryptography bcrypt pyjwt openpyxl playwright
 playwright install chromium
 cp .env.example .env
-uvicorn app.main:app --port 18000
+uvicorn app.main:app --port 18080
 ```
 
-然后打开 <http://127.0.0.1:18000>。在**界面 - 系统设置 - LLM 模型**里配置模型（先点「测试连通性」确认能通再跑用例），或改 `.env` 里的 `GATEWAY_BASE_URL` / `GATEWAY_API_KEY` / `GATEWAY_MODEL`。两种方式都行，界面配置会覆盖 `.env`。
+然后打开 <http://127.0.0.1:18080>。在**界面 - 系统设置 - LLM 模型**里配置模型（先点「测试连通性」确认能通再跑用例），或改 `.env` 里的 `GATEWAY_BASE_URL` / `GATEWAY_API_KEY` / `GATEWAY_MODEL`。两种方式都行，界面配置会覆盖 `.env`。
 
 `.env` 里的相对路径（`./potato.db`、`./profiles`、`./artifacts`）都会锚定到项目根目录；前端构建完成后 API 会自动托管 `web/dist`，所以无论从哪个目录启动服务都能正常工作。
 

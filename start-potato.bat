@@ -2,6 +2,10 @@
 rem ============================================================================
 rem  Potato Test - native Windows launcher (no Docker, no Postgres, no Redis)
 rem
+rem  PORT: defaults to 18080 and AUTO-AVOIDS a busy port by scanning upward, so a
+rem  stale deployment holding 18000 can never block startup again. Override with an
+rem  argument:  start-potato.bat 19000
+rem
 rem  First run  : creates .venv, installs backend deps, initialises the SQLite DB.
 rem  Later runs : starts instantly.
 rem
@@ -19,8 +23,13 @@ set "VENV=%~dp0.venv"
 set "PY=%VENV%\Scripts\python.exe"
 set "PIP=%VENV%\Scripts\pip.exe"
 
-set "PORT=18000"
-if not "%~1"=="" set "PORT=%~1"
+rem 18000 is the stock value and is usually taken by an older Docker deployment of
+rem this same app. The process holding it is Docker Desktop's port proxy
+rem (com.docker.backend.exe), NOT a Python process — which is why "who owns :18000"
+rem looks unrelated to Potato Test.
+set "PORT_START=18080"
+set "PORT_MAX=18120"
+if not "%~1"=="" set "PORT_START=%~1"
 
 echo.
 echo   ============================================
@@ -28,13 +37,39 @@ echo      Potato Test  -  native launcher
 echo   ============================================
 echo.
 
+rem ---- 0. pick a free port ---------------------------------------------------
+set "PORT="
+set /a _p=%PORT_START%
+:find_port
+netstat -ano | findstr /C:":!_p! " | findstr /C:"LISTENING" >nul 2>&1
+if errorlevel 1 (
+  set "PORT=!_p!"
+  goto :port_found
+)
+set /a _p+=1
+if !_p! GTR %PORT_MAX% (
+  echo   [错误] %PORT_START%-%PORT_MAX% 范围内没有空闲端口。
+  echo          请指定其他端口，例如：start-potato.bat 19000
+  echo.
+  pause
+  exit /b 1
+)
+goto :find_port
+
+:port_found
+if not "%PORT%"=="%PORT_START%" (
+  echo   [提示] 端口 %PORT_START% 已被占用，自动改用 %PORT%。
+  echo          占用者通常是旧的 Docker 部署（Docker Desktop 代理进程）。
+  echo.
+)
+
 rem ---- 1. Python -------------------------------------------------------------
 if not exist "%PY%" goto :make_venv
-goto :have_python
+echo   [1/4] Python 就绪。
+goto :check_deps
 
 :make_venv
 echo   [1/4] 正在创建 Python 虚拟环境 .venv ...
-"%PY%" --version >nul 2>&1
 where python >nul 2>&1
 if errorlevel 1 (
   where py >nul 2>&1
@@ -58,10 +93,8 @@ if not exist "%PY%" (
 )
 echo         完成。
 
-:have_python
-echo   [1/4] Python 就绪。
-
 rem ---- 2. Backend dependencies ----------------------------------------------
+:check_deps
 "%PY%" -c "import fastapi, sqlalchemy, aiosqlite, uvicorn, sse_starlette" >nul 2>&1
 if errorlevel 1 goto :install_deps
 echo   [2/4] 后端依赖已安装。
@@ -103,14 +136,12 @@ if not exist "%~dp0.env" (
     echo   [3/4] 未找到 .env，正在从 .env.example 复制...
     copy /y "%~dp0.env.example" "%~dp0.env" >nul
   ) else (
-    echo   [3/4] 未找到 .env（将使用内置默认值）。
-    goto :check_web
+    echo   [3/4] 未找到 .env，将使用内置默认值。
   )
 ) else (
   echo   [3/4] .env 已存在。
 )
 
-:check_web
 rem ---- 4. Frontend -----------------------------------------------------------
 if exist "%~dp0web\dist\index.html" (
   echo   [4/4] 前端已构建。
@@ -120,7 +151,7 @@ echo   [4/4] 未发现前端构建产物 web\dist。
 echo.
 echo         前端需要先构建一次。请选择：
 echo           1. 现在构建（需要 Node.js，约 1-3 分钟）
-echo           2. 跳过 —— 只启动 API（浏览器访问 /api/... 可用，看不到界面）
+echo           2. 跳过 —— 只启动 API（浏览器访问不到界面）
 echo.
 set "BUILD="
 set /p "BUILD=请输入 1 或 2 [默认 1]: "
@@ -149,6 +180,7 @@ if not exist "%~dp0web\dist\index.html" (
   echo   [警告] 前端构建未产出 web\dist\index.html，界面可能不可用。
 )
 
+rem ---- 5. run ----------------------------------------------------------------
 :run
 echo.
 echo   ============================================

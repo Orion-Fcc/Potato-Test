@@ -18,47 +18,66 @@ Agent 自己想清楚该点哪里；裁判读截图和动作记录下结论，**
 
 ---
 
-## 快速开始（Windows，推荐）
+## 快速开始
 
-**双击 `start-potato.bat` 就行。** 它会自动完成：
+### Windows
 
-1. 建 Python 虚拟环境并安装依赖
-2. 下载 Chromium（执行测试用）
-3. 构建前端界面
-4. **在后台启动服务**，等它就绪后自动打开浏览器
-5. 窗口随即关闭，**服务继续在后台运行**
+装好 Python ≥ 3.11 后，在项目目录里执行一次（首次约 5-10 分钟，`browser-use` 依赖树较大）：
 
-| 我想…… | 双击 |
-| --- | --- |
-| 启动（或已在运行时打开浏览器） | `start-potato.bat` |
-| 停止服务 | `stop-potato.bat` |
-| 每次开机自动启动 | `autostart-on.bat` |
-| 取消开机自启 | `autostart-off.bat` |
+```bat
+python -m venv .venv
+.venv\Scripts\python -m pip install -e .
+.venv\Scripts\python -m playwright install chromium
+copy .env.example .env
+```
 
-启动后访问 <http://127.0.0.1:18080/>
+之后启动服务：
 
-几点说明：
+```bat
+:: 前台运行（能看到日志，关掉窗口即停止）
+.venv\Scripts\python run_server.py 18080
 
-- **服务是常驻的。** 关掉那个黑窗口不会停止服务，必须用 `stop-potato.bat` 才会停。
-- **端口默认 18080。** 如果被占用，会自动往后找第一个空闲端口并在窗口里告诉你改用了哪个。也可以指定：`start-potato.bat 19000`
-- **日志在 `logs\potato.log`。** 服务在后台跑，出问题看这里。
-- **首次运行**要多等几分钟（装依赖 + 下 Chromium），之后就快了。
+:: 或者后台常驻（无窗口，关掉终端也不停）
+start "" .venv\Scripts\pythonw run_server.py 18080
+```
 
-### 手动启动
+后台方式启动后，停止用：
 
-不想用脚本、或者用 macOS / Linux：
+```bat
+taskkill /F /FI "IMAGENAME eq pythonw.exe"
+```
 
-    python -m venv .venv
-    # Windows
-    .venv\Scripts\python -m pip install -e .
-    .venv\Scripts\python -m playwright install chromium
-    .venv\Scripts\python -m uvicorn app.main:app --port 18080
+然后打开 <http://127.0.0.1:18080/>。
 
-    # macOS / Linux
-    python3 -m venv .venv && source .venv/bin/activate
-    pip install -e .
-    playwright install chromium
-    uvicorn app.main:app --port 18080
+### macOS / Linux
+
+```bash
+python3 -m venv .venv && source .venv/bin/activate
+pip install -e .
+playwright install chromium
+cp .env.example .env
+python run_server.py 18080
+```
+
+### 说明
+
+- **默认端口 18080。** 被占用时换一个即可，端口是启动参数：`run_server.py 19000`
+- **`run_server.py` 负责把日志写进 `logs/potato.log`。** 它同时支持 `python`（前台）和
+  `pythonw`（后台无窗口）两种启动方式，所以后台跑也有日志可查
+- **`pip install -e .` 只装本地使用所需的依赖。** Postgres / Redis / Celery / S3 / 飞书
+  这些默认关闭的集成放在 extras 里，需要时再装，例如 `pip install -e ".[feishu]"`
+  （服务端部署用 `pip install -e ".[all]"`）
+- 相对路径（`./potato.db`、`./profiles`、`./artifacts`）都锚定在项目根目录，
+  前端构建产物 `web/dist` 会被自动识别，所以从哪个目录启动都行
+
+### 前端
+
+```bash
+cd web && npm install && npm run build   # 产出 web/dist，由 API 直接托管
+```
+
+只想改后端、不碰界面的话，这一步跑一次就行，之后不用重复。
+开发期要热更新则改用 `npm run dev`（Vite 会把 `/api` 和 `/artifacts` 代理到后端）。
 
 （`pip install -e .` 会按 `pyproject.toml` 装齐全部依赖。注意 `browser-use` 和 `playwright` 的版本是**锁死**的，别随手升级——它们的接口在版本间会变。）
 
@@ -121,8 +140,7 @@ Agent 自己想清楚该点哪里；裁判读截图和动作记录下结论，**
       excel.py      Excel 用例导入导出
       # 可选集成：gitlab_*.py / feishu*.py / celery_app.py
     web/            React + Vite + Tailwind 前端
-    run_server.py   后台启动入口（写日志用）
-    start-potato.bat / stop-potato.bat / autostart-*.bat   一键脚本
+    run_server.py   启动入口：配置日志 + 拉起 uvicorn（前台或后台都用它）
     docs/           部署与配置手册
     tests/          pytest 测试（纯逻辑，不需要浏览器）
 
@@ -150,13 +168,16 @@ Agent 自己想清楚该点哪里；裁判读截图和动作记录下结论，**
 ## 常见问题
 
 **关掉窗口服务就断了？**
-现在不会了。`start-potato.bat` 把服务放在后台跑，窗口只是用来显示启动过程。要停服务请用 `stop-potato.bat`。
+如果你用 `python run_server.py`（前台）启动，是的，关窗口就停。
+想让它常驻就用后台方式：`start "" .venv\Scripts\pythonw run_server.py 18080`，
+关掉终端也不会停，日志照样写进 `logs/potato.log`。
 
 **提示端口被占用？**
-默认端口是 18080，被占用时会自动往后找空闲端口并告诉你结果。想固定某个端口就 `start-potato.bat 19000`。
+换一个端口就行，端口是启动参数：`run_server.py 19000`。
 
 **点「运行」报 `No module named 'browser_use'`？**
-依赖没装全。重新双击 `start-potato.bat` 即可，它会补齐。这类依赖是懒加载的，所以缺了不影响服务启动，只在真正跑用例时才暴露。
+依赖没装全。执行 `.venv\Scripts\python -m pip install -e .` 补齐。
+这类依赖是懒加载的，所以缺了不影响服务启动，只在真正跑用例时才暴露。
 
 **跑用例报「找不到浏览器」？**
 Chromium 没下载。执行 `.venv\Scripts\python -m playwright install chromium`。

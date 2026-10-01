@@ -16,9 +16,24 @@ auth.json
 *.egg-info/
 .DS_Store
 
+# Editor / manual backups and bundler temp files. A dated .bak-<name> or a
+# vite.config.ts.timestamp-*.mjs is never source — they only bloat a clone.
+# The old copies already committed are recoverable from git history if ever needed.
+*.bak
+*.bak-*
+*.bak.*
+.bak-*/
+*.orig
+*~
+*.timestamp-*.mjs
+
 web/node_modules/
 web/dist/
 web/tsconfig.tsbuildinfo
+
+# background server runtime state: PID file + uvicorn logs
+.potato.pid
+logs/
 
 *.png
 # but keep app icons served by the web app

@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from app.feishu import (
     _confirmation,
     _parse_bind_command,
@@ -190,6 +192,11 @@ def test_ws_sdk_event_roundtrips_through_parser() -> None:
     """SDK MentionEvent objects (no .get) must be normalized before parsing —
     passing them through raw crashed the parser and swallowed @-text messages."""
     from types import SimpleNamespace as NS
+
+    # Feishu is an optional integration: app/feishu_ws.py is a separate worker process
+    # that imports the lark SDK at module level, and the SDK lives in the `feishu` extra.
+    # A local install never has it, so this test skips instead of failing.
+    pytest.importorskip("lark_oapi", reason="飞书集成未安装（pip install -e '.[feishu]'）")
 
     from app.feishu_ws import _to_payload
 

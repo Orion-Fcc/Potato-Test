@@ -102,9 +102,9 @@ store to upload instead (see [configuration.md](configuration.md#artifact-storag
 ## Running without Docker
 
 ```bash
-uv pip install -e .
+pip install -e .
 playwright install --with-deps chromium
-cd web && pnpm install && pnpm build && cd ..
+cd web && npm install && npm run build && cd ..
 export WEB_DIST=$PWD/web/dist
 alembic upgrade head
 uvicorn app.main:app --host 0.0.0.0 --port 8000

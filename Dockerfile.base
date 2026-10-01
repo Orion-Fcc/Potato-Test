@@ -44,11 +44,14 @@ ENV PATH="/root/.local/bin:$PATH" \
 
 WORKDIR /app
 
-# Python deps straight from pyproject.toml (installs [project.dependencies],
-# including browser-use[video] + playwright + celery/redis). Only pyproject is
-# copied, so app-code changes never invalidate this layer.
+# Python deps straight from pyproject.toml. The `all` extra is REQUIRED here:
+# pyproject.toml keeps only the local single-user dependencies in
+# [project.dependencies], and puts Postgres / Redis / Celery / S3 / Feishu into
+# [project.optional-dependencies] so a plain `pip install -e .` stays lean. The
+# container runs the full stack, so it must opt into every extra.
+# Only pyproject is copied, so app-code changes never invalidate this layer.
 COPY pyproject.toml ./
-RUN uv pip install --system --no-cache -r pyproject.toml \
+RUN uv pip install --system --no-cache -r pyproject.toml --extra all \
         ${PIP_INDEX_URL:+--index-url ${PIP_INDEX_URL}} \
         ${PIP_EXTRA_INDEX_URL:+--extra-index-url ${PIP_EXTRA_INDEX_URL}}
 

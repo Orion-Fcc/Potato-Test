@@ -53,6 +53,10 @@ def main() -> int:
     _setup_logging()
     log = logging.getLogger("potato-test.server")
 
+    # 让 app 知道自己在哪个端口上，助手要回调自己的 REST 接口（读 /openapi.json）。
+    # 硬编码 8000 会在换端口后让助手彻底失去 API 目录，且报错与真实原因毫无关联。
+    os.environ.setdefault("POTATO_PORT", str(port))
+
     # 必须切到项目根：`app/config.py` 用 env_file=".env"（相对当前工作目录）读取配置。
     # 如果本脚本是通过快捷方式/桌面图标启动的，工作目录会是那个图标所在的位置，
     # 于是 .env 根本找不到 —— 表现为静默用默认值：数据库变成默认的 potato-test.db，
@@ -88,6 +92,18 @@ def main() -> int:
         "已设置" if s.gateway_api_key else "未设置",
     )
     log.info("数据库 %s", s.database_url)
+
+    # 继承来的代理变量是"能启动、但所有 LLM 调用都报 APIConnectionError"的头号原因：
+    # httpx 默认 trust_env=True，会把请求发给启动时存在、之后已经死掉的代理端口。
+    # 出网本来就不需要代理时它只是噪音，需要时又必须留着，所以两种都明确记下来。
+    _proxy = {k: os.environ[k] for k in ("HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY") if os.environ.get(k)}
+    if _proxy:
+        log.info(
+            "检测到代理环境变量 %s —— 已按 gateway_ignore_proxy=%s 处理（%s）",
+            _proxy,
+            s.gateway_ignore_proxy,
+            "忽略，直连网关" if s.gateway_ignore_proxy else "沿用，网关需经代理才能访问",
+        )
 
     # log_config=None：保留上面配置的根 logger，否则 uvicorn 会用自己的配置覆盖掉文件输出。
     uvicorn.run(app, host="127.0.0.1", port=port, log_config=None, access_log=False)

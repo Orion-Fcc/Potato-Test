@@ -477,10 +477,19 @@ async def test_admin_llm() -> dict:
     try:
         from openai import AsyncOpenAI
 
+        import httpx
+
+        s = get_settings()
+        # Mirror the real client exactly (same proxy policy, same TLS policy), otherwise
+        # this probe says "ok" while the assistant/judge still fail — the most misleading
+        # possible outcome for a diagnostic button.
         client = AsyncOpenAI(
             api_key=cfg.api_key or "not-needed",
             base_url=cfg.base_url,
             timeout=25.0,
+            http_client=httpx.AsyncClient(
+                verify=s.gateway_verify_ssl, trust_env=not s.gateway_ignore_proxy
+            ),
         )
         resp = await client.chat.completions.create(
             model=model, messages=[{"role": "user", "content": "ping"}], max_tokens=1

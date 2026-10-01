@@ -73,7 +73,9 @@ async def openai_client() -> AsyncOpenAI:
     """Async OpenAI client for the judge. verify=False tolerates a self-signed gateway cert."""
     s = get_settings()
     cfg = await llm_config()
-    http = httpx.AsyncClient(verify=s.gateway_verify_ssl, timeout=60)
+    http = httpx.AsyncClient(
+        verify=s.gateway_verify_ssl, timeout=60, trust_env=not s.gateway_ignore_proxy
+    )
     return AsyncOpenAI(base_url=cfg.base_url, api_key=cfg.api_key, http_client=http)
 
 
@@ -85,7 +87,9 @@ async def browser_use_llm():
     cfg = await llm_config()
     # browser-use's ChatOpenAI passes http_client straight to AsyncOpenAI; use it to
     # tolerate the gateway's self-signed cert (verify=False), same as the judge client.
-    http = httpx.AsyncClient(verify=s.gateway_verify_ssl, timeout=120)
+    http = httpx.AsyncClient(
+        verify=s.gateway_verify_ssl, timeout=120, trust_env=not s.gateway_ignore_proxy
+    )
     return ChatOpenAI(
         # browser-use agent can run a different (e.g. local VLM) model than the judge;
         # falls back to the shared model when no agent model is set.

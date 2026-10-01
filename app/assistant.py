@@ -40,8 +40,32 @@ _CATALOG_TTL_S = 60.0
 
 
 def _self_base() -> str:
-    """Loopback base for the API's own REST routes."""
-    return os.environ.get("ASSISTANT_SELF_BASE", "http://127.0.0.1:8000").rstrip("/")
+    """Loopback base for the API's own REST routes.
+
+    The port must be the one THIS process is actually listening on. Hard-coding 8000
+    was wrong the moment the operator ran on a different port (the launcher uses
+    18080): every self-call then failed with a 502 from the proxy that answered on
+    8000 instead, and the assistant silently lost its whole API catalog.
+    Resolution order: explicit env override -> the port uvicorn was started with.
+    """
+    override = os.environ.get("ASSISTANT_SELF_BASE")
+    if override:
+        return override.rstrip("/")
+    port = os.environ.get("POTATO_PORT") or _listening_port() or "8000"
+    return f"http://127.0.0.1:{port}"
+
+
+def _listening_port() -> str | None:
+    """The port this very process bound. Falls back to None when undetectable."""
+    try:
+        import sys
+
+        argv = sys.argv
+        if len(argv) > 1 and argv[1].isdigit():
+            return argv[1]
+    except Exception:  # pragma: no cover — never let a probe break a turn
+        pass
+    return None
 
 
 async def _api_catalog() -> str:
@@ -56,7 +80,11 @@ async def _api_catalog() -> str:
         return _catalog_cache["text"]
     lines: list[str] = []
     try:
-        async with httpx.AsyncClient(timeout=20) as c:
+        # trust_env=False is mandatory: this is a LOOPBACK call. When the process
+        # inherits a proxy env var (the sandbox injects HTTP(S)_PROXY), httpx would
+        # send 127.0.0.1 through it, and a stale proxy port turns every self-call
+        # into "All connection attempts failed".
+        async with httpx.AsyncClient(timeout=20, trust_env=False) as c:
             spec = (await c.get(_self_base() + "/openapi.json")).json()
         for path, ops in sorted((spec.get("paths") or {}).items()):
             for method, meta in ops.items():
@@ -340,7 +368,8 @@ def _tools() -> list[dict]:
 
 
 async def _api(method: str, path: str, body: dict | None = None):
-    async with httpx.AsyncClient(timeout=60) as c:
+    # Loopback: never route through a proxy (see _api_catalog for why).
+    async with httpx.AsyncClient(timeout=60, trust_env=False) as c:
         r = await c.request(method, _self_base() + path, json=body)
         if r.status_code >= 400:
             return {"error": f"HTTP {r.status_code}", "detail": r.text[:400]}

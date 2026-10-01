@@ -67,6 +67,12 @@ creates its own encryption key on first start. All you need is Python ≥ 3.11.
 **Windows** — double-click `start-potato.bat` (it creates the venv, installs deps, builds the
 frontend if needed, and opens the browser). Or by hand:
 
+> **Port**: defaults to `18080`. If it is taken, the launcher scans upward for a free port
+> automatically, so a leftover container or another service can never block startup. Pass an
+> explicit one when you want it: `start-potato.bat 19000`. (`18000` is the stock value and is
+> commonly held by an older Docker deployment, where the listener shows up as Docker Desktop's
+> `com.docker.backend.exe` rather than a Python process.)
+
 ```bat
 python -m venv .venv
 .venv\Scripts\python -m pip install fastapi "uvicorn[standard]" "sqlalchemy[asyncio]" aiosqlite ^
@@ -74,7 +80,7 @@ python -m venv .venv
     openpyxl playwright
 .venv\Scripts\python -m playwright install chromium
 copy .env.example .env
-.venv\Scripts\python -m uvicorn app.main:app --port 18000
+.venv\Scripts\python -m uvicorn app.main:app --port 18080
 ```
 
 **macOS / Linux**
@@ -85,10 +91,10 @@ pip install fastapi "uvicorn[standard]" "sqlalchemy[asyncio]" aiosqlite pydantic
     httpx openai sse-starlette python-multipart cryptography bcrypt pyjwt openpyxl playwright
 playwright install chromium
 cp .env.example .env
-uvicorn app.main:app --port 18000
+uvicorn app.main:app --port 18080
 ```
 
-Then open <http://127.0.0.1:18000>. Configure the LLM under **System settings → LLM model**
+Then open <http://127.0.0.1:18080>. Configure the LLM under **System settings → LLM model**
 (click **Test connection** to verify before running anything) — or set `GATEWAY_BASE_URL` /
 `GATEWAY_API_KEY` / `GATEWAY_MODEL` in `.env`. Both work; the UI overrides `.env`.
 

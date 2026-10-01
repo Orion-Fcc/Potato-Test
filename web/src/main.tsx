@@ -44,6 +44,16 @@ function RequireAdmin({ children }: { children: React.ReactNode }) {
   return <>{children}</>;
 }
 
+// User management presupposes users. Without auth there is no login, so the page (invites,
+// roles, password resets) has nothing to act on — hiding the nav item alone would leave it
+// reachable by typing the URL.
+function RequireAuthEnabled({ children }: { children: React.ReactNode }) {
+  const { loading, authEnabled } = useAuth();
+  if (loading) return <RouteFallback />;
+  if (!authEnabled) return <Navigate to="/" replace />;
+  return <>{children}</>;
+}
+
 const router = createBrowserRouter([
   { path: "/login", element: S(<LoginPage />) },
   { path: "/invite/:token", element: S(<InvitePage />) },
@@ -56,7 +66,14 @@ const router = createBrowserRouter([
     ),
     children: [
       { path: "/", element: S(<Projects />) },
-      { path: "/admin/users", element: <RequireAdmin>{S(<AdminUsersPage />)}</RequireAdmin> },
+      {
+        path: "/admin/users",
+        element: (
+          <RequireAdmin>
+            <RequireAuthEnabled>{S(<AdminUsersPage />)}</RequireAuthEnabled>
+          </RequireAdmin>
+        ),
+      },
       { path: "/admin/settings", element: <RequireAdmin>{S(<AdminSettingsPage />)}</RequireAdmin> },
       { path: "/projects/:pid", element: <Navigate to="overview" replace /> },
       { path: "/projects/:pid/overview", element: S(<OverviewPage />) },

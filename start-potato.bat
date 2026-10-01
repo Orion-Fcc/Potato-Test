@@ -6,7 +6,7 @@ rem  PORT: defaults to 18080 and AUTO-AVOIDS a busy port by scanning upward, so 
 rem  stale deployment holding 18000 can never block startup again. Override with an
 rem  argument:  start-potato.bat 19000
 rem
-rem  First run  : creates .venv, installs backend deps, initialises the SQLite DB.
+rem  First run  : creates .venv, installs deps, downloads Chromium, inits the SQLite DB.
 rem  Later runs : starts instantly.
 rem
 rem  Encoding note: this file is saved as GBK and deliberately does NOT call
@@ -65,11 +65,11 @@ if not "%PORT%"=="%PORT_START%" (
 
 rem ---- 1. Python -------------------------------------------------------------
 if not exist "%PY%" goto :make_venv
-echo   [1/4] Python 就绪。
+echo   [1/5] Python 就绪。
 goto :check_deps
 
 :make_venv
-echo   [1/4] 正在创建 Python 虚拟环境 .venv ...
+echo   [1/5] 正在创建 Python 虚拟环境 .venv ...
 where python >nul 2>&1
 if errorlevel 1 (
   where py >nul 2>&1
@@ -94,14 +94,18 @@ if not exist "%PY%" (
 echo         完成。
 
 rem ---- 2. Backend dependencies ----------------------------------------------
+rem  browser_use AND playwright are checked here on purpose: they are what actually
+rem  execute a test case, and the app imports them lazily, so a missing one does not stop
+rem  the server from starting — it only explodes the moment you click "运行". Checking only
+rem  the web framework is exactly how you ship a build that boots but cannot run a case.
 :check_deps
-"%PY%" -c "import fastapi, sqlalchemy, aiosqlite, uvicorn, sse_starlette" >nul 2>&1
+"%PY%" -c "import fastapi, sqlalchemy, aiosqlite, uvicorn, sse_starlette, playwright, browser_use" >nul 2>&1
 if errorlevel 1 goto :install_deps
-echo   [2/4] 后端依赖已安装。
-goto :check_env
+echo   [2/5] 后端依赖已安装。
+goto :check_browser
 
 :install_deps
-echo   [2/4] 正在安装后端依赖（首次约 2-5 分钟）...
+echo   [2/5] 正在安装后端依赖（首次约 5-10 分钟，browser-use 依赖树较大）...
 echo.
 rem  Split into small batches on purpose: a dropped connection mid-batch rolls the
 rem  whole batch back, and one giant install would silently leave you with nothing.
@@ -109,9 +113,9 @@ rem  whole batch back, and one giant install would silently leave you with nothi
 for %%P in (
   "fastapi uvicorn[standard]"
   "sqlalchemy[asyncio] aiosqlite pydantic-settings"
-  "httpx openai sse-starlette python-multipart"
+  "httpx sse-starlette python-multipart"
   "cryptography bcrypt pyjwt openpyxl"
-  "playwright"
+  "playwright==1.63.0"
 ) do (
   echo   ---- installing %%P
   "%PIP%" install --disable-pip-version-check %%P
@@ -127,27 +131,53 @@ for %%P in (
     exit /b 1
   )
 )
+echo   ---- installing browser-use[video]==0.13.10 (大依赖，耐心等待)
+"%PIP%" install --disable-pip-version-check "browser-use[video]==0.13.10"
+if errorlevel 1 (
+  echo.
+  echo   [错误] 安装 browser-use 失败。没有它无法执行任何测试用例。
+  echo          若在代理环境，请确认 HTTP_PROXY / HTTPS_PROXY 已设置。
+  echo.
+  pause
+  exit /b 1
+)
 echo         依赖安装完成。
 
-rem ---- 3. .env --------------------------------------------------------------
+rem ---- 3. Chromium ----------------------------------------------------------
+rem  Installing the playwright package does NOT download a browser. Without this step
+rem  every run fails with "Executable doesn't exist".
+:check_browser
+if exist "%USERPROFILE%\AppData\Local\ms-playwright" (
+  echo   [3/5] Chromium 已就绪。
+  goto :check_env
+)
+echo   [3/5] 正在下载 Chromium（约 150MB，用于执行测试用例）...
+"%PY%" -m playwright install chromium
+if errorlevel 1 (
+  echo   [警告] Chromium 下载失败。服务能启动，但跑用例时会报找不到浏览器。
+  echo          联网后手动重试： .venv\Scripts\python -m playwright install chromium
+)
+echo         完成。
+
+rem ---- 4. .env --------------------------------------------------------------
 :check_env
 if not exist "%~dp0.env" (
   if exist "%~dp0.env.example" (
-    echo   [3/4] 未找到 .env，正在从 .env.example 复制...
+    echo   [4/5] 未找到 .env，正在从 .env.example 复制...
     copy /y "%~dp0.env.example" "%~dp0.env" >nul
   ) else (
-    echo   [3/4] 未找到 .env，将使用内置默认值。
+    echo   [4/5] 未找到 .env，将使用内置默认值。
   )
 ) else (
-  echo   [3/4] .env 已存在。
+  echo   [4/5] .env 已存在。
 )
 
-rem ---- 4. Frontend -----------------------------------------------------------
+rem ---- 5. Frontend -----------------------------------------------------------
 if exist "%~dp0web\dist\index.html" (
-  echo   [4/4] 前端已构建。
+  echo   [5/5] 前端已构建。
   goto :run
 )
-echo   [4/4] 未发现前端构建产物 web\dist。
+echo   [5/5] 未发现前端构建产物 web\dist。
 echo.
 echo         前端需要先构建一次。请选择：
 echo           1. 现在构建（需要 Node.js，约 1-3 分钟）
@@ -180,7 +210,7 @@ if not exist "%~dp0web\dist\index.html" (
   echo   [警告] 前端构建未产出 web\dist\index.html，界面可能不可用。
 )
 
-rem ---- 5. run ----------------------------------------------------------------
+rem ---- run ----------------------------------------------------------------
 :run
 echo.
 echo   ============================================
@@ -191,7 +221,7 @@ echo     界面地址 : http://127.0.0.1:%PORT%/
 echo     API 文档 : http://127.0.0.1:%PORT%/docs
 echo     停止服务 : 按 Ctrl+C，或直接关闭本窗口
 echo.
-echo     提示：本项目默认免登录（AUTH_ENABLED=false）。
+echo     提示：本项目默认免登录（AUTH_ENABLED=false），单人使用无需账号。
 echo           LLM 配置在 界面 - 系统设置 里改，改完立即生效。
 echo.
 

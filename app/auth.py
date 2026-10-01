@@ -23,8 +23,24 @@ RESET_TTL_HOURS = 2
 
 
 def _secret() -> str:
+    """HS256 signing key for session/reset tokens.
+
+    There is deliberately NO hardcoded fallback here. A constant like
+    "tp-dev-insecure-secret" is published with the source, so on any deployment where
+    JWT_SECRET was forgotten, anyone could forge a session cookie for any user id —
+    including an admin. That is a silent takeover, not a degraded default.
+
+    Instead we fall back to the per-install key generated on first run (app/crypto.py):
+    random, host-local, never committed. api.set_admin_llm/set_gitlab_token already
+    refuse to work when that key is missing, so this cannot become an unauthenticated
+    path either.
+    """
     s = get_settings()
-    return s.jwt_secret or s.secret_key or "tp-dev-insecure-secret"
+    if s.jwt_secret:
+        return s.jwt_secret
+    from app.crypto import _resolve_key
+
+    return _resolve_key()
 
 
 def hash_password(pw: str) -> str:

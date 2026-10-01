@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from functools import lru_cache
 from pathlib import Path
 
 from pydantic import AliasChoices, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+log = logging.getLogger("potato-test.config")
 
 
 class Settings(BaseSettings):
@@ -120,8 +123,10 @@ class Settings(BaseSettings):
     gitlab_token: str = ""
 
     # --- auth / users ---
-    # auth_enabled stays False until the login UI ships, so the app keeps working
-    # no-login during the rollout; flip it on to require login + enforce RBAC.
+    # Auth (login page, invites, password reset, per-project RBAC) is fully implemented.
+    # It defaults to False only so a single-user local install needs no setup; ANY
+    # deployment reachable by someone else must set AUTH_ENABLED=true, otherwise every
+    # endpoint is open and visitors can spend your LLM quota.
     auth_enabled: bool = False
     # Per-project RBAC by default: a user sees only projects an admin assigned them to
     # (ProjectMember owner/editor/viewer); admins see all. Set True for a shared workspace
@@ -129,6 +134,14 @@ class Settings(BaseSettings):
     shared_workspace: bool = False
     jwt_secret: str = ""  # HS256 signing key; required once auth_enabled
     jwt_ttl_hours: int = 24 * 7
+    # Session cookie Secure flag: "auto" | "true" | "false".
+    # "auto" => Secure when public_base_url is https, else not. You must set it to "true"
+    # explicitly when TLS is terminated in FRONT of the app (Cloudflare Tunnel, nginx,
+    # Caddy): the app itself still speaks plain http, so it cannot detect that the browser
+    # reached it over https — and a non-Secure cookie can then leak over a downgraded
+    # request. This is the single most common way a "we put it behind a proxy" deployment
+    # silently keeps handing out session cookies over http.
+    cookie_secure: str = "auto"
     admin_email: str = ""  # seeds the first admin on startup (with admin_password)
     admin_password: str = ""
     # Canonical public URL (domain). Drives BOTH email links (invites/notifications)
@@ -183,7 +196,43 @@ class Settings(BaseSettings):
             if tail and tail != ":memory:" and not os.path.isabs(tail.split("?", 1)[0]):
                 self.database_url = f"{head}///{(root / tail).resolve().as_posix()}"
 
+        # dotenv keeps an inline comment as the value when the value part is otherwise
+        # empty: `JWT_SECRET=   # use openssl` sets the secret to the literal text
+        # "# use openssl". Since a signing key that ships in the repository lets anyone
+        # forge a session cookie, treat a comment-shaped secret as NOT SET (we then fall
+        # back to the per-install generated key) instead of trusting it.
+        for field in ("jwt_secret", "secret_key", "gateway_api_key"):
+            value = (getattr(self, field) or "").strip()
+            if value.startswith("#"):
+                log.warning(
+                    "config: %s looks like a comment, not a value (%r) — ignoring it. "
+                    "Move the comment to its own line in .env.",
+                    field.upper(),
+                    value[:60],
+                )
+                setattr(self, field, "")
+
+        if self.auth_enabled and not self.jwt_secret:
+            # Not fatal (auth falls back to the generated key), but the operator asked for
+            # login and did not pin a signing key, so sessions reset on every restart.
+            log.warning(
+                "config: AUTH_ENABLED=true but JWT_SECRET is empty — sessions will be "
+                "signed with the auto-generated per-install key. Set JWT_SECRET=%s "
+                "to keep logins stable across restarts.",
+                "(openssl rand -hex 32)",
+            )
+
         return self
+
+    @property
+    def cookie_secure_enabled(self) -> bool:
+        """Whether the session cookie gets the Secure flag (see `cookie_secure`)."""
+        value = (self.cookie_secure or "auto").strip().lower()
+        if value in ("1", "true", "yes", "on"):
+            return True
+        if value in ("0", "false", "no", "off"):
+            return False
+        return (self.public_base_url or "").strip().lower().startswith("https://")
 
 
 @lru_cache

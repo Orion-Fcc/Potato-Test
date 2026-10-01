@@ -191,12 +191,17 @@ def _require_feature(enabled: bool, name: str) -> None:
 
 
 def _set_session_cookie(response: Response, token: str) -> None:
+    s = get_settings()
     response.set_cookie(
         auth.COOKIE_NAME,
         token,
         httponly=True,
         samesite="lax",
-        max_age=get_settings().jwt_ttl_hours * 3600,
+        # Secure matters whenever TLS terminates in front of us (tunnel / reverse proxy):
+        # this process only sees plain http, so without it the session cookie is also
+        # sent over http and can be captured by a downgrade.
+        secure=s.cookie_secure_enabled,
+        max_age=s.jwt_ttl_hours * 3600,
     )
 
 

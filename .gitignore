@@ -39,3 +39,7 @@ logs/
 # but keep app icons served by the web app
 !web/public/*.png
 !docs/screenshots/*.png
+
+# 临时文件（提交信息、一次性脚本等）
+.git_msg.tmp
+_*.tmp

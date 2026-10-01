@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -51,7 +52,15 @@ def main() -> int:
 
     _setup_logging()
     log = logging.getLogger("potato-test.server")
-    log.info("启动 Potato Test，端口 %s，工作目录 %s", port, ROOT)
+
+    # 必须切到项目根：`app/config.py` 用 env_file=".env"（相对当前工作目录）读取配置。
+    # 如果本脚本是通过快捷方式/桌面图标启动的，工作目录会是那个图标所在的位置，
+    # 于是 .env 根本找不到 —— 表现为静默用默认值：数据库变成默认的 potato-test.db，
+    # 而不是 .env 里配的库；LLM 网关地址等配置也全部丢失。
+    # 这类"能启动但配置全不对"的故障最难查，所以在导入 app 之前就切好目录。
+    if Path.cwd() != ROOT:
+        log.info("工作目录 %s 不是项目根，已切换到 %s", Path.cwd(), ROOT)
+        os.chdir(ROOT)
 
     import uvicorn
 

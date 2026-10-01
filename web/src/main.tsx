@@ -54,6 +54,16 @@ function RequireAuthEnabled({ children }: { children: React.ReactNode }) {
   return <>{children}</>;
 }
 
+// Per-project membership only decides anything when there are users AND the workspace is
+// not shared: with auth off there is nobody to grant access to, and with a shared workspace
+// every logged-in user already reaches every project. Same reasoning as the nav item.
+function RequirePerProjectRbac({ children }: { children: React.ReactNode }) {
+  const { loading, authEnabled, sharedWorkspace } = useAuth();
+  if (loading) return <RouteFallback />;
+  if (!authEnabled || sharedWorkspace) return <Navigate to="/" replace />;
+  return <>{children}</>;
+}
+
 const router = createBrowserRouter([
   { path: "/login", element: S(<LoginPage />) },
   { path: "/invite/:token", element: S(<InvitePage />) },
@@ -84,7 +94,10 @@ const router = createBrowserRouter([
       { path: "/projects/:pid/runs/:rid", element: S(<RunReport />) },
       { path: "/projects/:pid/compare", element: S(<ComparePage />) },
       { path: "/projects/:pid/issues", element: S(<IssuesPage />) },
-      { path: "/projects/:pid/members", element: S(<MembersPage />) },
+      {
+        path: "/projects/:pid/members",
+        element: <RequirePerProjectRbac>{S(<MembersPage />)}</RequirePerProjectRbac>,
+      },
       { path: "/projects/:pid/settings", element: S(<SettingsPage />) },
     ],
   },

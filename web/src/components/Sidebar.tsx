@@ -274,7 +274,7 @@ export function Sidebar({
   const current = projects.find((p) => p.id === pid);
   const { t, i18n } = useTranslation();
   const lang = i18n.language;
-  const { authEnabled, isAdmin, user } = useAuth();
+  const { authEnabled, sharedWorkspace, isAdmin, user } = useAuth();
   return (
     <aside
       className={clsx(
@@ -369,16 +369,23 @@ export function Sidebar({
                 {!collapsed && g.label && <div className="tp-nav-label px-2 pb-1.5">{t(g.label)}</div>}
                 {collapsed && gi > 0 && <div className="mx-2 mb-2 border-t border-[var(--line)]" />}
                 <div className="space-y-0.5">
-                  {g.items.map(({ key, label, Icon }) => (
-                    <Item
-                      key={key}
-                      to={`/projects/${pid}/${key}`}
-                      active={section === key}
-                      Icon={Icon}
-                      label={t(label)}
-                      collapsed={collapsed}
-                    />
-                  ))}
+                  {g.items.map(({ key, label, Icon }) => {
+                    // 「成员」是给「有登录用户 + 未开共享工作区」的项目做按项目授权的。
+                    // 免登录（单人本地）时根本没有"用户"概念；开了共享工作区后
+                    // 所有登录用户本来就能访问全部项目。两种情况下这一项都没有意义，
+                    // 留着只会让人以为还需要配置什么。
+                    if (key === "members" && !(authEnabled && !sharedWorkspace)) return null;
+                    return (
+                      <Item
+                        key={key}
+                        to={`/projects/${pid}/${key}`}
+                        active={section === key}
+                        Icon={Icon}
+                        label={t(label)}
+                        collapsed={collapsed}
+                      />
+                    );
+                  })}
                 </div>
               </div>
             ))}

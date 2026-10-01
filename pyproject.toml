@@ -26,10 +26,13 @@ dependencies = [
     "bcrypt>=4.1",              # password hashing
     "pyjwt>=2.8",               # session JWTs (httpOnly cookie)
     "lark-oapi>=1.4",           # Feishu bot: long-connection (WebSocket) event worker
-    # browser automation. Versions churn — pin exact after first `uv pip install`
-    # and verify the recording knobs (record_video_dir / traces_dir) against it.
-    "browser-use[video]",
-    "playwright>=1.44",
+    # Browser automation. Pinned EXACTLY, and to the combo this code was verified against:
+    # browser-use's Agent kwargs (max_actions_per_step / step_timeout / use_vision /
+    # register_new_step_callback) and its ChatOpenAI signature change between releases, and
+    # browser-use also pins openai<3 (2.26.0 here). Letting pip resolve these freely is how
+    # you get an app that imports fine but cannot start a run.
+    "browser-use[video]==0.13.10",
+    "playwright==1.63.0",
 ]
 
 [project.optional-dependencies]

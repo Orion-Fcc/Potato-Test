@@ -331,13 +331,19 @@ export function Sidebar({
                 {!collapsed && (
                   <div className="tp-nav-label px-2 pb-1.5 pt-4">{t("Admin")}</div>
                 )}
-                <Item
-                  to="/admin/users"
-                  active={false}
-                  Icon={Users}
-                  label={t("Users")}
-                  collapsed={collapsed}
-                />
+                {/* Users only means something when there IS a concept of users. With
+                    AUTH_ENABLED=false this is a single-user install: nobody logs in,
+                    nobody can be invited, and the page is pure noise. System settings
+                    below stays visible either way — that is where the LLM is configured. */}
+                {authEnabled && (
+                  <Item
+                    to="/admin/users"
+                    active={false}
+                    Icon={Users}
+                    label={t("Users")}
+                    collapsed={collapsed}
+                  />
+                )}
                 <Item
                   to="/admin/settings"
                   active={false}

@@ -62,9 +62,32 @@ def main() -> int:
         log.info("工作目录 %s 不是项目根，已切换到 %s", Path.cwd(), ROOT)
         os.chdir(ROOT)
 
+    # 显式汇报 .env 到底有没有被读到。配置读不到时 app 不会报错，只会安静地用默认值
+    # （默认 LLM 网关是 api.openai.com / gpt-4o，默认数据库是另一个文件名），
+    # 症状是"界面能开、但设置看起来不对"，很难查。这里至少留下一条明确记录。
+    env_file = ROOT / ".env"
+    if env_file.is_file():
+        log.info("已加载配置文件 %s", env_file)
+    else:
+        log.warning(
+            "没有找到 %s —— 全部配置将使用内置默认值（LLM 会指向 api.openai.com 且无密钥）。"
+            "请从 .env.example 复制一份并填好。",
+            env_file,
+        )
+
     import uvicorn
 
+    from app.config import get_settings
     from app.main import app
+
+    s = get_settings()
+    log.info(
+        "LLM 网关 %s / 模型 %s （密钥%s）",
+        s.gateway_base_url,
+        s.agent_model or s.gateway_model,
+        "已设置" if s.gateway_api_key else "未设置",
+    )
+    log.info("数据库 %s", s.database_url)
 
     # log_config=None：保留上面配置的根 logger，否则 uvicorn 会用自己的配置覆盖掉文件输出。
     uvicorn.run(app, host="127.0.0.1", port=port, log_config=None, access_log=False)

@@ -23,6 +23,12 @@ class Settings(BaseSettings):
     gateway_model: str = "gpt-4o"  # shared default; the judge always uses this
     agent_model: str = ""  # browser-use agent model; empty falls back to gateway_model
     gateway_verify_ssl: bool = True
+    # Ignore HTTP(S)_PROXY / NO_PROXY from the environment when calling the gateway and
+    # the loopback API. httpx defaults to trust_env=True, which means a proxy var that is
+    # present at launch but dead later (a rotating sandbox proxy, a closed VPN client)
+    # silently turns every LLM call into APIConnectionError: Connection error.
+    # Set GATEWAY_IGNORE_PROXY=false if the gateway is genuinely only reachable via proxy.
+    gateway_ignore_proxy: bool = True
     gateway_max_tokens: int = 16000  # completion cap for the browser agent's structured output
     agent_max_tokens: int = 0  # cap for the browser agent's per-step call; 0 = use gateway_max_tokens
     report_language: str = "Chinese (简体中文)"  # language for agent reasoning + judge reason

@@ -152,8 +152,10 @@ def test_real_history_baseline_is_meaningful():
 # ══════════════════════════════════════════════════════════════════
 
 # agent 原话节选：明确说做不到，页面卡在加载占位，0 个可交互元素。
+# ★ 地址用 RFC 2606 保留域名（example.com），不要写真实内网地址 ——
+#   本仓库是公开的，检查器会在 --head 阶段拦下真实标识。
 _CASE_187_ANSWER = (
-    "无法完成核对。访问目标地址 http://10.152.126.139:8600/training/resource-management/config "
+    "无法完成核对。访问目标地址 http://example.invalid/training/resource-management/config "
     "时页面未能真正加载：页面上只显示一条「正在加载中请稍后......」的占位文本，"
     "浏览器状态里没有任何可交互元素（0 links, 0 interactive），"
     "也没有出现登录框、菜单或资源审批配置列表。"

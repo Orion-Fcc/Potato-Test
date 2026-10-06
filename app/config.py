@@ -167,6 +167,30 @@ class Settings(BaseSettings):
     # 结论：要真正复用，得接管 browser-use 的 session/事件总线生命周期，维护成本高于收益。
     # 代码保留（browser_reuse=True 可再试），但默认走"一用例一浏览器"的稳妥路径。
     browser_reuse: bool = False
+    # ★ 用哪个浏览器跑用例。
+    #
+    # 背景：browser-use 默认拉一份自己的 Chromium（ms-playwright/chromium-*，本机实测
+    # 启动 6-7s）。但本机本来就装了 Edge / Chrome —— 用自己的浏览器有两个好处：
+    #   1. 少一份几百 MB 的重复下载与版本漂移风险；
+    #   2. 真实用户就是用 Edge/Chrome 访问被测系统，同一渲染内核的结论更可信。
+    #
+    # 实测（本机 2026-10-06，browser-use 0.13.10 + 系统 Edge）：
+    #   BrowserProfile(executable_path=<msedge.exe>, headless=True, args=["--no-proxy-server"])
+    #   → 启动 1.4s，导航/DOM 读取/agent 决策全链路正常，比自带 Chromium 更快。
+    #
+    # 候选值：
+    #   ""      = 自动探测（默认）：按下面 BROWSER_CANDIDATES 的顺序找第一个存在的
+    #   "edge"  = 强制 Edge        "chrome" = 强制 Chrome        "bundled" = 强制内置 Chromium
+    #   其它值  = 直接当成可执行文件的绝对路径（逃生口，指定公司内网定制浏览器）
+    #
+    # 传绝对路径时不校验存在性 —— 交由 Playwright 启动时报错，那条信息比我们自己
+    # 编造的一句"找不到"要准得多（browser_reuse 那次教训：自己猜状态不如让底层说话）。
+    browser_executable: str = ""
+    # 自动探测的候选顺序，逗号分隔（**不用 tuple**：pydantic-settings 对 .env 里的
+    # 复杂类型要按 JSON 解析，写成 `a,b` 会直接校验失败；逗号串是用户能一眼看懂、
+    # 一眼就能改的写法）。Edge 排第一：Windows 自带、装机率最高、实测启动最快。
+    # 想改成"永远用 Chrome"就写 BROWSER_CANDIDATES=chrome,edge。
+    browser_candidates: str = "edge,chrome"
     # Trace capture adds a second recording stream; off = faster, no timeline trace.
     case_record_trace: bool = True
     # browser-use draws an index badge on every interactive element each step. On a

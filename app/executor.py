@@ -19,6 +19,7 @@ import tempfile
 import time
 from dataclasses import dataclass, field
 
+from app import browser_binary
 from app.config import get_settings
 from app.failure_narrative import describe_failure
 from app.judge import judge
@@ -2084,6 +2085,14 @@ async def execute_case(spec: CaseSpec, on_step=None, should_abort=None) -> Resul
             #  * record_video_dir / traces_dir cost real CPU (Playwright encodes every
             #    frame). Both are opt-out via settings so a fast local loop can skip them;
             #    enabled by default to keep the report's replay feature.
+            #
+            # 用哪个浏览器在这里一次性定好，而不是每步再算：探测只是文件存在性检查，
+            # 很便宜，但每个用例重算一次会让日志里出现"同一用例前后选了不同浏览器"
+            # 这种读起来像 bug 的行。整轮 run 用同一个值。
+            _sys_browser = browser_binary.resolve_browser_executable(
+                s.browser_executable, s.browser_candidates
+            )
+
             def make_browser():
                 extra: dict = {}
                 if _record_video:
@@ -2125,6 +2134,11 @@ async def execute_case(spec: CaseSpec, on_step=None, should_abort=None) -> Resul
                     # 注意这只影响浏览器进程，Python 侧调 LLM 网关走的是 app/llm.py 自己的
                     # GATEWAY_IGNORE_PROXY 开关，两者互不干扰。
                     args=["--no-proxy-server"],
+                    # ★ 用系统浏览器（Edge/Chrome）而不是 browser-use 自带的 Chromium。
+                    # 探测逻辑在 app/browser_binary.py（纯函数、可单测），这里只传结果。
+                    # None = 没找到系统浏览器，browser-use 用自带 Chromium —— 那也是
+                    # 完全能跑的配置，所以这不是错误路径，不需要兜底告警。
+                    **({"executable_path": _sys_browser} if _sys_browser else {}),
                     # 拟人 + 安全的批处理节奏。
                     #
                     # MAX_ACTIONS_PER_STEP=2 允许"同一区域的连续操作"，但**点击永远独占一步**

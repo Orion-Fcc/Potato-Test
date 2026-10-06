@@ -39,7 +39,7 @@
 ### 手动启动（想在前台看日志时）
 
 ```bat
-cd /d <PROJECT_DIR>
+cd /d D:\<WORK_DIR>\Potato_Test
 .venv\Scripts\python run_server.py 18081
 ```
 

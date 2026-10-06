@@ -1,7 +1,7 @@
 """常驻监控：把"新出现的进程"记到文件里，用来抓"终端窗口一闪而过"的元凶。
 
 用法（在 PowerShell 或 cmd 里跑，自己按住不放，闪的时候看输出）：
-    cd D:\\<WORK_DIR>\\Potato_Test
+    cd <PROJECT_DIR>
     .venv\\Scripts\\python.exe scripts\\watch_new_processes.py
 
 它会持续打印新出现的进程名 + 父进程名 + 命令行前 120 字。

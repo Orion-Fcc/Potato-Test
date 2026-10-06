@@ -4,7 +4,7 @@
 但那需要单独跑 `python -m app.feishu_ws`（交互机器人进程），桌面 PotatoTest.bat
 并不启动它。只做推送的话，拿 chat_id 就断在这儿了，所以用接口直接查。
 
-用法（在 D:\\<WORK_DIR>\\Potato_Test 下）：
+用法（在 <PROJECT_DIR> 下）：
 
     .venv\\Scripts\\python.exe scripts\\feishu_bind_chat.py            # 列出机器人所在的群
     .venv\\Scripts\\python.exe scripts\\feishu_bind_chat.py oc_xxxxxxxx # 绑定到第一个项目

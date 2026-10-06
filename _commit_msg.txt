@@ -1,0 +1,30 @@
+chore(privacy): redact the project's real identifiers, and add a guard so they stay out
+
+The repository is public. The credentials were never in it — the gateway API key
+and the Feishu app secret live in .env and in the System settings table, and both
+were verified absent from every blob in the history. What *was* in it, in the
+version people can see, is identifying: the LLM gateway host and model name, the
+customer's name and tenant, the role-account prefix, an admin display name, the
+RFC1918 address of the system under test, and someone's local directory names.
+None of those look like a secret, which is exactly why a credential-shaped scan
+passes straight over them — and the gateway name in particular is harder to rotate
+than a key, because changing it is a process rather than a keystroke.
+
+This lands the redaction as an ordinary commit on purpose. Rewriting history would
+be the wrong tool: the repo has been public since 2026-10-01, old commits stay
+reachable by SHA, forks keep them, and a force-push breaks every existing clone —
+while a new commit removes the strings from what people actually land on.
+Rotation, not rewriting, is what protects a leaked credential.
+
+The lasting half is scripts/check_secrets.py. It fails on dangerous paths (.env,
+*.db, .potato-secret.key, profiles/, artifacts/, .workbuddy/), on the values that
+are really configured in .env and in the database, on secret-shaped strings, and on
+KNOWN_IDENTIFIERS — the explicit list of this project's real strings, which is the
+only way to catch things that do not look like credentials. The --head mode checks
+what the remote can see right now, which is the only version of that question that
+matters for a public repo. It exempts exactly two files, itself and its test,
+because a rule set cannot avoid listing what it must not contain; the exemption is
+asserted in the tests so it cannot quietly widen.
+
+The repo also turned out to have a hole: an admin display name sat in a config
+comment and appeared in nobody's replacement list. The guard found it, not my eyes.

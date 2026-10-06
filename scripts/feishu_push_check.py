@@ -2,7 +2,7 @@
 
 用途：在真的跑一遍测试之前，先确认「App 凭证 → 群会话 → 卡片」这条链路是通的。
 
-用法（在 D:\\<WORK_DIR>\\Potato_Test 下）：
+用法（在 <PROJECT_DIR> 下）：
     .venv\\Scripts\\python.exe scripts\\feishu_push_check.py
 
 它会依次做 5 件事，任何一步失败都会明确告诉你卡在哪：

@@ -58,6 +58,34 @@ _SYSTEM = (
     "When the page state is ambiguous, failed with an honest 'the evidence does not show it' "
     "is the correct answer — a confident but invented pass is the worst possible outcome, "
     "because it lets a real defect reach the report as green. "
+    # ── 编造的"数据"（2026-10-06 现场，run 12 / case 4）─────────────────────
+    # 实测：agent 声称"查询后仍显示共 11 条"，而"11"在 STEP_RESULTS 里**根本不存在** ——
+    # 它点完「查询」就宣布完成，从没读过结果页，那 11 条是它自己算的。
+    # 判定器采信了这份自述，于是报出 product_defect —— **一个并不存在的缺陷**。
+    #
+    # 为什么上面那条"do not invent anything"没拦住：它约束的是"别编动作"，
+    # 而这里编的是**结论里的数字**。数字带着笃定的语气和规整格式，
+    # 读起来就像一条真实观察。必须单独点名。
+    "CRITICAL — a number in FINAL_ANSWER is a CLAIM, not evidence. Before you accept any "
+    "count, row total, or '共 N 条', find it in STEP_RESULTS or the screenshot. If the agent "
+    "quotes numbers that appear nowhere in the observed steps, it did not read that page — "
+    "it computed or imagined the result. In that case you MUST NOT report "
+    "product_defect: a system cannot contradict an expected result that was never observed. "
+    "The correct verdict is failed with root_cause=agent_incomplete (it stopped before "
+    "reading the result), and your reason must say the conclusion was unverified. "
+    "Symmetrically, do not accept a passing verdict built on numbers that were never seen. "
+    "When a message tagged [确定性校验发现] appears, treat every number it lists as UNVERIFIED. "
+    # ── 执行未落位（同一现场的第二个信号）──────────────────────────────────
+    # case 4 最后一步 action=done、result 却是 Clicked button「查询」——
+    # 它在操作真正生效**之前**就宣布完成了。这比"数字对不上"更硬：
+    # 那是不需要任何语义理解的**时序事实**。
+    "SECOND TRAP — the agent declares completion (action=done) while the same step's result "
+    "still shows an operation being performed. That means it announced SUCCESS before the "
+    "operation took effect, so it NEVER SAW the post-operation state. Any conclusion it draws "
+    "about that state is a guess. When you see this, the verdict is failed with "
+    "root_cause=agent_incomplete, and your reason must say the agent finished before the "
+    "operation landed — never product_defect, because nothing was observed to contradict "
+    "anything. "
     # ── 反编造约束 ────────────────────────────────────────────────────────────
     # 实测抓到过判定器凭空补操作：某次 agent 的全部输出只有
     #   "Clicked input type=text role=combobox id=el-id-6768-51"
@@ -263,6 +291,39 @@ async def judge(
 ) -> Verdict:
     user = build_prompt(expected, final_answer, actions, task, evidence)
     s = get_settings()
+
+    # ★ 确定性校验：结论里引用了步骤记录里没有的计数 → 明确告诉判定器。
+    #
+    # 现场（run 12 / case 4，2026-10-06）：agent 声称"查询后仍显示共 11 条"
+    # 并据此报出product_defect，但"11"在 STEP_RESULTS 里根本不存在 ——
+    # 它在最后一步点完「查询」就宣布完成，从没读过结果页，那 11 条是它自己算的。
+    # 判定器把这份自述当证据，于是报出一个**并不存在的缺陷**，真缺陷率被污染。
+    #
+    # 这一层只提供判定器自己做不到的能力（核对数字出处），
+    # **不替它改判** —— 判失败还是通过仍由判定器决定。
+    # 理由见 app/judge_claims.py 的 docstring：误判比判松更伤。
+    from app.judge_claims import (
+        find_premature_done,
+        find_unverified_claims,
+        premature_done_note,
+        unverified_note,
+    )
+
+    # ① 执行未落位：宣布完成时操作还没真正生效
+    #    现场 case 4：第 7 步 action=done，但 result 是 Clicked button "查询" ——
+    #    它点下查询就宣布完成，从没读过结果页。这条比"编造数字"更硬：
+    #    它是**时序事实**，不需要任何语义理解。
+    _pd = find_premature_done(evidence)
+    _pd_note = premature_done_note(_pd)
+    if _pd_note:
+        user = f"{user}\n\n[确定性校验发现]\n{_pd_note}"
+
+    # ② 编造的数字：结论里的计数在步骤记录里找不到出处
+    _claims = find_unverified_claims(final_answer, evidence)
+    _claim_note = unverified_note(_claims)
+    if _claim_note:
+        user = f"{user}\n\n[确定性校验发现]\n{_claim_note}"
+
     system = f'{_SYSTEM} Write the "reason" in {s.report_language}.'
     cfg = await llm_config()
     client = await openai_client()

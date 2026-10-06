@@ -205,6 +205,68 @@ WHERE ADAPTATION STOPS — a hard line:
 """.strip()
 
 
+# 2026-10-06 别急着放弃。用户原话：「我不希望 agent 那么喜欢放弃，
+# 它可以思考怎么才能进行该用例，多花点时间没关系，但是不要无效操作」。
+#
+# ★ 为什么要单独加一条，而不是改_EFFICIENCY_RULE：
+#
+# 上面那些规则合起来把模型逼成了"遇到一点阻力就宣布做不到"。实测现场
+# （run 12 / case 4「使用范围+状态同时选」）：
+#   第 3 步 thought 说"选择课程资源"，result 实际点了 combobox 输入框；
+#   第 4 步 thought 说"打开状态下拉"，result 点了「场地资源」选项；
+#   第 5 步 thought 说"选择启用"，result 又点了 combobox；
+#   第 6 步 thought 说"点查询"，result 点了 span「启用」；
+#   第 7 步（done）result 才是 button「查询」。
+# 也就是说**筛选条件是在最后一步才真正生效的**，agent 却在同一步宣布完成，
+# 从头到尾**没读过查询结果页**，却在自述里写「预期应为 3 条」——
+# 那 3 条是它自己算的，不是从页面上读的。
+#
+# 这不是"页面加载不出来"那种真阻塞，是**交互没对上**。规则 6（"照实说做不到"）
+# 在这种时候给了它一条体面的退路：说做不到不算错。于是它选了退路。
+#
+# 关键区分（也是本条规则的命门）：
+#   **继续试的成本 vs 无效操作的成本不一样。**
+# 用户明确说了"多花点时间没关系"。所以规则不是"别放弃"，
+# 而是"**换一种确定能产生新信息的做法**"——
+# 重复同一个动作、重复点同一个坐标不是尝试，那是空转，必须停。
+_PERSIST_RULE = """
+GIVING UP IS THE LAST OPTION, NOT THE FIRST. Before you conclude that you cannot do this,
+you must have made at least two DIFFERENT attempts, each of which could have produced new
+information. Time is not the constraint; repeating yourself is.
+
+READ THIS BACK: "I could not do it" is a legitimate result ONLY when the page genuinely
+blocks you (an error page, a 500, a redirect loop, a permissions wall you cannot pass).
+It is NOT legitimate when you hit something unfamiliar — a dropdown that did not take,
+a control that moved, a popup that closed the list, a value that did not stick. Those are
+"my method did not work yet", and the honest next step is a DIFFERENT method, not a report.
+
+BEFORE YOU GIVE UP, RUN THROUGH THIS — and actually try these, in order:
+1. RE-READ THE PAGE AS IT IS NOW, not as it was when you last acted. Most "missing"
+   controls were behind a collapsed panel, a second tab, a scroll, or a row further down.
+   Take one fresh look at the current state before deciding anything.
+2. IF AN INPUT DID NOT STICK, find out what the field actually holds now: click into it,
+   read the value, or re-select from the list. Do not assume your earlier click landed —
+   verify it landed. Then continue from what is really there.
+3. IF A DROPDOWN / PICKER MISBEHAVED, close it fully (press Escape or click outside),
+   re-open it, and read the options from the freshly opened list. Options move between
+   opens; the index you used last time may now point at something else.
+4. IF THE PAGE DID NOT CHANGE, the action probably did not register. Do not click the same
+   target again. Re-read the state and choose a different control or a different route.
+5. IF YOU HAVE NO IDEA WHY SOMETHING FAILED, do something that yields information cheaply:
+   read the page text, expand the row, open the record's detail view, or check whether a
+   validation message appeared somewhere you have not looked.
+
+WHAT COUNTS AS A REAL ATTEMPT (and what does not):
+- GOOD: a different control, a re-read of the state, a different route to the same goal.
+- BAD: clicking the same element again, waiting again, pressing the same key again, or
+  re-typing the same value — none of these can teach you anything you do not already know.
+
+★ If you still cannot proceed after these, then say so — and in the SAME report name what
+you tried and what the page actually showed. A report that lists your attempts lets the
+tester fix the case; a bare "could not verify" leaves them guessing.
+""".strip()
+
+
 # 2026-10-04 自检节点（Evaluator 模式的最省形式）。
 #
 # 为什么需要它：这套系统的主要质量问题不是"跑得慢"，而是**判定不准** ——
@@ -2399,9 +2461,17 @@ async def execute_case(spec: CaseSpec, on_step=None, should_abort=None) -> Resul
                 # 顺序有讲究：_ADAPT_RULE 紧跟在 _EFFICIENCY_RULE / _ANTI_WASTE_RULE 之后，
                 # 因为它是对那两条"省步数"规则的例外说明。反过来放会让人（和模型）
                 # 读到"先看省步数、再看可以逛菜单"，理解成后者覆盖前者。
+                #
+                # _PERSIST_RULE 的位置同理：它是对 _EFFICIENCY_RULE 第 6 条
+                # （"做不到就照实说"）的**收窄**，不是放宽。用户要求"多花点时间没关系，
+                # 但不要无效操作"—— 所以它必须紧跟在这两条省步数规则之后被读到，
+                # 否则会被前面"求快"的措辞压过去（实测那正是放弃的来源）。
+                # _SELF_CHECK_RULE 永远最后：它管的是"宣布通过前再确认一遍"，
+                # 是最后一道闸，不该被夹在中间稀释。
                 extend_system_message=(
                     f"{_SCOPE_RULE}\n\n{_TOOLKIT_RULE}\n\n{_POPUP_RULE}\n\n"
                     f"{_ANTI_WASTE_RULE}\n\n{_EFFICIENCY_RULE}\n\n{_ADAPT_RULE}\n\n"
+                    f"{_PERSIST_RULE}\n\n"
                     f"{_SELF_CHECK_RULE}{_memory_note}"
                 ),
                 use_vision=False,  # 提速：不每步发整屏截图，改用无障碍树/DOM 文本
@@ -2591,7 +2661,21 @@ async def execute_case(spec: CaseSpec, on_step=None, should_abort=None) -> Resul
 
     # The browser's own read-backs ("Clicked div role=option …", "Typed …", errors) — used
     # by both the judge and the failure narrative, so build it once.
-    evidence = [str(d.get("result") or d.get("error") or "") for d in (res.diagnostics or [])]
+    #
+    # ★ 2026-10-06：改成带 `【action】` 前缀的完整形态。
+    # 原来只取 result，判定器看不到每一步"声明要做什么动作"，
+    # 于是查不出"最后一步 action=done 但其实还在点查询"这种**未落位**的执行 ——
+    # 现场 case 4 就是这样：它点下「查询」就宣布完成，从没读过结果页，
+    # 却报了个并不存在的产品缺陷。
+    # 前缀对判定器无害（它读的是文本），但让 app/judge_claims.py 能识别时序问题。
+    # 用 narrative_actions 同一个拼法，保持两处一致。
+    evidence = []
+    for _d in (res.diagnostics or []):
+        _a = str(_d.get("action") or "").strip()
+        _r = str(_d.get("result") or _d.get("error") or "").strip()
+        _bits = [b for b in (f"【{_a}】" if _a else "", _r) if b]
+        if _bits:
+            evidence.append(" ".join(_bits))
 
     # What the narrative writer gets as "what the tester did".
     #

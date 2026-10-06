@@ -283,8 +283,10 @@ from app.judge_claims import (  # noqa: E402
 )
 
 # 现场 result 5 的真实数据：agent 说没加载出来，判定器说符合预期。
+# ★地址用 RFC 2606 保留域名（example.invalid）—— 本仓库是公开的，
+#   check_secrets.py 的 --head 阶段会拦下真实内网地址（本轮踩过一次）。
 _FA5_ANSWER = (
-    "尝试访问 http://10.152.126.139:8600/training/resource-management/config，"
+    "尝试访问 http://example.invalid/training/resource-management/config，"
     "但页面显示「正在加载中请稍后......」，未能加载出预期的培训资源管理界面。"
 )
 _FA5_REASON = (

@@ -142,12 +142,16 @@ class Settings(BaseSettings):
     live_shot_every: int = 1
     # Playwright video encoding is pure CPU per frame. Off = faster, no replay video.
     case_record_video: bool = True
-    # 录制规格。**默认视口 = 屏幕分辨率**（本机实测 2880x1800），browser-use 的帧率
-    # 默认 30 —— 两者叠加后逐帧编码是每个用例都固定付出的 CPU 成本，在没有并发可用的
-    # 前提下（浏览器用例只能串行跑）这笔开销无法靠并发摊薄，只能从规格上降。
-    # 回放只需要看清操作步骤，1280x800@10fps 足够；要高清回放就把这两项调回去。
-    # 注意：这里改的是**录像**尺寸，不动 viewport —— 改 viewport 会改变页面的响应式
-    # 布局，等于改变被测对象，绝不能为了提速去动它。
+    # 录制规格。默认 1280x800@10fps；browser-use 的帧率默认 30 —— 逐帧编码是每个用例
+    # 都固定付出的 CPU 成本，在没有并发可用的前提下（浏览器用例只能串行跑）
+    # 这笔开销无法靠并发摊薄，只能从规格上降。回放只需看清操作步骤，足够。
+    # 要高清回放就把这两项调回去。
+    #
+    # 注意：这里改的是**录像**尺寸，不动 viewport。下面那句"默认视口 = 屏幕分辨率"
+    # 曾是对的、现在**过时了**：viewport 已改为 1434x825 与用户手动测试对齐
+    # （见 browser_viewport_width，那是本项目最重要的一条对齐）。
+    # 这条红线依然成立且更强：改 viewport 等于改变被测对象，
+    # **绝不能为了提速去动它** —— 只允许"与用户手动环境对齐"这一个理由。
     video_width: int = 1280
     video_height: int = 800
     video_framerate: int = 10
@@ -191,6 +195,33 @@ class Settings(BaseSettings):
     # 一眼就能改的写法）。Edge 排第一：Windows 自带、装机率最高、实测启动最快。
     # 想改成"永远用 Chrome"就写 BROWSER_CANDIDATES=chrome,edge。
     browser_candidates: str = "edge,chrome"
+    # ★ 页面视口（CSS 像素）—— 让 agent 看到的页面大小和你自己手动测时**一致**。
+    #
+    # 背景（本机 2026-10-06 实测）：
+    #   屏幕物理 2880×1800，Windows 缩放 200%（DPI 192）。
+    #   browser-use 的 headless 分支会把 `viewport` 直接设成 `screen`，
+    #   而 screeninfo 返回的是**物理像素** → 视口 = 2880×1800 CSS 像素。
+    #   你自己用 Edge（最大化）测的时候，页面真实 CSS 视口只有 **1434×825**
+    #   （实测 innerWidth/innerHeight，dpr=2）。
+    #   → 两者宽高都差约 2 倍。响应式布局（el-row/el-col 断点、表格列折叠、
+    #     侧边栏是否收起、按钮是否换行）在 2880 宽下和 1434 宽下**不是同一个页面**，
+    #     "我这儿复现不了"和"元素找不到"都会从这一步长出来。
+    #
+    # 为什么默认是 1434×825 而不是"窗口尺寸"：
+    #   2906×1730 是**窗口外框**（含标签栏/地址栏/书签栏），换算成 CSS 要除以 dpr=2
+    #   再扣掉浏览器 chrome 高度。这套换算随 Edge 版本、用户是否显示书签栏、
+    #   缩放比例而变，写死会悄悄漂。直接量 innerWidth/innerHeight 是唯一可靠来源，
+    #   而"你手动测时的视口"就是这个值。
+    #
+    # 想临时改回老行为（不推荐，会与手动测试环境不一致）：两个都设 0。
+    # 0 = 交给 browser-use 自己决定（headless 下等于 screen = 2880×1800）。
+    #
+    # ★ 注意这与"提速"无关：视口大小不改变任何等待/重试/步数策略。
+    #   它只让"被测对象"和你手动测的那个页面严格同构。
+    #   副作用是页面变窄 → 更多纵向滚动、每次采集的可见元素略少，
+    #   这是**忠实还原**而不是退化。
+    browser_viewport_width: int = 1434
+    browser_viewport_height: int = 825
     # Trace capture adds a second recording stream; off = faster, no timeline trace.
     case_record_trace: bool = True
     # browser-use draws an index badge on every interactive element each step. On a
@@ -231,6 +262,31 @@ class Settings(BaseSettings):
     # 单次 LLM 调用的墙钟上限（秒）。browser-use 默认 None = 不限制，一次卡住的调用会
     # 一直占着用例预算；step_timeout 管的是"整步"，管不住单次调用内部的挂起。
     llm_timeout_s: int = 90
+    # ★ 传输层 LLM 重试次数（OpenAI SDK 的 max_retries）。
+    #
+    # 2026-10-06 实测：一条只跑 3 步的用例，判定阶段耗掉 10.6s，日志里是 **8 次连续
+    # 429**（网关回"您已达到免费用户的 API 速率限制"）。两次都来自盲目重试：
+    #   · 判定器 app/llm.py::openai_client —— SDK 默认 max_retries=2
+    #   · agent 侧 ChatOpenAI —— browser-use 自己抬到 **5**（源码注释写着
+    #     "Increase default retries for automation reliability"）
+    #
+    # 重试对"偶发网络抖动"是对的，但对"配额耗尽"是错的：后者是**必然失败**的状态，
+    # 重试只是把一次失败拖成 5 次指数退避，时间花完结果还是失败。
+    # 传输层退避看不懂 429 的语义，交给上层按语义处理更准。
+    #
+    # 代价要说清楚：设0 意味着**真的**网络抖动也会立刻失败。实测 LLM 走内网网关，
+    # 抖动少，所以取 0 换掉那 10.6 秒是划算的。如果你的网络真的不稳，调回 2。
+    llm_max_retries: int = 0
+    # ★ 是否让 browser-use 每次启动都联网查"有没有新版本"。
+    #
+    # 实测（2026-10-06）：这个检查是 `GET https://pypi.org/pypi/browser-use/json`
+    # （browser_use/utils.py::check_latest_browser_use_version，timeout=3.0），
+    # 实测单次3.4 秒，且发生在"启动浏览器"计时之外 → **每条用例白付 3.4 秒**。
+    # 它唯一的产出是一行 "Newer version available" 提示，对执行结果毫无影响。
+    #
+    # 三态None=交给 browser-use 自己（它默认 true，即联网查），
+    # 显式 True/False 才由我们覆盖。关掉不影响功能，只影响那条提示。
+    browser_version_check: bool | None = False
     # 送进 prompt 的历史步数上限。None = 不限制，历史随步数线性增长，长用例的 prompt
     # 会越来越大、每步越来越慢。设一个上限能让长用例的每步耗时保持平稳。
     # 默认 None（不改现有行为）：调小它会丢掉早期上下文，属于**质量换速度**的取舍，

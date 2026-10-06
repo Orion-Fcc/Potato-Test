@@ -76,7 +76,12 @@ async def openai_client() -> AsyncOpenAI:
     http = httpx.AsyncClient(
         verify=s.gateway_verify_ssl, timeout=60, trust_env=not s.gateway_ignore_proxy
     )
-    return AsyncOpenAI(base_url=cfg.base_url, api_key=cfg.api_key, http_client=http)
+    return AsyncOpenAI(
+        base_url=cfg.base_url,
+        api_key=cfg.api_key,
+        http_client=http,
+        max_retries=s.llm_max_retries,
+    )
 
 
 async def browser_use_llm():
@@ -106,4 +111,18 @@ async def browser_use_llm():
         # The judge keeps the full gateway_max_tokens because it writes the verdict.
         max_completion_tokens=s.agent_max_tokens or s.gateway_max_tokens,
         add_schema_to_system_prompt=True,
+        # ★ 429 重试次数 —— 2026-10-06 实测这是当前最大的时间黑洞。
+        #
+        # 现象：一条只跑 3 步、还登录失败的用例，`判定描述` 阶段耗了 10.6s，
+        # 日志里是 **8 次连续 429**（"您已达到免费用户的 API 速率限制"），
+        # 全部来自 OpenAI SDK 的自动重试 + 指数退避。
+        #
+        # browser-use 的 ChatOpenAI 自己把默认值抬到了 **5**（源码注释：
+        # "Increase default retries for automation reliability"），比 SDK 默认的 2 更高。
+        # 对"偶发网络抖动"重试是对的；但对"配额已耗尽"这种**必然失败**的状态，
+        # 重试只是把 1 次失败拖成 5 次退避等待 —— 时间花完了，结果还是失败。
+        #
+        # 所以这里设 0：429 由上层（步骤重试 / 判定降级）按语义处理，
+        # 不让传输层盲目重试。要恢复成SDK 默认就设 2，要更激进设 5（=browser-use 原值）。
+        max_retries=s.llm_max_retries,
     )

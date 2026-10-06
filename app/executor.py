@@ -1989,6 +1989,18 @@ async def execute_case(spec: CaseSpec, on_step=None, should_abort=None) -> Resul
     s = get_settings()
     res = ResultSpec(case_id=spec.case_id)
     t0 = time.monotonic()
+    # 关掉 browser-use 的"有新版本了吗"联网检查。
+    #
+    # 2026-10-06 实测：它每次启动 Agent 都 GET https://pypi.org/pypi/browser-use/json
+    #（browser_use/utils.py::check_latest_browser_use_version，timeout=3.0），
+    # 实测这一项就吃掉 3.4 秒，而且它发生在"启动浏览器"计时**之外** —— 即每条用例
+    # 都要白付3.4 秒。它只打印一行升级提示，对执行结果零影响。
+    #
+    # 用官方环境变量而不是改库源码：browser-use 升级会覆盖 site-packages 里的改动，
+    # 而 env 是它自己认的配置入口（config.py:184读BROWSER_USE_VERSION_CHECK）。
+    # 不设置默认值 —— 用户若想看升级提示，自己在 .env 里显式设 true 即可。
+    if s.browser_version_check is False:
+        os.environ["BROWSER_USE_VERSION_CHECK"] = "false"
     # 阶段计时。日志级别默认是 WARNING（见 run_server.py），所以这些数据最后会用**一条
     # WARNING** 汇总输出 —— 否则"每用例 170 多秒固定开销"在 INFO 里根本不可见。
     # 背景：对 13 个已完成用例做线性回归得到「固定开销 ≈171s/用例、每步 ≈16.6s」，
@@ -2097,11 +2109,13 @@ async def execute_case(spec: CaseSpec, on_step=None, should_abort=None) -> Resul
                 extra: dict = {}
                 if _record_video:
                     extra["record_video_dir"] = video_dir
-                    # 录制规格：默认跟着视口走，而视口就是屏幕分辨率（本机实测
-                    # "Setting viewport to 2880x1800"），browser-use 的帧率默认 30。
-                    # 2880x1800@30fps 的逐帧编码是**每个用例固定付出**的 CPU 成本，
-                    # 而回放只需要看清步骤，不需要这个规格。回放质量与用例耗时的
-                    # 平衡点由配置控制（见 config.py 的 video_* 三项）。
+                    # 录制规格**独立于视口**（video_width/height 默认 1280×800@10fps）。
+                    # 这里原本注释写"默认跟着视口走、视口就是屏幕分辨率 2880x1800"——
+                    # 两处都不准：默认给了固定值就永远不走"跟着视口"分支，
+                    # 而视口已改为与用户手动测试对齐（1434×825，见 _viewport_kwargs）。
+                    # 为什么录像要小一号：1440p@30fps 的逐帧编码是**每个用例固定付出**的
+                    # CPU 成本，而回放只需看清步骤。1280×800 与 1434×825 宽高比接近，
+                    # 不会拉伸变形。
                     if s.video_width and s.video_height:
                         extra["record_video_size"] = {
                             "width": s.video_width,
@@ -2139,6 +2153,8 @@ async def execute_case(spec: CaseSpec, on_step=None, should_abort=None) -> Resul
                     # None = 没找到系统浏览器，browser-use 用自带 Chromium —— 那也是
                     # 完全能跑的配置，所以这不是错误路径，不需要兜底告警。
                     **({"executable_path": _sys_browser} if _sys_browser else {}),
+                    # 视口与用户手动测试环境一致（原因见 _viewport_kwargs）
+                    **_viewport_kwargs(),
                     # 拟人 + 安全的批处理节奏。
                     #
                     # MAX_ACTIONS_PER_STEP=2 允许"同一区域的连续操作"，但**点击永远独占一步**
@@ -2694,6 +2710,32 @@ def _capture_profile_dir(project_id: int | None) -> str:
     return os.path.join(root, "_capture_orphan")
 
 
+def _viewport_kwargs() -> dict:
+    """把配置里的视口宽高转成 Browser(**kwargs) 形状。
+
+    与用户手动测试环境对齐的原因与取舍写在 config.py 的 browser_viewport_width 上，
+    这里只做转换和校验，不含任何"提速"逻辑。
+
+    两个都填 0 → 返回 {}，交回 browser-use 自己决定（headless 下等于屏幕物理分辨率）。
+    只填一个 → 抛错，因为视口必须成对：半边视口会让页面比例失真，
+    排查时看起来像"页面渲染坏了"，比直接回落到默认值更浪费时间。
+    """
+    s = get_settings()
+    if s.browser_viewport_width and s.browser_viewport_height:
+        return {
+            "viewport": {
+                "width": s.browser_viewport_width,
+                "height": s.browser_viewport_height,
+            }
+        }
+    if bool(s.browser_viewport_width) != bool(s.browser_viewport_height):
+        raise ValueError(
+            f"BROWSER_VIEWPORT_WIDTH/HEIGHT 必须成对设置，当前 "
+            f"{s.browser_viewport_width}x{s.browser_viewport_height}。"
+        )
+    return {}
+
+
 async def capture_session(
     base_url: str,
     username: str,
@@ -2724,6 +2766,12 @@ async def capture_session(
         headless=True,
         keep_alive=True,
         enable_default_extensions=False,
+        # 视口必须与 execute_case 的 make_browser 完全一致。
+        # 这条路径单独 new 了一个 Browser（不走 make_browser），如果只在一处接线，
+        # 会出现"捕获登录态时看到的是 2880 宽的页面布局，真正执行时是 1434 宽"——
+        # 捕获时能点到的元素，执行时未必在视口里，且这种不一致只在特定页面偶发，
+        # 排查成本极高。抽成函数是为了让两处共用同一个真相来源。
+        **_viewport_kwargs(),
         # 项目隔离的 profile：不同项目之间绝不共用 cookies/缓存
         user_data_dir=profile,
         # 同 make_browser：别让 Chromium 继承宿主机的透明代理，

@@ -247,8 +247,21 @@ const zh: Record<string, string> = {
   "Priority · modules": "优先级 · 模块",
   "{{n}} modules": "{{n}} 个模块",
   "Step timeline": "步骤时间线",
-  "thought → action → result": "思考 → 操作 → 结果",
+  "action → result": "操作 → 结果",
+  "show AI thinking": "显示 AI 思考过程",
   "Raw agent log": "Agent 原始日志",
+  // 人工改判（2026-10-06）：AI 判定会不准，测试工程师要能自己拍板。
+  "Override verdict": "人工改判",
+  "AI verdict": "AI 判定",
+  "Your verdict": "你的判定",
+  "Reason (optional)": "改判理由（可选）",
+  "Why is the AI verdict wrong?": "AI 为什么判错了？",
+  "Revert to AI verdict": "撤销改判，回到 AI 判定",
+  "Verdict updated": "判定已更新",
+  "Reverted to the AI verdict": "已撤销改判，恢复 AI 判定",
+  "Click to override this verdict (AI judging is not always right)": "点击改判（AI 判定不一定准）",
+  "Manually overridden by {{who}}": "由 {{who}} 人工改判",
+  manual: "人工",
   "No step diagnostics captured for this run.": "本次运行未采集到步骤诊断信息。",
   " — see the step timeline below": "，详见下方步骤时间线",
   "Rename run": "重命名运行",
@@ -289,7 +302,14 @@ const zh: Record<string, string> = {
   Cancelling: "正在取消",
   "Case #{{id}} replay": "用例 #{{id}} 回放",
   "Final answer": "最终结论",
-  Steps: "步骤",
+  // 2026-10-04 失败根因分类。分类标识到中文标签的映射在**后端**
+  // （app/judge.py 的 ROOT_CAUSE_LABELS_ZH），前端直接用后端给的
+  // root_cause_label，不在这里维护第二份表 —— 两份表不同步时会冒出空白分组。
+  "Root cause": "失败根因",
+  "system defect — worth a bug report": "系统缺陷 — 建议提缺陷单",
+  // 「步骤」→「操作步骤」：缺陷描述卡片"复制"出来的文本用的是【操作步骤】，
+  // 而界面标签原来只显示"步骤"，两者对不上。这个 key 只在那一个组件里用，可以安全统一。
+  Steps: "操作步骤",
   "download operation trace (history.json)": "下载操作轨迹（history.json）",
 
   // compare
@@ -621,7 +641,19 @@ const zh: Record<string, string> = {
   "Role (optional)": "角色（可选）",
   "— default account —": "— 默认账号 —",
   "Account saved": "账号已保存",
-  "Runs as (role) — which account executes this case": "执行角色（决定本用例使用的账号）",
+  // 凭据就地编辑（2026-10-06）：改密码不必再"删掉重建"。
+  "Edit account": "编辑账号",
+  "New password (leave blank to keep the current one)": "新密码（留空则保持原密码）",
+  "Verify the login right after saving": "保存后立即验证登录",
+  "Changing the username or password discards this account's cached session — the next run logs in again.":
+    "修改用户名或密码会丢弃该账号的会话缓存，下次运行会重新登录（这是预期行为）。",
+  "Account updated": "账号已更新",
+  "Account updated and verified": "账号已更新，登录验证通过",
+  "Runs as (role) — which account executes this case": "执行角色（可多个，按顺序切换）",
+  "— add a role to the sequence —": "— 添加一个角色到序列 —",
+  "Switch order — the case starts as the first one and switches through the rest:": "切换顺序：用例以第 1 个身份开始，流程中依次切换到后面的身份：",
+  "Move up": "上移",
+  "Move down": "下移",
   "Search cases": "搜索用例",
   "All priorities": "全部优先级",
   "Select all": "全选",
@@ -739,6 +771,53 @@ const zh: Record<string, string> = {
   "Finish without running": "先不跑，完成",
   "Run it now": "立即运行",
   "No projects yet": "还没有项目",
+  // 证据采集开关（设置页 → 运行）
+  "Video recording": "视频录制",
+  "Per-step screenshots": "逐步截图",
+  "Follow server default": "跟随服务器默认",
+  "Off (fastest)": "关闭（最快）",
+  "On (replay available)": "开启（可回放）",
+  "Every step": "每一步",
+  "Every 3 steps": "每 3 步",
+  "Every 5 steps": "每 5 步",
+  "Regardless of these settings, the final frame is always captured, so a failed case still has a screenshot to look at. Turning both off is the fastest configuration.":
+    "无论怎么设置，用例结束时都会拍一张最终截图，失败用例依然有图可看。两个都关掉是最快的配置。",
+  // 运行报告里"用例"按钮的悬停提示：光一个"用例"看不出点进去能改
+  "View and edit this case: steps, expected result, tags":
+    "查看并编辑这条用例：步骤、预期结果、标签",
+  // 缺陷描述卡片（FailureNarrativeCard）—— 这几个 key 之前没进 zh 表，
+  // 于是**界面上显示了英文标签**（Actual result / Expected result / Bug description），
+  // 而"复制"出来的文本用的是硬编码中文【实际结果】【预期结果】，两边对不上。
+  // 补齐后界面与复制内容一致。
+  "Bug description": "缺陷描述",
+  "Actual result": "实际结果",
+  "Expected result": "预期结果",
+  Copy: "复制",
+  Copied: "已复制",
+  // 全前端扫描后剩下的 4 条漏翻（扫描正则要注意用词边界 `(?<![A-Za-z])t\(`，
+  // 否则 `toast("success", …)` 里的 "success" 会被当成 t() 的 key —— 我踩过这个坑）
+  "{{n}} completed runs": "{{n}} 次已完成的运行",
+  "A run executes a batch of cases and produces a video, a step-by-step trace and a pass/fail verdict for each.":
+    "每次运行执行一批用例，并为每条用例生成录像、逐步轨迹和通过/失败判定。",
+  "storage_state JSON (upload auth.json or paste)":
+    "storage_state JSON（上传 auth.json 或直接粘贴）",
+  // 用例抽屉里的"它学到了什么（经验笔记）"
+  "What it learned (experience notes)": "它学到了什么（经验笔记）",
+  "Clearing…": "清空中…",
+  "Last known navigation path": "上次的导航路径",
+  "Page quirks": "页面特性",
+  "Element tips": "元素注意事项",
+  Updated: "更新于",
+  "This case was edited after these notes were written, so they are ignored when it runs. They will be rebuilt on the next run.":
+    "这些笔记写下之后用例被改过，所以运行时会被忽略，下次运行会重新积累。",
+  "Notes only record how to get around — navigation paths and page quirks. They deliberately never record whether a run passed: that would turn the next run into copying an answer instead of testing.":
+    "笔记只记录「路怎么走」——导航路径和界面脾气。它刻意不记录某次运行是否通过：那会让下一次运行变成背答案，而不是真的在测试。",
+  // 用例抽屉里的「数据隔离提示」
+  "Data isolation note": "数据隔离提示",
+  "Filled in when your expected result hard-codes a count (like \"1 row\"): the app's data is changed by other cases, so the note tells the agent not to treat leftovers as a defect. Empty = not injected.":
+    "当预期结果里写死了条数（比如「1 行」）时填：应用里的数据会被其他用例改动，这段提示让 agent 不要把残留数据当成缺陷。留空 = 不注入。",
+  "Leave empty unless the expected result mentions a specific number of rows":
+    "除非预期结果里写死了具体行数，否则留空",
 };
 
 export const LANG_KEY = "tp_lang";

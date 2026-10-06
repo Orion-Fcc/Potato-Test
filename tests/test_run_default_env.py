@@ -20,7 +20,7 @@ pytest.importorskip("aiosqlite")
 
 def _run(tmp_db: str) -> dict:
     os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///{tmp_db}"
-    os.environ["TESTPILOT_SECRET_KEY"] = "x" * 32
+    os.environ["POTATO_SECRET_KEY"] = "x" * 32
     os.environ.pop("AUTH_ENABLED", None)
 
     import app.api as api

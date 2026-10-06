@@ -30,7 +30,7 @@ def _instant(iso: str) -> datetime:
 
 def _run(tmp_db: str) -> dict:
     os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///{tmp_db}"
-    os.environ["TESTPILOT_SECRET_KEY"] = "x" * 32
+    os.environ["POTATO_SECRET_KEY"] = "x" * 32
     os.environ["AUTH_ENABLED"] = "true"
     os.environ["JWT_SECRET"] = "y" * 32
 
@@ -92,7 +92,7 @@ def test_onboarded_is_a_noop_without_a_session(tmp_path) -> None:
     """Auth-disabled instances have no user at all; the endpoint must not 500 — the
     frontend keeps the flag in localStorage there."""
     os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///{tmp_path / 'anon.db'}"
-    os.environ["TESTPILOT_SECRET_KEY"] = "x" * 32
+    os.environ["POTATO_SECRET_KEY"] = "x" * 32
     os.environ.pop("AUTH_ENABLED", None)
 
     import app.db as db

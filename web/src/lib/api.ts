@@ -10,6 +10,9 @@ export interface Project {
   case_timeout_s?: number | null;
   case_max_steps?: number | null;
   run_concurrency?: number | null;
+  // 证据采集开关。null/undefined = 该项目没设过，跟随服务器默认。
+  case_record_video?: boolean | null;
+  live_shot_every?: number | null;
   feishu_chat_id?: string | null;
   feishu_bitable_bound?: boolean;
   case_count?: number;
@@ -224,11 +227,19 @@ export interface TestCase {
   status: CaseStatus;
   owner: string | null;
   role: string | null;
+  // 2026-10-04 多角色：执行时依次使用的身份，顺序即切换顺序。
+  // 后端保证：只要 role 有值，roles 就至少含 role 这一项（见 _roles_of），
+  // 所以前端可以只认 roles，不必再单独处理 role 的兼容逻辑。
+  roles?: string[];
   references: string;
   preconditions: string;
   prompt: string;
   steps: TestStep[];
   test_data: string;
+  // 数据隔离提示：拼进 agent 任务提示。留空 = 不注入。
+  // 见后端 app/data_hygiene.py —— 预期里写死了"1 行""2 条"这类绝对数字时必填，
+  // 否则用例会被自己上次留下的数据污染，第二次跑必然假失败。
+  data_hygiene?: string;
   expected: string;
   start_url: string | null;
   tags: string[];
@@ -237,6 +248,16 @@ export interface TestCase {
   last_status?: "passed" | "failed" | "error" | null; // latest run result; null = never run
   last_run_id?: number | null; // the run that verdict came from
   last_run_at?: string | null; // when it last ran
+  // 操作经验记忆（见后端 app/case_memory.py）。**只含过程知识**（导航路径、
+  // 页面脾气、元素注意事项），绝不含判定结果 —— 否则下次运行就变成背答案。
+  memory?: {
+    navigation?: string[];
+    page_notes?: string[];
+    element_notes?: string[];
+  } | null;
+  memory_updated_at?: string | null;
+  // true = 记忆还在但用例已被改动，指纹对不上、运行时会被忽略
+  memory_stale?: boolean;
 }
 
 export interface RunSummary {
@@ -320,19 +341,51 @@ export interface RunResult {
   steps: string[];
   diagnostics?: DiagStep[];
   judge_reason: string | null;
+  // 2026-10-04 失败根因分类。三种取值要分清：
+  //   ""        -> 通过的用例（无根因）
+  //   null/缺失 -> 分类功能上线前的历史结果（报告显示"未分类"，不能显示成 unclear）
+  //   分类标识   -> 后端 ROOT_CAUSES 里的 key
+  // root_cause_label 是后端给的中文标签 —— 前端不再自己维护一份分类表，
+  // 两份表不同步时报告里会冒出空白分组。
+  root_cause?: string | null;
+  root_cause_label?: string | null;
+  is_real_defect?: boolean;
+  verdict_evidence?: number[];
   final_answer: string | null;
+  /** AI-written bug description, present only for failed/errored cases. */
+  failure_narrative?: FailureNarrative | null;
   account_label?: string | null;
   latency_ms: number;
   error: string | null;
+  // 2026-10-06 人工改判。verdict_override 非空 => 这条结论是人改的，不是 AI 判的。
+  // 界面必须把两者区分开，否则通过率/真缺陷率这些数字没法信。
+  verdict_override?: string | null;
+  override_reason?: string | null;
+  override_by?: string | null;
+  override_at?: string | null;
+  /** 改判前 AI 的原始结论（撤销改判时用来还原）。 */
+  original_status?: string | null;
+}
+
+/** The 操作步骤/实际结果/预期结果 bug description produced for failed cases. */
+export interface FailureNarrative {
+  steps: string;
+  actual: string;
+  expected: string;
+  title?: string;
+  severity?: string;
 }
 
 export interface DiagStep {
   i: number;
   action: string;
+  /** 「点了啥」的人话摘要（click_element_by_index(index=12)）。旧数据没有这一列。 */
+  detail?: string;
   thought: string;
   result: string;
   error: string;
   screenshot: string | null;
+  elapsed_s?: number;
 }
 
 /** Default request budget. Long-running endpoints (run start, doc extract)
@@ -442,6 +495,10 @@ export const api = {
       case_timeout_s?: number | null;
       case_max_steps?: number | null;
       run_concurrency?: number | null;
+      // 传 null 表示"改回跟随服务器默认"（后端按 model_fields_set 判断有没有传这个键）；
+      // 不传这个键则完全不修改。
+      case_record_video?: boolean | null;
+      live_shot_every?: number | null;
       feishu_chat_id?: string | null;
       feishu_bitable_url?: string | null;
     },
@@ -488,6 +545,11 @@ export const api = {
   ) => req<Credential>(`/projects/${pid}/credentials`, { method: "POST", body: JSON.stringify(b) }),
   captureCredential: (pid: number, b: { label?: string; username: string; password: string }) =>
     req<Credential>(`/projects/${pid}/credentials/capture`, { method: "POST", body: JSON.stringify(b) }),
+  /** 改一条既有凭据：只传要改的字段（密码留空/不传 = 不改）。 */
+  updateCredential: (
+    cid: number,
+    b: { label?: string; username?: string; secret?: string; role?: string | null; environment_id?: number | null },
+  ) => req<Credential>(`/credentials/${cid}`, { method: "PATCH", body: JSON.stringify(b) }),
   activateCredential: (cid: number) =>
     req<Credential>(`/credentials/${cid}/activate`, { method: "POST" }),
   recheckCredential: (cid: number) =>
@@ -501,6 +563,9 @@ export const api = {
   updateCase: (id: number, b: Partial<TestCase>) =>
     req<TestCase>(`/testcases/${id}`, { method: "PUT", body: JSON.stringify(b) }),
   deleteCase: (id: number) => req<{ deleted: number }>(`/testcases/${id}`, { method: "DELETE" }),
+  // 清空一条用例的"操作经验记忆"：页面改版导致记忆里记的东西失效时用
+  clearCaseMemory: (id: number) =>
+    req<TestCase>(`/testcases/${id}/memory`, { method: "DELETE" }),
   importCasesXlsx: async (pid: number, file: File) => {
     const fd = new FormData();
     fd.append("file", file);
@@ -611,6 +676,10 @@ export const api = {
   readAllNotifications: () =>
     req<{ ok: boolean }>("/notifications/read-all", { method: "POST" }),
   getResults: (rid: number, o?: Opts) => req<RunResult[]>(`/runs/${rid}/results`, o),
+  // 2026-10-06 人工改判：AI 判定会不准，测试工程师必须能自己拍板。
+  // clear=true 表示撤销改判、回到 AI 的原判。
+  overrideResult: (resId: number, b: { status?: "passed" | "failed"; reason?: string; clear?: boolean }) =>
+    req<RunResult>(`/results/${resId}`, { method: "PATCH", body: JSON.stringify(b) }),
   cancelRun: (rid: number) => req<Run>(`/runs/${rid}/cancel`, { method: "POST" }),
   // undefined = every case; "failing" = everything that didn't pass; "error" = infra
   // outcomes only (timeouts, dead sessions) — a judge failure is a product finding.

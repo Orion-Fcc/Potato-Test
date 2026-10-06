@@ -25,7 +25,7 @@ def _run(tmp_db: str, with_role: bool) -> dict:
     from cryptography.fernet import Fernet
 
     os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///{tmp_db}"
-    os.environ["TESTPILOT_SECRET_KEY"] = Fernet.generate_key().decode()
+    os.environ["POTATO_SECRET_KEY"] = Fernet.generate_key().decode()
     os.environ.pop("AUTH_ENABLED", None)
 
     import app.db as db

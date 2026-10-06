@@ -16,7 +16,7 @@ from __future__ import annotations
 import logging
 import re
 
-import httpx
+from app.feishu import _as_utc, feishu_http
 
 log = logging.getLogger("potato-test.feishu.bitable")
 
@@ -55,7 +55,7 @@ async def _field_names(client, app: str, table: str, *, refresh: bool = False) -
         return _FIELDS_CACHE[key]
     token = await client._tenant_token()
     url = f"{client._base}/open-apis/bitable/v1/apps/{app}/tables/{table}/fields"
-    async with httpx.AsyncClient(timeout=15) as h:
+    async with feishu_http(15) as h:
         data = (await h.get(url, headers={"Authorization": f"Bearer {token}"})).json()
     if data.get("code") != 0:
         log.warning(
@@ -83,7 +83,7 @@ async def upload_screenshot(client, app_token: str, data: bytes, filename: str) 
     """Upload image bytes as a Bitable attachment; returns the file_token or None."""
     token = await client._tenant_token()
     url = f"{client._base}/open-apis/drive/v1/medias/upload_all"
-    async with httpx.AsyncClient(timeout=30) as h:
+    async with feishu_http(30) as h:
         resp = (
             await h.post(
                 url,
@@ -135,7 +135,10 @@ def _issue_fields(
     if issue.severity in _SEVERITY:
         fields["严重级别"] = _SEVERITY[issue.severity]
     if issue.created_at is not None:
-        fields["问题日期"] = int(issue.created_at.timestamp() * 1000)
+        # SQLite gives a NAIVE datetime holding a UTC value; `.timestamp()` would read it
+        # as local time, landing every BitTable date 8 hours off on this machine.
+        created = _as_utc(issue.created_at)
+        fields["问题日期"] = int(created.timestamp() * 1000)
     if reporter_open_id:
         # Only written when the table already has this person field; never created.
         fields[_REPORTER_FIELD] = [{"id": reporter_open_id}]
@@ -165,7 +168,7 @@ async def create_issue_record(
         fields[_SCREENSHOT_FIELD] = [{"file_token": t} for t in screenshot_tokens]
     token = await client._tenant_token()
     url = f"{client._base}/open-apis/bitable/v1/apps/{app}/tables/{table}/records"
-    async with httpx.AsyncClient(timeout=15) as h:
+    async with feishu_http(15) as h:
         data = (
             await h.post(url, headers={"Authorization": f"Bearer {token}"}, json={"fields": fields})
         ).json()
@@ -191,7 +194,7 @@ async def update_status(client, app: str, table: str, record_id: str, issue_stat
         return
     token = await client._tenant_token()
     url = f"{client._base}/open-apis/bitable/v1/apps/{app}/tables/{table}/records/{record_id}"
-    async with httpx.AsyncClient(timeout=15) as h:
+    async with feishu_http(15) as h:
         data = (
             await h.put(url, headers={"Authorization": f"Bearer {token}"}, json={"fields": fields})
         ).json()

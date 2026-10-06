@@ -26,6 +26,8 @@ const blankCase = (pid: number): TestCase => ({
   status: "active",
   owner: null,
   role: null,
+  // 2026-10-04 多角色：空数组 = 跟随默认账号，与改动前 role:null 等价。
+  roles: [],
   references: "",
   preconditions: "",
   prompt: "",

@@ -40,11 +40,14 @@ def test_task_is_the_fallback_criterion_when_expected_is_empty() -> None:
 def test_step_results_are_passed_as_evidence() -> None:
     payload = json.loads(build_prompt("单号已生成", "任务已完成。", ACTIONS, evidence=EVIDENCE))
 
+    # 注意格式：**带编号的对象**而不是裸字符串。
+    # 判定器被要求在 reason 里说明"依据了第几步"，提示里就得有编号可引用，
+    # 否则反编造那层校验无从对齐（见 tests/test_judge_evidence.py）。
     assert payload["step_results"] == [
-        'Clicked div role=option "行政楼一楼接洽区 QY001"',
-        "Typed '13800138000'",
-        "单号 VRSSZ01-260827-0003 已通过",
-    ], "empty entries must be dropped, the rest kept in order"
+        {"step": 1, "observation": 'Clicked div role=option "行政楼一楼接洽区 QY001"'},
+        {"step": 2, "observation": "Typed '13800138000'"},
+        {"step": 3, "observation": "单号 VRSSZ01-260827-0003 已通过"},
+    ], "empty entries must be dropped, the rest kept in order and numbered from 1"
     assert payload["actions"] == ACTIONS, "action names stay — they are the shape of the run"
 
 

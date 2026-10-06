@@ -14,9 +14,12 @@ fallback), and the worker waits until the bot is configured before connecting.
 from __future__ import annotations
 
 import asyncio
+import atexit
 import logging
+import os
 import threading
 import time
+from pathlib import Path
 
 import lark_oapi as lark
 
@@ -32,6 +35,24 @@ _loop = asyncio.new_event_loop()
 def _start_loop() -> None:
     asyncio.set_event_loop(_loop)
     _loop.run_forever()
+
+
+# Where this process records its own PID, so the desktop PotatoTest.bat can stop it.
+# Nothing else identifies us: we run under pythonw.exe (no console, no window title),
+# and killing "pythonw.exe" wholesale would take the API server down with us.
+ROOT = Path(__file__).resolve().parent.parent
+PID_PATH = ROOT / ".feishu_ws.pid"
+
+
+def _write_pid_file() -> None:
+    try:
+        PID_PATH.write_text(str(os.getpid()), encoding="utf-8")
+    except OSError:
+        log.warning("feishu ws: 无法写入 %s —— .bat 将没办法自动关掉本进程", PID_PATH)
+        return
+
+    # Best-effort cleanup so a stale pid file never points at a dead process.
+    atexit.register(lambda: PID_PATH.unlink(missing_ok=True))
 
 
 def _to_payload(data) -> dict:
@@ -124,7 +145,12 @@ def _wait_for_config(poll_s: int = 30) -> dict:
 
 
 def main() -> None:
-    logging.basicConfig(level=logging.INFO)
+    # Same policy as the API server: quiet by default (WARNING), verbose when asked.
+    # This process runs under pythonw, so its stderr goes nowhere — set
+    # POTATO_LOG_LEVEL=INFO and run it from a terminal to see everything.
+    level_name = os.environ.get("POTATO_LOG_LEVEL", "WARNING").strip().upper()
+    logging.basicConfig(level=getattr(logging, level_name, logging.WARNING))
+    _write_pid_file()
     cfg = _wait_for_config()
     threading.Thread(target=_start_loop, daemon=True).start()
 

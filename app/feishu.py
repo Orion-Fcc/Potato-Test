@@ -19,13 +19,14 @@ import json
 import logging
 import re
 import time
+from datetime import UTC, datetime
 
 import httpx
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
 from app.config import get_settings
-from app.feishu_cards import confirm_run_card
+from app.feishu_cards import confirm_run_card, help_card
 from app.llm import llm_config, openai_client
 from app.models import FeedbackItem, Issue, Project, Run, TestCase
 from app.settings_store import get_setting, set_setting
@@ -116,6 +117,90 @@ def _parse_run_command(text: str) -> tuple[str, str] | None:
     return None
 
 
+# `@bot 状态` / `@bot 进度` / `@bot 到哪了` — answer with a status card, no LLM.
+#
+# Ordering matters: this is matched BEFORE the run command. 「运行状态」starts with 运行,
+# so `_parse_run_command` would otherwise claim it and answer with a "确认运行" card —
+# the exact opposite of what was asked.
+# The optional 运行/跑 prefix covers 「运行状态」「跑的进度」— without it those read as
+# "run 状态" and get answered with a 确认运行 card.
+_STATUS_RE = re.compile(
+    r"^\s*(?:运行|跑)?\s*(?:状态|进度|进展|查一下|查一查|查下|查看|怎么样|到哪了|跑到哪|"
+    r"跑完没|好了没|多少了|status|progress)\b",
+    re.IGNORECASE,
+)
+# Note: no `\b` guard is possible for CJK, so also require the message to be short-ish
+# so that "状态不对，登录就报错" is treated as a problem report, not a status query.
+_STATUS_MAX_LEN = 12
+
+
+def _is_status_query(text: str) -> bool:
+    t = (text or "").strip()
+    return len(t) <= _STATUS_MAX_LEN and bool(_STATUS_RE.match(t))
+
+
+_HELP_RE = re.compile(r"^\s*(?:帮助|help|怎么用|能做什么|指令|菜单|命令)\s*$", re.IGNORECASE)
+
+
+def _is_help_query(text: str) -> bool:
+    return bool(_HELP_RE.match((text or "").strip()))
+
+
+async def _status_reply(session, bound) -> tuple[dict | None, str]:
+    """(card, text) answering 「状态」 for the bound project.
+
+    Prefers a run that is actually in flight; falls back to the most recent finished
+    one so the question is always answered instead of replying "nothing running".
+    """
+    from sqlalchemy import select
+
+    from app.feishu_cards import run_status_card
+
+    if bound is None:
+        return None, "先在群里 `@机器人 绑定 <项目名>`，我才知道你要查哪个项目。"
+    rows = list(
+        (
+            await session.execute(
+                select(Run).where(Run.project_id == bound.id).order_by(Run.id.desc()).limit(5)
+            )
+        ).scalars().all()
+    )
+    if not rows:
+        return None, f"项目「{bound.name}」还没有运行记录 —— 在群里 `@机器人 跑` 可以来一轮。"
+    # ★ 这一行曾经被错缩进到上面的 `if not rows:` 块里、且排在 return 之后，
+    # 于是它成了不可达代码，而下面那句 `live or rows[0]` 在 rows 非空时
+    # 抛 `UnboundLocalError: cannot access local variable 'live'`。
+    # 后果不是"偶尔查不到状态"，而是**只要项目有任何一条运行记录，「状态」必定崩**，
+    # 群里永远等不到回复。现场日志（logs/feishu_poll.log）里 5 条真实消息
+    # （om_x100b64...）全是同一个 UnboundLocalError —— 消息收到了，处理器崩了。
+    live = next((r for r in rows if r.status in ("pending", "running")), None)
+    run = live or rows[0]
+
+    return run_status_card(run, bound.name, elapsed_s=run_elapsed_s(run)), ""
+
+
+def run_elapsed_s(run) -> float:
+    """Seconds this run has been going (or took, if it is finished).
+
+    SQLite hands back NAIVE datetimes holding UTC values, and `.timestamp()` on a naive
+    datetime interprets it in LOCAL time — on a GMT+8 box that silently added 8 hours to
+    every duration. Pin the zone explicitly before converting.
+    """
+    started = _as_utc(run.started_at)
+    if started is None:
+        return 0.0
+    end = _as_utc(run.finished_at) if run.finished_at else datetime.now(UTC)
+    if end is None:
+        return 0.0
+    return max(0.0, end.timestamp() - started.timestamp())
+
+
+def _as_utc(dt) -> "datetime | None":
+    if dt is None:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
+
+
 # Non-@ messages must contain a problem keyword before we spend an LLM call on them
 # (cheap pre-filter for ambient monitoring). @-mentions bypass this entirely.
 # Broad on purpose — the LLM still filters false positives; we'd rather spend a
@@ -150,6 +235,54 @@ _SYSTEM_PROMPT = (
 )
 
 
+_SHARED_HTTP: "httpx.AsyncClient | None" = None
+
+
+class _BorrowedClient:
+    """Context manager that hands out an already-open client and does NOT close it.
+
+    Every call site does `async with feishu_http(...) as c`, so a shared client can only
+    be introduced by making `__aexit__` a no-op — otherwise the first caller would close
+    the connection everyone else is using.
+    """
+
+    def __init__(self, client: "httpx.AsyncClient") -> None:
+        self._client = client
+
+    async def __aenter__(self) -> "httpx.AsyncClient":
+        return self._client
+
+    async def __aexit__(self, *exc: object) -> bool:
+        return False
+
+
+def bind_shared_http(client: "httpx.AsyncClient | None") -> None:
+    """Let long-lived workers (the poll bot) reuse one connection instead of re-TLS-ing.
+
+    Measured on this machine: a fresh connection costs ~222 ms of CPU per request, a
+    reused one ~16 ms — 93% of the per-tick cost was TLS handshakes, and a bot polling
+    every 8 seconds was paying it twice per tick, forever.
+    """
+    global _SHARED_HTTP
+    _SHARED_HTTP = client
+
+
+def feishu_http(timeout: int = 15) -> "httpx.AsyncClient":
+    """An httpx client for the Feishu Open API, with proxy handling already decided.
+
+    Centralised so that "should this call trust HTTP(S)_PROXY" is answered in exactly one
+    place. Default is NO (see `feishu_ignore_proxy`): an inherited proxy that was alive at
+    launch and dead later turns every push into `ConnectError: All connection attempts
+    failed`, whose wording points at credentials even though the network is the problem.
+    """
+    from app.config import get_settings
+
+    shared = _SHARED_HTTP
+    if shared is not None and not shared.is_closed:
+        return _BorrowedClient(shared)
+    return httpx.AsyncClient(timeout=timeout, trust_env=not get_settings().feishu_ignore_proxy)
+
+
 class FeishuClient:
     """Thin Feishu Open API client: tenant-token caching + in-thread text reply."""
 
@@ -165,7 +298,7 @@ class FeishuClient:
         if self._token and now < self._token_exp - 60:
             return self._token
         url = f"{self._base}/open-apis/auth/v3/tenant_access_token/internal"
-        async with httpx.AsyncClient(timeout=10) as client:
+        async with feishu_http(10) as client:
             data = (
                 await client.post(
                     url, json={"app_id": self._app_id, "app_secret": self._app_secret}
@@ -181,7 +314,7 @@ class FeishuClient:
         token = await self._tenant_token()
         url = f"{self._base}/open-apis/im/v1/messages/{message_id}/reply"
         body = {"msg_type": "text", "content": json.dumps({"text": text}, ensure_ascii=False)}
-        async with httpx.AsyncClient(timeout=15) as client:
+        async with feishu_http(15) as client:
             data = (
                 await client.post(url, headers={"Authorization": f"Bearer {token}"}, json=body)
             ).json()
@@ -192,7 +325,7 @@ class FeishuClient:
         token = await self._tenant_token()
         url = f"{self._base}/open-apis/im/v1/messages/{message_id}/reply"
         body = {"msg_type": "interactive", "content": json.dumps(card, ensure_ascii=False)}
-        async with httpx.AsyncClient(timeout=15) as client:
+        async with feishu_http(15) as client:
             data = (
                 await client.post(url, headers={"Authorization": f"Bearer {token}"}, json=body)
             ).json()
@@ -223,7 +356,7 @@ class FeishuClient:
             "msg_type": "interactive",
             "content": json.dumps(card, ensure_ascii=False),
         }
-        async with httpx.AsyncClient(timeout=15) as client:
+        async with feishu_http(15) as client:
             data = (
                 await client.post(
                     url,
@@ -243,7 +376,7 @@ class FeishuClient:
             "msg_type": "text",
             "content": json.dumps({"text": text}, ensure_ascii=False),
         }
-        async with httpx.AsyncClient(timeout=15) as client:
+        async with feishu_http(15) as client:
             data = (
                 await client.post(
                     url,
@@ -259,7 +392,7 @@ class FeishuClient:
         """Raw bytes of an image/file attached to a message; None on any error."""
         token = await self._tenant_token()
         url = f"{self._base}/open-apis/im/v1/messages/{message_id}/resources/{file_key}"
-        async with httpx.AsyncClient(timeout=30) as client:
+        async with feishu_http(30) as client:
             resp = await client.get(
                 url, headers={"Authorization": f"Bearer {token}"}, params={"type": "image"}
             )
@@ -288,7 +421,7 @@ class FeishuClient:
             "sort_type": "ByCreateTimeDesc",
             "page_size": limit,
         }
-        async with httpx.AsyncClient(timeout=10) as client:
+        async with feishu_http(10) as client:
             data = (
                 await client.get(url, headers={"Authorization": f"Bearer {token}"}, params=params)
             ).json()
@@ -375,7 +508,7 @@ async def _bot_info(client) -> tuple[str | None, str | None]:
     try:
         token = await client._tenant_token()
         url = f"{client._base}/open-apis/bot/v3/info"
-        async with httpx.AsyncClient(timeout=10) as h:
+        async with feishu_http(10) as h:
             data = (await h.get(url, headers={"Authorization": f"Bearer {token}"})).json()
         bot = data.get("bot") or {}
         open_id, name = bot.get("open_id"), bot.get("app_name")
@@ -402,7 +535,7 @@ async def user_name(client, open_id: str | None, chat_id: str | None = None) -> 
     name = None
     try:
         headers = {"Authorization": f"Bearer {await client._tenant_token()}"}
-        async with httpx.AsyncClient(timeout=10) as h:
+        async with feishu_http(10) as h:
             url = f"{client._base}/open-apis/contact/v3/users/{open_id}?user_id_type=open_id"
             data = (await h.get(url, headers=headers)).json()
             if data.get("code") == 0:
@@ -654,7 +787,7 @@ async def _fetch_since(client: FeishuClient, chat_id: str, since_ms: int) -> lis
         "page_size": 50,
     }
     out: list[dict] = []
-    async with httpx.AsyncClient(timeout=10) as http:
+    async with feishu_http(10) as http:
         for _ in range(5):  # ponytail: 250 msgs per chat per catch-up is plenty
             resp = (
                 await http.get(url, headers={"Authorization": f"Bearer {token}"}, params=params)
@@ -674,21 +807,70 @@ async def _fetch_since(client: FeishuClient, chat_id: str, since_ms: int) -> lis
     return out
 
 
-async def catch_up_missed() -> None:
+_CATCHUP_CLIENT: "FeishuClient | None" = None
+_CATCHUP_KEY: "tuple[str, str, str] | None" = None
+_WARNED_FETCH: set[str] = set()
+
+
+def _catchup_client(cfg: dict) -> "FeishuClient":
+    """One client per config, reused across catches.
+
+    Creating a client per call throws away the cached tenant token, and the token lives
+    ~2 hours — a bot that catches up every 8 seconds was spending one of its two requests
+    per tick re-fetching a token it already had. Rebuilt automatically when the admin
+    changes app_id / app_secret / api_base.
+    """
+    global _CATCHUP_CLIENT, _CATCHUP_KEY
+    key = (cfg["app_id"], cfg["app_secret"], cfg["api_base"])
+    if _CATCHUP_CLIENT is None or _CATCHUP_KEY != key:
+        _CATCHUP_CLIENT = FeishuClient(*key)
+        _CATCHUP_KEY = key
+    return _CATCHUP_CLIENT
+
+
+def _warn_fetch_failed(chat_id: str, exc: Exception) -> None:
+    """Log a fetch failure once per distinct cause, not once per poll tick.
+
+    A missing scope (99991672) answers the same way forever; with the old
+    `log.exception` the poll worker formatted and wrote a multi-KB traceback every
+    8 seconds for as long as it ran.
+    """
+    # The raw message is `list messages failed: {'code': 99991672, ...}` — pull the code
+    # out so the hint below can be specific, and so "same failure" means same cause.
+    match = re.search(r"['\"]code['\"]\s*:\s*(-?\d+)", str(exc))
+    signature = match.group(1) if match else type(exc).__name__
+    if signature in _WARNED_FETCH:
+        return
+    _WARNED_FETCH.add(signature)
+    hint = ""
+    if signature == "99991672":
+        hint = (
+            " —— 飞书应用缺「读取群消息」权限，去开放平台开通 "
+            "im:message.history:readonly 后发布版本即可；自动推送不受影响"
+        )
+    log.warning("feishu 拉取群消息失败（chat=%s, %s）%s", chat_id, signature, hint)
+
+
+async def catch_up_missed() -> bool:
     """Replay bound-chat messages that arrived while no ws connection was up.
 
     Feishu's long-connection mode drops events pushed while disconnected (deploy
     restarts, silent ws death). On startup we pull each bound chat's history past
     the watermark and feed it through handle_message_event; _SEEN dedups against
     messages the live connection delivers concurrently. Never raises.
+
+    Returns True when there was nothing to do or every chat listed fine, False when a
+    chat could not be listed — the poll worker uses that to back off instead of
+    retrying a permanently-failing call every few seconds.
     """
     from app.db import db_session
 
+    ok = True
     try:
         async with db_session() as s:
             cfg = await resolve_config(s)
             if not (cfg["app_id"] and cfg["app_secret"]):
-                return
+                return True
             chats = {
                 p.feishu_chat_id
                 for p in (await s.execute(select(Project))).scalars()
@@ -698,14 +880,15 @@ async def catch_up_missed() -> None:
             if cur is None:
                 # First run: start the watermark now, don't replay old history.
                 await set_setting(s, WATERMARK_KEY, str(int(time.time() * 1000)))
-                return
+                return True
         since_ms = max(int(cur), int(time.time() * 1000) - 24 * 3600 * 1000)
-        client = FeishuClient(cfg["app_id"], cfg["app_secret"], cfg["api_base"])
+        client = _catchup_client(cfg)
         for chat_id in chats:
             try:
                 items = await _fetch_since(client, chat_id, since_ms)
-            except Exception:
-                log.exception("feishu catch-up: fetch failed chat=%s", chat_id)
+            except Exception as exc:
+                ok = False
+                _warn_fetch_failed(chat_id, exc)
                 continue
             fresh = [it for it in items if (it.get("message_id") or "") not in _SEEN]
             if fresh:
@@ -721,6 +904,8 @@ async def catch_up_missed() -> None:
                     )
     except Exception:
         log.exception("feishu catch-up failed")
+        return False
+    return ok
 
 
 def schedule(payload: dict) -> None:
@@ -761,7 +946,16 @@ async def handle_message_event(payload: dict) -> None:
     if not evt["text"]:
         return
 
-    from app.celery_app import enqueue_push
+    try:
+        from app.celery_app import enqueue_push
+    except ModuleNotFoundError:
+        # celery is an optional extra (pyproject [gitlab]), absent from a plain install.
+        # Without this guard the FIRST message the bot receives kills the whole handler
+        # with ModuleNotFoundError — and with GitLab sync off nothing would be enqueued
+        # anyway, so a no-op is the correct fallback, not an error.
+        def enqueue_push(*_args, **_kwargs) -> None:
+            return None
+
     from app.db import db_session
 
     reply: str = ""
@@ -786,10 +980,23 @@ async def handle_message_event(payload: dict) -> None:
                     by_name = bool(bot_name) and f"@{bot_name}" in (evt["text"] or "")
                     evt["mentioned"] = evt["chat_type"] == "p2p" or by_id or by_name
 
+            # Commands are recognised from the text alone, BEFORE the ambient gate.
+            #
+            # Why: a 「状态」question contains no problem keyword, so once the @-mention is
+            # not visible the gate would silently drop it. That happens for real: messages
+            # fetched through the REST poll (app.feishu_poll) do not always carry the
+            # mention element. Status/help are read-only and need no LLM, so answering
+            # them without an explicit @ is safe. 跑 / 绑定 still require a mention —
+            # they change things.
+            want_help = _is_help_query(evt["text"])
+            want_status = _is_status_query(evt["text"])
+
             # Ambient cost gate: a non-@ message must look like a problem before we
             # spend LLM on it. Flip FEISHU_AMBIENT_REQUIRE_KEYWORD=false to never drop.
             if (
                 not evt["mentioned"]
+                and not want_help
+                and not want_status
                 and get_settings().feishu_ambient_require_keyword
                 and not _looks_like_problem(evt["text"])
             ):
@@ -802,7 +1009,14 @@ async def handle_message_event(payload: dict) -> None:
 
             # `@bot 绑定 <项目>` — bind this chat to a project (powers routing + push).
             bind_name = _parse_bind_command(evt["text"]) if evt["mentioned"] else None
-            run_cmd = _parse_run_command(evt["text"]) if evt["mentioned"] else None
+            # Help / status are matched BEFORE the run command: 「运行状态」starts with 运行,
+            # so `_parse_run_command` would otherwise claim it and reply with a 确认运行
+            # card — the opposite of what was asked (see _STATUS_RE).
+            run_cmd = (
+                _parse_run_command(evt["text"])
+                if (evt["mentioned"] and not want_help and not want_status)
+                else None
+            )
             if bind_name is not None:
                 match = next((p for p in rows if p.name.lower() == bind_name.lower()), None)
                 if match is not None:
@@ -813,6 +1027,14 @@ async def handle_message_event(payload: dict) -> None:
                 else:
                     names = ", ".join(p["name"] for p in projects) or "(无)"
                     reply = f"没找到项目「{bind_name}」。现有项目:{names}"
+            elif want_help:
+                # Cheap and instant: no LLM, no DB. Listing what the bot understands is
+                # the difference between "it works" and "nobody remembers the command".
+                reply_card_payload = help_card()
+            elif want_status:
+                # On-demand status — the whole point of turning the timed heartbeat off.
+                # Answers with a card built from live DB rows, so it can never be stale.
+                reply_card_payload, reply = await _status_reply(s, bound)
             elif run_cmd is not None:
                 # Resolve target project, then send a CONFIRM card (never run directly).
                 kind, target = run_cmd
@@ -1023,7 +1245,7 @@ async def _start_run(project_id: int, rerun_of: int | None) -> int | None:
             project_id=project_id,
             name=name,
             case_ids=case_ids,
-            concurrency=(proj.run_concurrency or 2) if proj else 2,
+            concurrency=(proj.run_concurrency or get_settings().run_concurrency) if proj else get_settings().run_concurrency,
             total_count=len(case_ids),
             trigger="feishu",
         )

@@ -15,7 +15,7 @@ import {
 import "@vidstack/react/player/styles/default/theme.css";
 import "@vidstack/react/player/styles/default/layouts/video.css";
 import { api, type Run, type RunResult, type TestCase } from "../lib/api";
-import { usePolling } from "../lib/hooks";
+import { usePolling, useShowThoughts } from "../lib/hooks";
 import { fmtSpan } from "../lib/metrics";
 import { Badge, Button, Card, Input, LiveDot } from "../components/ui";
 import { Modal } from "../components/Modal";
@@ -25,6 +25,8 @@ import { useToast, useErrorToast } from "../components/toast";
 import { RunHeader } from "../components/run/RunHeader";
 import { RunKpis } from "../components/run/RunKpis";
 import { ReplayPanel } from "../components/run/ReplayPanel";
+import { StepLine } from "../components/run/StepLine";
+import { CaseDrawer } from "../components/CaseDrawer";
 
 const COLORS: Record<string, string> = {
   passed: "oklch(0.6 0.17 150)",
@@ -57,10 +59,22 @@ export function RunReport() {
   const [cases, setCases] = useState<TestCase[]>([]);
   const [envName, setEnvName] = useState<string | null>(null);
   const [selected, setSelected] = useState<RunResult | null>(null);
+  // 在报告页直接查看/编辑用例本身。
+  // 为什么需要：用例本身也可能写错（步骤描述不准、预期结果不对），
+  // 而看到失败原因的那一刻正是最该能就地改的时候 —— 否则要跳到"测试用例"页去翻。
+  const [editCase, setEditCase] = useState<TestCase | null>(null);
+  // 2026-10-06 人工改判：AI 判定会不准，测试工程师要能自己拍板。
+  // 存整条 RunResult 而不只是 id —— 弹窗里要显示用例名和 AI 原来的理由，
+  // 让人知道自己在改什么、凭什么改。
+  const [overrideFor, setOverrideFor] = useState<RunResult | null>(null);
+  const [overrideReason, setOverrideReason] = useState("");
+  const [overrideSaving, setOverrideSaving] = useState(false);
   const [filter, setFilter] = useState("all");
   const [q, setQ] = useState("");
   const [confirmDel, setConfirmDel] = useState(false);
   const [liveShot, setLiveShot] = useState<number | null>(null);
+  // 实时面板与回放共用同一个开关：见 useShowThoughts 的注释。
+  const [showThoughts, setShowThoughts] = useShowThoughts();
   const [cancelling, setCancelling] = useState(false);
   // step whose screenshot the live pane shows; null = follow the newest one
   const [pinnedStep, setPinnedStep] = useState<number | null>(null);
@@ -210,6 +224,49 @@ export function RunReport() {
     }
   };
 
+  // ---- 2026-10-06 人工改判 ----
+  // 改完立刻重拉结果列表：报告页的 KPI、饼图、延迟图全都是从 results 算出来的，
+  // 不刷新的话界面上状态变了但统计没变，看起来就像改了个寂寞。
+  const refreshResults = () => api.getResults(runId).then(setResults).catch(() => {});
+
+  const doOverride = async (status: "passed" | "failed", close: () => void) => {
+    if (!overrideFor) return;
+    setOverrideSaving(true);
+    try {
+      const updated = await api.overrideResult(overrideFor.id, {
+        status,
+        reason: overrideReason.trim() || undefined,
+      });
+      setResults((prev) => prev.map((x) => (x.id === updated.id ? updated : x)));
+      // 详情面板如果正开着同一条，也要跟着更新
+      setSelected((prev) => (prev && prev.id === updated.id ? updated : prev));
+      toast("success", t("Verdict updated"));
+      close();
+      refreshResults();
+    } catch (e) {
+      fail(e);
+    } finally {
+      setOverrideSaving(false);
+    }
+  };
+
+  const clearOverride = async (close: () => void) => {
+    if (!overrideFor) return;
+    setOverrideSaving(true);
+    try {
+      const updated = await api.overrideResult(overrideFor.id, { clear: true });
+      setResults((prev) => prev.map((x) => (x.id === updated.id ? updated : x)));
+      setSelected((prev) => (prev && prev.id === updated.id ? updated : prev));
+      toast("success", t("Reverted to the AI verdict"));
+      close();
+      refreshResults();
+    } catch (e) {
+      fail(e);
+    } finally {
+      setOverrideSaving(false);
+    }
+  };
+
   return (
     <div className="space-y-6">
       <RunHeader
@@ -337,6 +394,15 @@ export function RunReport() {
                 {t("showing step {{n}} · back to latest", { n: pinnedStep })}
               </button>
             )}
+            <label className="ml-auto flex cursor-pointer select-none items-center gap-1.5 text-xs text-ink-500 hover:text-ink-800">
+              <input
+                type="checkbox"
+                checked={showThoughts}
+                onChange={(e) => setShowThoughts(e.target.checked)}
+                className="cursor-pointer accent-brand-600"
+              />
+              {t("show AI thinking")}
+            </label>
           </div>
           <div className="grid gap-4 lg:grid-cols-[1.15fr_1fr]">
             <div className="overflow-hidden rounded-xl border border-[var(--line)]">
@@ -384,17 +450,7 @@ export function RunReport() {
                       {step.i}
                     </div>
                     <div className="min-w-0">
-                      <div className="mb-0.5">
-                        <span className="rounded bg-brand-50 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-brand-700">
-                          {step.action}
-                        </span>
-                      </div>
-                      {step.thought && (
-                        <div className="text-[12.5px] leading-snug text-ink-700">
-                          <span className="mr-1 text-ink-500">💭</span>
-                          {step.thought}
-                        </div>
-                      )}
+                      <StepLine step={step} showThoughts={showThoughts} compact />
                       {isLast && (
                         <div className="mt-1 flex items-center gap-1.5 text-xs text-brand-700">
                           <LiveDot />
@@ -495,13 +551,42 @@ export function RunReport() {
                       )}
                     </td>
                     <td className="space-x-1 px-3 py-2">
+                      {/* 结论可点 —— 点开就是改判弹窗。
+                          为什么要能改：AI 判定会不准（用户实测反馈），
+                          没有改判入口的话，一条误判会一直挂在报告里，
+                          而"去改用例描述再重跑"要几十分钟，代价完全不对等。 */}
                       {x.status === "running" ? (
                         <span className="inline-flex items-center gap-1.5 rounded-full bg-brand-50 px-2 py-0.5 text-xs font-medium text-brand-700">
                           <LiveDot />
                           {t("running")}
                         </span>
+                      ) : done ? (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setOverrideFor(r!);
+                            setOverrideReason(r!.override_reason ?? "");
+                          }}
+                          title={t("Click to override this verdict (AI judging is not always right)")}
+                          className="rounded-full outline-none focus-visible:ring-2 focus-visible:ring-brand-500"
+                        >
+                          <Badge status={x.status} />
+                        </button>
                       ) : (
                         <Badge status={x.status}>{x.status === "pending" ? t("pending") : undefined}</Badge>
+                      )}
+                      {/* 人工改判标记：不标出来，报告里的"通过"就分不清是 AI 判的还是人认的，
+                          通过率/真缺陷率这些数字也就没法信了。 */}
+                      {r?.verdict_override && (
+                        <span
+                          className="inline-flex items-center rounded-full border border-brand-200 bg-brand-50 px-1.5 py-[1px] text-[10px] font-medium text-brand-700"
+                          title={
+                            t("Manually overridden by {{who}}", { who: r.override_by ?? "—" }) +
+                            (r.override_reason ? ` — ${r.override_reason}` : "")
+                          }
+                        >
+                          {t("manual")}
+                        </span>
                       )}
                       {r?.flaky && <Badge status="flaky">flaky</Badge>}
                     </td>
@@ -511,18 +596,32 @@ export function RunReport() {
                       {done ? (r!.judge_reason ?? r!.error ?? "—") : x.status === "running" ? t("executing…") : "—"}
                     </td>
                     <td className="px-4 py-2 text-right">
-                      {done && (
-                        <div className="flex justify-end gap-1">
-                          {(r!.status === "failed" || r!.status === "error") && (
-                            <Button size="sm" variant="outline" onClick={() => createIssue(r!)}>
-                              {t("+ Issue")}
-                            </Button>
-                          )}
-                          <Button size="sm" variant="outline" onClick={() => setSelected(r!)}>
-                            {t("Replay")}
+                      <div className="flex justify-end gap-1">
+                        {/* 查看/编辑用例本身。刻意放在 done 判断**之外**：
+                            用例写错了跟它跑没跑完无关，未跑的用例同样需要能改。 */}
+                        {c && (
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            title={t("View and edit this case: steps, expected result, tags")}
+                            onClick={() => setEditCase(c)}
+                          >
+                            {t("Case")}
                           </Button>
-                        </div>
-                      )}
+                        )}
+                        {done && (
+                          <>
+                            {(r!.status === "failed" || r!.status === "error") && (
+                              <Button size="sm" variant="outline" onClick={() => createIssue(r!)}>
+                                {t("+ Issue")}
+                              </Button>
+                            )}
+                            <Button size="sm" variant="outline" onClick={() => setSelected(r!)}>
+                              {t("Replay")}
+                            </Button>
+                          </>
+                        )}
+                      </div>
                     </td>
                   </tr>
                 );
@@ -581,6 +680,94 @@ export function RunReport() {
       )}
 
       {selected && <ReplayPanel result={selected} caseName={caseById.get(selected.case_id)?.name} onClose={() => setSelected(null)} />}
+
+      {editCase && (
+        <CaseDrawer
+          caseData={editCase}
+          onClose={() => setEditCase(null)}
+          onSaved={() => {
+            setEditCase(null);
+            // 重新拉一遍用例列表：报告页的用例名/模块/优先级都取自 caseById，
+            // 改完不刷新的话页面上还是旧值，会让人以为没保存成功。
+            if (pid) api.listCases(Number(pid)).then(setCases).catch(() => {});
+          }}
+        />
+      )}
+
+      {overrideFor && (
+        <Modal
+          onClose={() => {
+            setOverrideFor(null);
+            setOverrideReason("");
+          }}
+          className="max-w-lg"
+        >
+          {(close) => (
+            <Card className="space-y-4 p-5">
+              <div>
+                <h2 className="text-base font-semibold text-ink-900">{t("Override verdict")}</h2>
+                <p className="mt-1 text-sm text-ink-500">
+                  {caseById.get(overrideFor.case_id)?.name ?? `case #${overrideFor.case_id}`}
+                </p>
+              </div>
+
+              {/* 改之前先看清楚 AI 原来判的什么、凭什么判的 ——
+                  否则改判就变成了没有依据的拍脑袋。 */}
+              <div className="rounded-lg border border-[var(--line)] bg-[var(--panel2)] p-3 text-xs leading-relaxed text-ink-600">
+                <div className="mb-1 font-medium text-ink-800">
+                  {t("AI verdict")}: {overrideFor.original_status ?? overrideFor.status}
+                </div>
+                <div className="whitespace-pre-wrap">
+                  {overrideFor.judge_reason || overrideFor.error || "—"}
+                </div>
+              </div>
+
+              <div>
+                <div className="mb-1.5 text-sm font-medium text-ink-900">{t("Your verdict")}</div>
+                <div className="flex gap-2">
+                  <Button
+                    variant={overrideFor.status === "passed" ? "primary" : "outline"}
+                    onClick={() => doOverride("passed", close)}
+                    disabled={overrideSaving}
+                  >
+                    {t("passed")}
+                  </Button>
+                  <Button
+                    variant={overrideFor.status === "failed" ? "primary" : "outline"}
+                    onClick={() => doOverride("failed", close)}
+                    disabled={overrideSaving}
+                  >
+                    {t("failed")}
+                  </Button>
+                </div>
+              </div>
+
+              <div>
+                <div className="mb-1.5 text-sm font-medium text-ink-900">{t("Reason (optional)")}</div>
+                <Input
+                  value={overrideReason}
+                  onChange={(e) => setOverrideReason(e.target.value)}
+                  placeholder={t("Why is the AI verdict wrong?")}
+                />
+              </div>
+
+              <div className="flex items-center justify-between gap-2">
+                {/* 撤销：回到 AI 的原判。改错了要能退回去。 */}
+                {overrideFor.verdict_override ? (
+                  <Button variant="ghost" onClick={() => clearOverride(close)} disabled={overrideSaving}>
+                    {t("Revert to AI verdict")}
+                  </Button>
+                ) : (
+                  <span />
+                )}
+                <Button variant="outline" onClick={close}>
+                  {t("Cancel")}
+                </Button>
+              </div>
+            </Card>
+          )}
+        </Modal>
+      )}
 
       {confirmDel && (
         <Modal onClose={() => setConfirmDel(false)} className="max-w-md">

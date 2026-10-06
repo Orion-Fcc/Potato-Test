@@ -33,6 +33,10 @@ x-app: &app
     # 内网被测系统与容器互访必须绕过代理，否则请求会被代理吞掉
     - NO_PROXY=localhost,127.0.0.1,::1,db,redis,api,worker,beat,feishu,192.0.2.10,.local
     - no_proxy=localhost,127.0.0.1,::1,db,redis,api,worker,beat,feishu,192.0.2.10,.local
+    # 本机直跑时机器人是随 API 服务进程启动的（app/main.py 的 lifespan），
+    # 但容器里已经有一个独立的 feishu 服务（WebSocket 长连接，见文件末尾）。
+    # 两边同时在线会让同一条群消息被回两次，所以这里显式关掉进程内的那个。
+    - FEISHU_WORKER_IN_PROCESS=false
   extra_hosts:
     - "host.docker.internal:host-gateway"  # Linux/WSL 引擎下也能解析到宿主机代理
   volumes:

@@ -16,7 +16,12 @@ pytest.importorskip("aiosqlite")
 
 def _fresh(tmp_db: str):
     os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///{tmp_db}"
-    os.environ["TESTPILOT_SECRET_KEY"] = "x" * 32
+    # A real Fernet key, not "x"*32: `set_setting(..., secret=True)` encrypts, and
+    # Fernet rejects anything that isn't 32 url-safe base64 bytes. This used to pass
+    # only because the developer's own .env supplied a valid POTATO_SECRET_KEY that
+    # shadowed this value (-.env wins over os.environ in pydantic-settings); once the
+    # fixture below started isolating .env, the bogus key surfaced as a ValueError.
+    os.environ["POTATO_SECRET_KEY"] = "XGf7WMlxO4q-Z8cLHaDrD5oT3OpS0cr9Q2-VnRsf7_4="
     os.environ.pop("ENABLE_GITLAB", None)
     os.environ.pop("ENABLE_FEISHU", None)
     os.environ["FEISHU_APP_ID"] = "cli_env_configured"
@@ -29,6 +34,24 @@ def _fresh(tmp_db: str):
     get_settings.cache_clear()
     db._engine = db._Session = None
     return db
+
+
+@pytest.fixture(autouse=True)
+def _isolate_env_file(monkeypatch):
+    """Stop `Settings` from reading the developer's real `.env`.
+
+    `SettingsConfigDict(env_file=".env")` means the file is consulted *in addition to*
+    os.environ, and it wins over a value that is merely absent from the environment.
+    So popping ENABLE_FEISHU above does NOT simulate a default install once someone
+    flips the flag on locally for real use — these tests then fail on a correctly
+    configured machine, which is the opposite of what a guardrail should do.
+    """
+    from app.config import Settings, get_settings
+
+    monkeypatch.setattr(Settings, "model_config", {**Settings.model_config, "env_file": None})
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
 
 
 def test_integrations_default_off_and_choke_points(tmp_path) -> None:

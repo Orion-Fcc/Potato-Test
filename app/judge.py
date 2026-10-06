@@ -34,6 +34,59 @@ _SYSTEM = (
     "given; do not fail a run for lacking a particular form of proof it was never asked to "
     "produce. Note that the screenshot is the LAST frame only — an outcome that appeared "
     "earlier and was then dismissed will not be in it, so weigh STEP_RESULTS for those."
+    # ── 反编造约束 ────────────────────────────────────────────────────────────
+    # 实测抓到过判定器凭空补操作：某次 agent 的全部输出只有
+    #   "Clicked input type=text role=combobox id=el-id-6768-51"
+    # 步骤里根本没有点击「查询」，判定却写成"且点击「查询」后列表仍显示全部 10 条记录"
+    # ——动作是编的，那个"10 条记录"的观察更是无从产生。
+    # 危害比"结果不稳定"更大：报告里的失败理由是编的，人会照着它去查根本不存在的问题。
+    "CRITICAL — do not invent anything. Your reason may ONLY describe actions and observations "
+    "that literally appear in STEP_RESULTS, or things visible in the attached screenshot. "
+    "If the agent never performed an action, say plainly that it did not, and stop there — "
+    "do NOT describe what would have happened if it had. Never state a result, a row count, a "
+    "page state or a validation message that no step recorded and the screenshot does not show. "
+    "When evidence is thin, the correct answer is failed with a reason that says the evidence is "
+    "missing — an honest 'it did not do this' is far more useful than a confident wrong story. "
+    # 让它引用依据，便于事后核对
+    "Also return \"evidence\": the 1-based indices of the STEP_RESULTS entries you relied on, "
+    "so a human can check your reasoning. "
+    # ── 失败类型（决定要不要重试）────────────────────────────────────────────────
+    "Also return \"evidence_gap\": a boolean. Set it true ONLY when the run failed because the "
+    "agent never actually got there — it stopped early, a control it needed never got used, the "
+    "final screenshot shows it still on the previous screen, or there is simply nothing in the "
+    "record to judge against. Set it false when the agent DID complete the work and the observed "
+    "result genuinely differs from EXPECTED — that is a real finding and re-running it would "
+    "only waste time. If you are unsure which, prefer false (do not re-run real failures). "
+    # ── 失败根因分类（2026-10-04）──────────────────────────────────────────────
+    # 目的：报告要按类分组，让测试工程师一眼分清"哪些该找开发、哪些是自己环境的问题"。
+    # 互斥单选，不许猜 —— 猜错的分类会让真缺陷被归进"环境问题"里被忽略。
+    "Also return \"root_cause\": pick EXACTLY ONE of these keys for WHY it failed. "
+    "On a passed case, use an empty string. "
+    "\n  product_defect        — the agent really did perform the intended steps and the "
+    "system's behaviour genuinely contradicts EXPECTED. This is a real bug in the system "
+    "under test. Choose this ONLY when the agent verifiably reached the state being judged. "
+    "\n  agent_incomplete      — the agent itself did not finish: it stopped early, never "
+    "used a control it needed, or the last screenshot shows it still on an earlier screen. "
+    "\n  evidence_insufficient — the record contains nothing that could prove or disprove "
+    "EXPECTED (e.g. the page never rendered, the snapshot is empty). You cannot tell whether "
+    "the system is correct or not. "
+    "\n  precondition_missing  — a precondition the task depended on was absent and was not "
+    "set up (missing data, missing upstream record, missing required state). "
+    "\n  auth_or_permission    — login failed, the account was unavailable, or the identity "
+    "in use was not allowed to perform the action. "
+    "\n  environment           — the page could not be reached, timed out, or the target "
+    "system was unavailable (network, proxy, certificate, 5xx). "
+    "\n  test_data             — the test data itself is unusable by the UI (wrong format, "
+    "too long, rejected by a field's own validation). "
+    "\n  test_case_issue       — the case itself is defective: EXPECTED is not decidable, "
+    "the steps contradict each other, or it depends on a screen that no longer exists. "
+    "\n  unclear               — you genuinely cannot tell which of the above it is. "
+    "IMPORTANT: distinguish product_defect from agent_incomplete carefully. 'The agent did not "
+    "get there' is agent_incomplete, NOT product_defect — reporting it as product_defect sends "
+    "a non-existent bug to the developers. When you cannot show that the agent reached the "
+    "judged state, do not use product_defect. "
+    'Reply with JSON only: {"status": "passed"|"failed", "reason": "<one sentence>", '
+    '"evidence": [<int>, ...], "evidence_gap": <true|false>, "root_cause": "<key>"}.'
 )
 
 
@@ -41,6 +94,103 @@ _SYSTEM = (
 class Verdict:
     status: str  # passed | failed
     reason: str
+    evidence: tuple[int, ...] = ()
+    # 失败类型：true = "没做到位"（agent 没走完 / 证据不足），false = "结果确实不符"。
+    #
+    # 为什么要有这个字段：实测近 121 条失败里，**58% 是"没做到位/证据不足"**，
+    # 只有 14% 是"结果确实与预期不符"。前者重试一次有很大机会变成通过
+    # （配合经验记忆，第二次会少走弯路），后者重试只是白烧一遍时间。
+    # 让判定器自己区分，比按关键词猜可靠得多。
+    evidence_gap: bool = False
+    # 2026-10-04 失败根因分类（用户要求"失败根因分类，降低假失败"）。
+    #
+    # 为什么在 evidence_gap 之外还要一个分类：evidence_gap 只回答"要不要重试"
+    # （重试有没有救），回答不了测试工程师真正关心的问题 —— **这条失败该找谁处理**。
+    # 实测痛点：一堆失败混在一起看不出哪些是真缺陷，于是只能一条条点开看，
+    # 或者干脆全部重跑一遍；而"账号在忙""前置数据没造出来"这类假失败
+    # 被当成真缺陷报上去，也消耗了开发的信任。
+    # 分类之后，报告可以直接按类分组：真缺陷给开发，账号/环境问题给运维。
+    #
+    # 取值见 _ROOT_CAUSES。无法判断时必须填 "unclear"，**不允许猜** ——
+    # 猜错的分类比不分类更糟，因为它会让真缺陷被归到"环境问题"里被忽略。
+    root_cause: str = ""
+
+
+# 根因分类表。key 是内部标识（落库用），值是给判定器看的中文说明。
+#
+# 分类是**互斥单选**而不是多选：报告要按它分组，一条失败落进两组就等于没分。
+# 判定器被要求选"最主要的那一个"。
+_ROOT_CAUSES: dict[str, str] = {
+    "product_defect": "系统本身有缺陷：agent 确实按预期路径操作到位了，但系统给出的行为与预期不符",
+    "agent_incomplete": "agent 自己没做完：中途停了、需要的控件没找到、关键步骤没走到",
+    "evidence_insufficient": "证据不足以判定：记录里没有能证明或证伪预期的东西（例如页面没渲染出来）",
+    "precondition_missing": "前置条件不具备且没能自动补建：缺少必要的数据/状态/上游单据",
+    "auth_or_permission": "账号或权限问题：登录失败、账号被占、当前账号没有该操作的权限",
+    "environment": "环境或网络问题：页面打不开、超时、代理/证书错误、系统不可用",
+    "test_data": "测试数据问题：用例给的测试数据本身无效（格式错、超长、与界面校验不符）",
+    "test_case_issue": "用例本身有问题：预期写得无法判定、步骤矛盾、依赖已不存在的界面",
+    "unclear": "无法判断属于以上哪一类",
+}
+
+# 哪些分类算"真失败"（值得开发介入），哪些算"假失败"（重试或修环境即可）。
+# 报告和统计要用它把两类分开，避免假失败污染真缺陷的统计口径。
+#
+# 判断依据是"这条失败反映了被测系统的真实问题吗"：
+#   product_defect  → 是，系统确实不符预期
+#   precondition_missing / test_data → 否，是用例侧的准备问题（但可能暴露用例质量）
+#   agent_incomplete / evidence_insufficient / environment / auth_or_permission / unclear
+#                    → 否，是执行侧问题
+#   test_case_issue  → 不是产品问题，是用例维护问题
+# 这一点必须显式写下来：默认全算"真失败"会让假失败长期污染缺陷率。
+ROOT_CAUSE_IS_REAL_DEFECT: frozenset[str] = frozenset({"product_defect"})
+
+# 重试有救的分类。engine 已经用 evidence_gap 决定重试；这里给出更细的依据，
+# 让"为什么重试/为什么放弃"能对上具体原因，而不是只有一个布尔值。
+ROOT_CAUSE_RETRYABLE: frozenset[str] = frozenset(
+    {"agent_incomplete", "evidence_insufficient", "precondition_missing", "environment", "auth_or_permission"}
+)
+
+# 给界面/报告用的中文短标签。
+# 为什么放在这里而不是前端：分类表只有这一份来源，前端再抄一份迟早会不一致 ——
+# 新增一个分类时忘了改前端，报告里就会出现空白分组。
+ROOT_CAUSE_LABELS_ZH: dict[str, str] = {
+    "product_defect": "产品缺陷",
+    "agent_incomplete": "执行未完成",
+    "evidence_insufficient": "证据不足",
+    "precondition_missing": "前置数据缺失",
+    "auth_or_permission": "账号/权限",
+    "environment": "环境/网络",
+    "test_data": "测试数据问题",
+    "test_case_issue": "用例本身问题",
+    "unclear": "无法判定",
+}
+
+
+def _check_evidence(
+    cited: Any, n_steps: int
+) -> tuple[tuple[int, ...], str | None]:
+    """校验判定器引用的步骤编号是否真实存在。
+
+    这一层是给"反编造"兜底的：判定器现在被要求说明它依据了第几步。
+    如果它引用了不存在的编号（越界、或压根没给），那它的理由很可能不是从实际
+    步骤里读出来的 —— 这时在 reason 后面挂一条提示，让人一眼看出这条理由不可全信。
+    **不改变判定结果**（宁可标疑点，也不越权改判 —— 改判就成了系统替测试做决定）。
+    """
+    if not isinstance(cited, list) or not cited:
+        return (), "（未说明依据步骤）"
+    idx: list[int] = []
+    bad = False
+    for v in cited:
+        if isinstance(v, bool) or not isinstance(v, int):
+            bad = True
+            continue
+        if 1 <= v <= n_steps:
+            idx.append(v)
+        else:
+            bad = True
+    if bad:
+        return tuple(idx), "（引用的步骤编号不存在，该理由未经核对）"
+    return tuple(idx), None
 
 
 def build_prompt(
@@ -51,13 +201,16 @@ def build_prompt(
     evidence: list[str] | None = None,
 ) -> str:
     """The judge's user message. Split out so the wiring is testable without an LLM call."""
+    # STEP_RESULTS 必须带编号：判定器被要求在 reason 里说明依据了第几步，
+    # 编号不对齐它就无从引用，反编造那层校验也就落空了。
+    steps = [e for e in (evidence or []) if e][:80]
     return json.dumps(
         {
             "task": task,
             "expected": expected,
             "final_answer": final_answer,
             "actions": actions[:80],
-            "step_results": [e for e in (evidence or []) if e][:80],
+            "step_results": [{"step": i, "observation": e} for i, e in enumerate(steps, 1)],
         },
         ensure_ascii=False,
     )
@@ -99,7 +252,38 @@ async def judge(
         )
         data = json.loads(resp.choices[0].message.content or "{}")
         status = "passed" if data.get("status") == "passed" else "failed"
-        return Verdict(status=status, reason=str(data.get("reason", ""))[:500])
+        reason = str(data.get("reason", ""))[:500]
+        # 证据编号校验：让"依据哪几步"可核对，抽到编造的理由时能看出来
+        n_steps = len([e for e in (evidence or []) if e])
+        ev, warn = _check_evidence(data.get("evidence"), n_steps)
+        if warn:
+            reason = f"{reason}{warn}"[:500]
+        # 只有"失败 + 判定器确认为没做到位"才算可重试。默认 False 是安全的：
+        # 宁可少重试，也不要把真实缺陷重跑一遍当成偶发。
+        gap = status == "failed" and data.get("evidence_gap") is True
+        # 根因分类：只接受白名单里的 key。
+        # 模型偶尔会自己造一个听着合理的分类（"timeout"、"network_error"…），
+        # 直接落库会让统计口径被污染 —— 报告按类分组时冒出十几个只出现一次的类目。
+        # 认不出来就归 unclear，并在 reason 里留痕，便于事后发现提示词没被遵守。
+        raw_cause = str(data.get("root_cause") or "").strip()
+        cause = raw_cause if raw_cause in _ROOT_CAUSES else ""
+        if status == "passed":
+            cause = ""  # 通过的用例没有根因，模型若硬填一律清掉
+        elif raw_cause and not cause:
+            cause = "unclear"
+            reason = f"{reason}（判定器给的分类「{raw_cause[:20]}」不在允许列表内，已归为 unclear）"[:500]
+        elif not raw_cause:
+            cause = "unclear"
+        # 分类与 evidence_gap 的一致性：product_defect 意味着 agent 确实做到位了，
+        # 那就绝不能同时被标成"可重试"。两者矛盾时以分类为准 —— 分类是更具体的判断，
+        # 而矛盾会让 engine 重跑一条真实缺陷，白烧一轮时间。
+        if cause == "product_defect":
+            gap = False
+        elif cause in ROOT_CAUSE_RETRYABLE and status == "failed":
+            gap = True
+        return Verdict(
+            status=status, reason=reason, evidence=ev, evidence_gap=gap, root_cause=cause
+        )
 
     try:
         try:
@@ -110,6 +294,12 @@ async def judge(
             # a gateway model without vision must not cost us the verdict entirely
             return await ask(user)
     except Exception as exc:  # judge failure must not pass a test by default
-        return Verdict(status="failed", reason=f"judge_error: {type(exc).__name__}: {exc}"[:500])
+        # 判定器自己挂了，属于执行侧问题而非产品缺陷 —— 归 environment，
+        # 这样它不会混进"真缺陷"统计里，也会被 ROOT_CAUSE_RETRYABLE 判为可重试。
+        return Verdict(
+            status="failed",
+            reason=f"judge_error: {type(exc).__name__}: {exc}"[:500],
+            root_cause="environment",
+        )
     finally:
         await client.close()

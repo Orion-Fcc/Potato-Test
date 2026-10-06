@@ -8,6 +8,11 @@
 
 Agent 自己想清楚该点哪里；裁判读截图和动作记录下结论，**证据不足时默认判失败**，不会出现那种"假绿"。
 
+> **第一次用？先看 [docs/USAGE.md](docs/USAGE.md)（使用说明）。**
+> 里面有启动/关闭、界面导航、怎么写用例（前置条件·多角色·Excel 导入）、怎么看结果
+> （三段式失败描述·失败根因分类）、排障，以及本机当前的配置速查。
+> 本文（README）偏"项目介绍与实现"，使用说明偏"照着做"。
+
 ---
 
 ## 它适合干什么
@@ -35,10 +40,10 @@ copy .env.example .env
 
 ```bat
 :: 前台运行（能看到日志，关掉窗口即停止）
-.venv\Scripts\python run_server.py 18080
+.venv\Scripts\python run_server.py 18081
 
 :: 或者后台常驻（无窗口，关掉终端也不停）
-start "" .venv\Scripts\pythonw run_server.py 18080
+start "" .venv\Scripts\pythonw run_server.py 18081
 ```
 
 后台方式启动后，停止用：
@@ -47,7 +52,7 @@ start "" .venv\Scripts\pythonw run_server.py 18080
 taskkill /F /FI "IMAGENAME eq pythonw.exe"
 ```
 
-然后打开 <http://127.0.0.1:18080/>。
+然后打开 <http://127.0.0.1:18081/>（端口固定 18081）。
 
 ### macOS / Linux
 
@@ -56,12 +61,12 @@ python3 -m venv .venv && source .venv/bin/activate
 pip install -e .
 playwright install chromium
 cp .env.example .env
-python run_server.py 18080
+python run_server.py 18081
 ```
 
 ### 说明
 
-- **默认端口 18080。** 被占用时换一个即可，端口是启动参数：`run_server.py 19000`
+- **端口固定 18081**（2026-10-05 起，写在 `PotatoTest.bat` 的 `PORT=`）。要改改那里，别改脚本。
 - **`run_server.py` 负责把日志写进 `logs/potato.log`。** 它同时支持 `python`（前台）和
   `pythonw`（后台无窗口）两种启动方式，所以后台跑也有日志可查
 - **`pip install -e .` 只装本地使用所需的依赖。** Postgres / Redis / Celery / S3 / 飞书
@@ -85,7 +90,7 @@ cd web && npm install && npm run build   # 产出 web/dist，由 API 直接托�
 
 ## 第一次使用要配什么
 
-1. 打开 <http://127.0.0.1:18080/>
+1. 打开 <http://127.0.0.1:18081/>（端口固定 18081）
 2. 进 **系统设置 → LLM 模型**，填 Base URL / API Key / 模型名，点 **测试连通性** 确认能通
    （这一步别跳过。配错了后面每次运行都会失败，而报错看起来像用例问题）
 3. 新建项目，填被测系统的地址
@@ -141,7 +146,7 @@ cd web && npm install && npm run build   # 产出 web/dist，由 API 直接托�
       # 可选集成：gitlab_*.py / feishu*.py / celery_app.py
     web/            React + Vite + Tailwind 前端
     run_server.py   启动入口：配置日志 + 拉起 uvicorn（前台或后台都用它）
-    docs/           部署与配置手册
+    docs/           使用说明（USAGE.md）与部署、配置手册
     tests/          pytest 测试（纯逻辑，不需要浏览器）
 
 ---
@@ -169,7 +174,7 @@ cd web && npm install && npm run build   # 产出 web/dist，由 API 直接托�
 
 **关掉窗口服务就断了？**
 如果你用 `python run_server.py`（前台）启动，是的，关窗口就停。
-想让它常驻就用后台方式：`start "" .venv\Scripts\pythonw run_server.py 18080`，
+想让它常驻就用后台方式：`start "" .venv\Scripts\pythonw run_server.py 18081`，
 关掉终端也不会停，日志照样写进 `logs/potato.log`。
 
 **提示端口被占用？**

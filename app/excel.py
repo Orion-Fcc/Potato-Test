@@ -29,6 +29,11 @@ COLUMNS: list[tuple[str, str]] = [
     ("Expected", "expected"),
     ("Start URL", "start_url"),
     ("Enabled", "enabled"),
+    # Which account the case executes as (multi-account auth). Optional: a blank cell
+    # means "project default account". Added so a full export -> edit -> re-import round
+    # trip can carry the role, instead of silently resetting 378 cases to the default
+    # account and having every config-page case fail as "no permission".
+    ("Role", "role"),
 ]
 
 _TRUE = {"1", "true", "yes", "y", "是", "启用", "enabled"}
@@ -131,7 +136,7 @@ def parse_workbook(data: bytes) -> list[dict[str, Any]]:
                 rec[key] = _cell_to_tags(text)
             elif key == "enabled":
                 rec[key] = text.lower() in _TRUE if text else True
-            elif key in ("case_key", "module", "owner", "start_url"):
+            elif key in ("case_key", "module", "owner", "start_url", "role"):
                 rec[key] = text or None
             else:
                 rec[key] = text

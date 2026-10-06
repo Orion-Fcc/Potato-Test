@@ -19,6 +19,12 @@ class ProjectPatch(BaseModel):
     case_timeout_s: int | None = Field(default=None, ge=15, le=600)
     case_max_steps: int | None = Field(default=None, ge=3, le=100)
     run_concurrency: int | None = Field(default=None, ge=1, le=16)
+    # 证据采集开关（用户自己选）。
+    # 注意语义：**没传这个键 = 不修改**；显式传 null = 跟随全局默认；
+    # 传 true/false（或 0/正整数）= 明确设定。判断"有没有传"要用 model_fields_set，
+    # 不能只看值是不是 None —— 否则"改回跟随默认"这个操作就表达不出来。
+    case_record_video: bool | None = None
+    live_shot_every: int | None = Field(default=None, ge=0, le=50)
     feishu_chat_id: str | None = None  # "" unbinds; bot routes runs/pushes to this chat
     feishu_bitable_url: str | None = None  # paste the base URL; "" clears the binding
 
@@ -47,6 +53,31 @@ class TestStep(BaseModel):
     expected: str = ""
 
 
+def _roles_of(role: str | None, roles: list[str] | None) -> list[str]:
+    """Normalize the two role inputs into one ordered, de-duplicated list.
+
+    A case used to carry a single `role`. Multi-role cases (2026-10-04) need an
+    ordered list, but the 378 existing cases must keep working **without being
+    rewritten**, so the rule is "roles is the superset, role is the fallback":
+
+      - roles given, role blank  -> roles as-is
+      - roles blank, role given  -> [role]              (every legacy case lands here)
+      - both given, role in roles-> roles (role adds nothing)
+      - role given, not in roles -> [role, *roles]      (role leads: it was the
+        primary identity before, and the first role is who the case starts as)
+
+    Order matters — it is the order the agent switches in — so this is a list, not
+    a set. Duplicates are dropped, blanks skipped, and `role` is kept mirrored to
+    roles[0] by the callers so either column alone is enough to read the case.
+    """
+    out: list[str] = []
+    for r in ([role] if role else []) + list(roles or []):
+        v = (r or "").strip()
+        if v and v not in out:
+            out.append(v)
+    return out
+
+
 class TestCaseIn(BaseModel):
     name: str = Field(min_length=1, max_length=300)
     prompt: str = Field(min_length=1)  # the NL task the agent executes
@@ -58,6 +89,9 @@ class TestCaseIn(BaseModel):
     status: CaseStatus = "active"
     owner: str | None = None
     role: str | None = None  # multi-account: which role/account this case runs as
+    # 2026-10-04 multi-role: every role this case switches through, in order.
+    # Empty => fall back to `role`, so existing single-role cases are unchanged.
+    roles: list[str] = Field(default_factory=list)
     references: str = ""
     preconditions: str = ""
     steps: list[TestStep] = Field(default_factory=list)  # documentation, not executed
@@ -78,10 +112,15 @@ class TestCasePatch(BaseModel):
     status: CaseStatus | None = None
     owner: str | None = None
     role: str | None = None
+    # 2026-10-04 multi-role; empty list means "fall back to role".
+    # An empty list here is meaningful ("回落到单角色"), so the API must be able to
+    # tell it apart from "this key was not sent" — see TestCasePatch handling in api.py.
+    roles: list[str] | None = None
     references: str | None = None
     preconditions: str | None = None
     steps: list[TestStep] | None = None
     test_data: str | None = None
+    data_hygiene: str | None = None
     start_url: str | None = None
     tags: list[str] | None = None
     enabled: bool | None = None
@@ -106,6 +145,26 @@ class CredentialIn(BaseModel):
     label: str = ""
     username: str | None = None  # required for type=password
     secret: str = Field(min_length=1)  # storage_state JSON, or the password (encrypted server-side)
+
+
+class CredentialPatch(BaseModel):
+    """改一条**既有**凭据的字段（2026-10-06）。
+
+    为什么需要：此前只有 POST（新建）和 DELETE，想改密码只能"先删后建"。
+    而删掉一条凭据会连带丢掉它的 role / environment / 会话缓存，还得重新走一遍
+    登录验证 —— 密码轮换（例如把 13 个 role 账号统一改成同一新密码）
+    是常规运维动作，它应该是一条独立的操作，不是"删了重建"。
+
+    字段全部可选，用 `model_fields_set` 区分"没传"与"传了 null"：
+    没传 = 保持原值，传 null = 显式清空（role / environment_id 需要这个区别）。
+    """
+
+    label: str | None = None
+    username: str | None = None
+    # 新密码（明文，服务端加密后存）。不传 = 不改密码。
+    secret: str | None = Field(default=None, min_length=1)
+    role: str | None = None
+    environment_id: int | None = None
 
 
 class CredentialCaptureIn(BaseModel):
@@ -265,3 +324,20 @@ class RunIn(BaseModel):
 
 class RunPatch(BaseModel):
     name: str = Field(min_length=1, max_length=300)
+
+
+class ResultPatch(BaseModel):
+    """人工改判一条用例的结论（2026-10-06）。
+
+    为什么要这个接口：AI 判定会不准 —— 它会把"没看到"判成"通过"，也会把"页面长得
+    不一样但其实是对的"判成失败。测试工程师必须能一键纠正，否则报告不可用。
+
+    status 只允许 passed / failed 两个值：
+      · 不接受 error / running —— 那是执行层的状态，不是"结论"，人改判的是结论；
+      · 传 null 表示**撤销改判**，恢复成 AI 的原始结论（因此下面三个字段都可为 None）。
+    """
+
+    status: Literal["passed", "failed"] | None = None
+    reason: str | None = Field(default=None, max_length=500)
+    # 撤销改判：true 表示清掉 verdict_override*，回到 AI 判定。
+    clear: bool = False

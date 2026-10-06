@@ -52,7 +52,7 @@ apply to new runs without a redeploy).
 
 | Variable | Default | Notes |
 |---|---|---|
-| `TESTPILOT_SECRET_KEY` | *(empty)* | **Required for stored credentials.** Fernet key encrypting test-account passwords/sessions at rest. Generate: `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`. Empty ⇒ the credential API is disabled. |
+| `POTATO_SECRET_KEY` | *(empty)* | **Required for stored credentials.** Fernet key encrypting test-account passwords/sessions at rest. Generate: `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`. Empty ⇒ the credential API is disabled. |
 
 ## Execution limits
 

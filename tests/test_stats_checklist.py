@@ -20,7 +20,7 @@ pytest.importorskip("aiosqlite")
 def _stats(tmp_db: str) -> list[dict]:
     """Drive the real ASGI app against a throwaway sqlite file; return three snapshots."""
     os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///{tmp_db}"
-    os.environ.setdefault("TESTPILOT_SECRET_KEY", "x" * 32)
+    os.environ.setdefault("POTATO_SECRET_KEY", "x" * 32)
 
     # imported here so the env vars above are in place before settings are read
     import app.db as db
@@ -69,7 +69,7 @@ def _wizard(tmp_db: str) -> dict:
     """Replay exactly the HTTP calls NewProjectWizard makes on its happy path, and
     return the resulting stats — i.e. what the Overview checklist would then show."""
     os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///{tmp_db}"
-    os.environ.setdefault("TESTPILOT_SECRET_KEY", "x" * 32)
+    os.environ.setdefault("POTATO_SECRET_KEY", "x" * 32)
 
     import app.db as db
     from app.config import get_settings

@@ -34,6 +34,8 @@ web/tsconfig.tsbuildinfo
 # background server runtime state: PID file + uvicorn logs
 .potato.pid
 logs/
+# Feishu poll worker PID (app/feishu_poll.py writes it; the desktop .bat reads it)
+.feishu_ws.pid
 
 *.png
 # but keep app icons served by the web app
@@ -43,3 +45,17 @@ logs/
 # 临时文件（提交信息、一次性脚本等）
 .git_msg.tmp
 _*.tmp
+
+# 归档的过时备份（.env / potato.db / BAT 快照）——留作后悔药，不入库
+scripts/desktop/_superseded/
+
+# 本项目在 WorkBuddy 里工作时留下的数据目录（项目备份、临时文件）。
+# 里面有导出的用例 JSON，含被测系统的内网地址，而本仓库是**公开**的 —— 不入库。
+.workbuddy/
+
+# 从界面导出的项目配置快照（可能带地址、环境、账号名）。
+project_settings_backup.json
+
+# 一次性重定向事故留下的垃圾文件（BAT 的 `> 2>&1` 被误敲成 `> 3.5)`）。
+# 忽略而不是删除：删文件是不可逆操作，留在这里至少不会再污染 git status。
+3.5)

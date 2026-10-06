@@ -371,11 +371,12 @@ export function LiveDot({ className }: { className?: string }) {
   return <span aria-hidden className={clsx("h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-brand-600", className)} />;
 }
 
-export function Field({ label, children }: { label: string; children: ReactNode }) {
+export function Field({ label, hint, children }: { label: string; hint?: string; children: ReactNode }) {
   return (
     <label className="block space-y-1.5">
       <span className="block text-xs font-medium tracking-wide text-ink-500">{label}</span>
       {children}
+      {hint && <span className="block text-xs leading-relaxed text-ink-500">{hint}</span>}
     </label>
   );
 }

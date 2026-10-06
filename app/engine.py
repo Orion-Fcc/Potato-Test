@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from statistics import median
@@ -40,14 +41,153 @@ def resolve_start_url(case_start_url: str | None, base_url: str | None) -> str |
 
 def _effective_prompt(c: Any) -> str:
     """The task the agent actually runs: the NL prompt, with preconditions prepended
-    and test data appended when present. Structured `steps` stay documentation-only."""
+    and test data appended when present. Structured `steps` stay documentation-only.
+
+    2026-10-04 前置条件增强（用户要求）：
+      "有些用例前置条件可能不存在，如果该系统能自己实现，我希望他自己实现。"
+
+    原来只是把 preconditions 原文拼进去，模型看见"前置条件：已有一条待审核的申请单"
+    却发现列表是空的，就会直接报失败 —— 而这往往不是缺陷，只是**没准备数据**，
+    属于假失败。现在明确授权它自己按真人操作把前置数据造出来再继续。
+
+    为什么要划那三条红线：一旦允许模型"自己造数据"，就有个明显的偷懒路径 ——
+    点两下没找到，就声称前置已满足，然后照常判通过。那会把假失败换成**假通过**，
+    更糟。所以明确要求：造不出来要如实说，且必须验证造出来的东西真的存在。
+
+    Structured `steps` stay documentation-only.
+    """
     parts: list[str] = []
     if (c.preconditions or "").strip():
-        parts.append(f"Preconditions: {c.preconditions.strip()}")
+        pre = c.preconditions.strip()
+        parts.append(f"Preconditions: {pre}")
+        parts.append(
+            "ABOUT THE PRECONDITIONS ABOVE: the data or state they describe may not exist "
+            "yet. If it does not, CREATE IT YOURSELF first — do the same operations a real "
+            "user would do to set it up (create the record, submit the order, assign the "
+            "role, etc.), then continue with the task. Do not fail the case merely because "
+            "the precondition was not pre-arranged.\n"
+            "Three limits on this:\n"
+            "  a) Only create what the precondition actually asks for. Do not invent extra "
+            "data, and never modify or delete records you were not asked to touch.\n"
+            "  b) After creating it, CONFIRM it exists (see it in the list / see the saved "
+            "detail page). A precondition you believe you created but never verified does "
+            "not count as satisfied.\n"
+            "  c) If you genuinely cannot create it — no permission, a required upstream "
+            "record is missing, the form rejects your input — say exactly that, name the "
+            "step that blocked you, and report the case as blocked/unverified. Do NOT "
+            "pretend the precondition was met and then judge the rest of the case on top "
+            "of that."
+        )
     parts.append(c.prompt)
     if (c.test_data or "").strip():
         parts.append(f"Test data: {c.test_data.strip()}")
     return "\n\n".join(parts)
+
+
+# 2026-10-04 前置条件里的用例依赖解析（用户要求）。
+#
+# 用户原话："我希望前置条件里面可能存在一些其他用例，可以将其放在前面，以节省时间。"
+#
+# 场景：用例 TC-020 的前置条件写着"已存在一条 TC-008 创建的申请单"。
+# 跑 TC-020 之前先把 TC-008 跑掉，既省掉重复准备数据的步骤，也避免
+# "前置不存在"导致的假失败。
+#
+# 设计取舍：
+#   - 只在同一个 project 内解析。不同项目的用例编号可以重名（都从 TC-001 开始），
+#     拿项目外的编号去指代依赖会让项目重新耦合 —— 这正是用户要拆开的东西。
+#     所以只认本项目的编号，找不到就忽略（编号可能只是写在文字里的举例）。
+#   - 拓扑排序 + 环保护。A 依赖 B、B 又依赖 A 时不能死循环，检测到环就
+#     按原顺序保留并各跑一次 —— 宁可多跑一次，不能卡住整轮。
+#   - 只追加，不删除。用户选中的用例集合是最终要跑的内容，
+#     依赖只会在它前面插入，不会把谁挤掉。
+_CASE_KEY_RE = re.compile(r"\bTC-\d+\b", re.IGNORECASE)
+
+
+async def resolve_case_dependencies(session, project_id: int, case_ids: list[int]) -> list[int]:
+    """Expand `case_ids` with the cases their preconditions reference, deps first.
+
+    Only resolves keys that exist in the SAME project (see module note above).
+    Returns a new ordered list; the caller's original cases always appear, in their
+    original relative order, after their dependencies. Cycle-safe.
+    """
+    from app.models import TestCase
+    # 与文件内其它地方一致：函数内导入，避免把 SQLAlchemy 变成模块级硬依赖
+    from sqlalchemy import select
+
+    wanted = list(dict.fromkeys(case_ids))  # 去重且保序
+    if not wanted:
+        return []
+
+    rows = (
+        (
+            await session.execute(
+                select(TestCase.id, TestCase.case_key, TestCase.preconditions).where(
+                    TestCase.project_id == project_id
+                )
+            )
+        )
+        .all()
+    )
+    key_to_id = {
+        (k or "").strip().upper(): i for i, k, _ in rows if (k or "").strip()
+    }
+    pre_of = {i: (p or "") for i, _k, p in rows}
+
+    # 收集每个用例的直接依赖（同项目、且不是自己）
+    deps: dict[int, list[int]] = {}
+    for cid in wanted:
+        found: list[int] = []
+        for k in _CASE_KEY_RE.findall(pre_of.get(cid, "")):
+            dep = key_to_id.get(k.upper())
+            if dep is not None and dep != cid and dep not in found:
+                found.append(dep)
+        deps[cid] = found
+
+    # 依赖的依赖也要算进来：TC-030 依赖 TC-020，而 TC-020 又依赖 TC-008，
+    # 那 TC-008 也必须先跑。用 BFS 把闭包收全。
+    closure: list[int] = []
+    seen: set[int] = set()
+    stack = list(wanted)
+    while stack:
+        cur = stack.pop()
+        for d in deps.get(cur, []):
+            if d not in seen:
+                seen.add(d)
+                closure.append(d)
+                # 被引入的依赖自己也可能有依赖，要继续展开它的前置条件
+                if d not in deps and d in pre_of:
+                    ds: list[int] = []
+                    for k in _CASE_KEY_RE.findall(pre_of.get(d, "")):
+                        dd = key_to_id.get(k.upper())
+                        if dd is not None and dd != d and dd not in ds:
+                            ds.append(dd)
+                    deps[d] = ds
+                stack.append(d)
+
+    # 拓扑排序：按依赖深度分层，同层保持原顺序
+    ordered: list[int] = []
+    placed: set[int] = set()
+    visiting: set[int] = set()
+
+    def _place(cid: int) -> None:
+        if cid in placed or cid in visiting:
+            # visiting 命中 = 检测到环。直接返回，让调用方按已有顺序跑完，
+            # 不抛异常 —— 环是用例作者写错了，不该让整轮跑不起来。
+            return
+        visiting.add(cid)
+        for d in deps.get(cid, []):
+            _place(d)
+        visiting.discard(cid)
+        if cid not in placed:
+            placed.add(cid)
+            ordered.append(cid)
+
+    for cid in closure:
+        _place(cid)
+    for cid in wanted:
+        _place(cid)
+
+    return ordered
 
 
 async def drain(
@@ -133,6 +273,30 @@ def resolve_attempts(statuses: list[str]) -> tuple[str, bool]:
     flaky == passed only after one or more retries."""
     final = statuses[-1]
     return final, (final == "passed" and len(statuses) > 1)
+
+
+def should_retry(result, retries: int, attempts: int) -> bool:
+    """这一条用例要不要再跑一次。抽成函数是为了让测试能直接验证同一份逻辑
+    —— 之前把判断写在循环里，测试只能复制一份，两边必然漂移（实际已漂移过一格）。
+
+    规则：
+      * 超时 → 不重试。重试改不了结局，还会再烧一个完整预算。
+      * infra error → 重试（这是它一直以来的行为）。
+      * 判定"失败"且 evidence_gap（判定器认为 agent 根本没走到）→ 重试。
+        实测近 121 条失败里 58% 属这类，只有 14% 是真实结果不符。
+      * 其余（真实缺陷）→ 不重试。宁可少重试，也不能把真实缺陷重跑成"偶发"。
+
+    **预算必须覆盖所有形式的重跑**（包括会话死亡后的自愈重试），否则总执行次数会
+    变成 retries+2 而不是配置里承诺的 retries+1 —— 最坏情况多烧一个完整预算。
+    调用方负责在每条重跑路径上自增计数。
+    """
+    if retries <= 0 or attempts >= retries:
+        return False
+    if getattr(result, "timed_out", False):
+        return False
+    if result.status == "error":
+        return True
+    return bool(getattr(result, "evidence_gap", False)) and result.status == "failed"
 
 
 class DefaultLogin(NamedTuple):
@@ -259,6 +423,97 @@ async def _role_candidates(
     ]
 
 
+def _case_roles(case) -> list[str]:
+    """The ordered roles a case switches through (2026-10-04 multi-role).
+
+    Mirrors app/schemas._roles_of: `roles` is the superset, `role` is the
+    fallback, so all 557 existing single-role cases resolve to a one-element
+    list and behave exactly as before. Duplicates are dropped because leasing
+    the same account twice would deadlock the case against itself.
+    """
+    out: list[str] = []
+    for r in list(getattr(case, "roles", None) or []) + [getattr(case, "role", None)]:
+        v = (r or "").strip() if isinstance(r, str) else ""
+        if v and v not in out:
+            out.append(v)
+    return out
+
+
+# 2026-10-04 多角色：一个用例可以声明流程中依次用到哪些角色
+# （例 ["applicant", "approver"] = 先以申请人提交，再切到审核人处理）。
+#
+# 为什么单独抽一个函数：单角色时 engine 直接 lease 一个账号、拿它的 login_state
+# 就完事；多角色要为每个角色各做一遍（找账号 -> 租约 -> 取/捕获会话），
+# 两边逻辑必须完全一致，否则「单角色走 A 路径、多角色走 B 路径」会出现
+# 只有多角色才踩的 bug。这里把「准备一个角色的登录态」收成一步，两种情况共用。
+#
+# 返回的 RoleLogin 说明：
+#   bundle     —— storage_state JSON，登录用；password 类账号还没捕获时为空
+#   user/pass  —— 需要在页面上填账号密码（提示登录）时用
+#   heal_*     —— 会话过期时用来重新捕获的凭据信息
+#   lease_id   —— 已租到的账号（None 表示没租到，调用方负责报错）
+RoleLogin = NamedTuple(
+    "RoleLogin",
+    [
+        ("role", str),
+        ("account", dict | None),
+        ("lease_id", int | None),
+        ("bundle", str | None),
+        ("user", str | None),
+        ("password", str | None),
+        ("heal_cred_id", int | None),
+        ("heal_field", str),
+        ("label", str | None),
+    ],
+)
+
+
+async def _prepare_role_login(
+    session,
+    project_id: int,
+    role: str,
+    env_id: int | None,
+    base_url: str | None,
+    timeout_s: int,
+) -> RoleLogin:
+    """Lease one account for `role` and get a usable session (bundle or password).
+
+    A storage_state account is used as-is. A password account gets a captured
+    bundle cached on its row (capture is single-flighted in _ensure_bundle), so
+    switching to it later in a multi-role case reuses that instead of logging in
+    again — which is the whole point of capturing up front.
+    """
+    from app import leasing
+
+    candidates = await _role_candidates(session, project_id, role, env_id)
+    if not candidates:
+        return RoleLogin(role, None, None, None, None, None, None, "session_bundle", None)
+
+    # wait up to the case timeout for a free account, else the caller reports it
+    lease_id = await leasing.acquire(
+        [c["id"] for c in candidates], ttl_s=timeout_s + 30, wait_s=timeout_s
+    )
+    if lease_id is None:
+        return RoleLogin(role, None, None, None, None, None, None, "session_bundle", None)
+
+    acct = next(c for c in candidates if c["id"] == lease_id)
+    who = acct["label"] or acct["username"] or f"#{acct['id']}"
+    label = f"{role} · {who}"
+
+    if acct["type"] == "storage_state":
+        return RoleLogin(role, acct, lease_id, acct["secret"], None, None, None, "session_bundle", label)
+
+    bundle = await _ensure_bundle(
+        acct["id"], "session_bundle", base_url, acct["username"], acct["secret"], timeout_s
+    )
+    if bundle:
+        return RoleLogin(
+            role, acct, lease_id, bundle, None, None, acct["id"], "session_bundle", label
+        )
+    # No captured session and we cannot capture one -> the agent fills the login form.
+    return RoleLogin(role, acct, lease_id, None, acct["username"], acct["secret"], None, "session_bundle", label)
+
+
 # A capture is only worth re-using while the app-side session behind it is still alive.
 # Most systems expire a session around 30 minutes, so SESSION_TTL_MIN defaults just under
 # that; the old 8h guess meant a bundle stayed "fresh" for hours after the server had
@@ -376,7 +631,12 @@ async def _ensure_bundle(
         if b:
             return b
         try:
-            bundle = await capture_session(base_url, username, password)
+            # 2026-10-04 隔离修复：捕获必须带上项目，否则浏览器会用全局默认 profile，
+            # 把别的项目的 cookies 一起捕获进来（用户报的"串账号"就是这个）。
+            async with db_session() as _s:
+                _c = await _s.get(Credential, cred_id)
+                _pid = _c.project_id if _c else None
+            bundle = await capture_session(base_url, username, password, _pid)
         except Exception:
             return None
         async with db_session() as s:
@@ -493,6 +753,11 @@ async def execute_one_case(run_id: int, case_id: int) -> str:
         role: str | None = None
         candidates: list[dict] = []
         default_login = DefaultLogin(None, None, None, None, None)
+        # 2026-10-04 多角色：本次用例实际租到的**所有**账号（首个角色 + 额外角色）。
+        # 必须在函数作用域外可见，finally 里要逐个释放。
+        _leased_ids: list[int] = []
+        # 额外角色（roles[1:]）的登录态，供 agent 中途 switch_account 使用。
+        _extra_logins: list[RoleLogin] = []
         # setup: load run/case/project, plan login (role candidates or default), flip
         # pending->running (idempotent), create the live row.
         async with db_session() as s:
@@ -504,14 +769,19 @@ async def execute_one_case(run_id: int, case_id: int) -> str:
                 return "error"
             project = await s.get(Project, run.project_id)
             env_id = run.environment_id
-            role = (case.role or "").strip() or None
-            if role:
-                candidates = await _role_candidates(s, run.project_id, role, env_id)
-            else:
+            # 2026-10-04 多角色：roles 是有序列表，role 保留为兼容镜像。
+            # _case_roles() 负责「roles 空就回落到 role」，所以下面只需要看 case_roles。
+            case_roles = _case_roles(case)
+            role = case_roles[0] if case_roles else None
+            if not case_roles:
                 default_login = await _resolve_login(s, run, env_id)
             _s = get_settings()
             to_s = (project.case_timeout_s if project else None) or _s.case_timeout_s
             max_st = (project.case_max_steps if project else None) or _s.case_max_steps
+            # 证据采集开关：项目上设过就用项目的，没设（None）就跟随全局默认。
+            # 让用户在界面上自己选，不必改 .env 再重启。
+            _rec_video = project.case_record_video if project else None
+            _shot_every = project.live_shot_every if project else None
             # base_url from the run's environment, falling back to the project's
             base_url = project.base_url if project else None
             if env_id is not None:
@@ -531,10 +801,6 @@ async def execute_one_case(run_id: int, case_id: int) -> str:
             await s.flush()
             live_id = live.id
 
-        # role set but no account for it -> explicit failure (never silently use a wrong one)
-        if role and not candidates:
-            return await _finalize_case_error(live_id, run_id, f"角色「{role}」没有可用账号")
-
         login_state: str | None = None
         login_user: str | None = None
         login_pass: str | None = None
@@ -545,33 +811,38 @@ async def execute_one_case(run_id: int, case_id: int) -> str:
         bundle_field: str = "session_bundle"
         refresh_user: str | None = None
         refresh_pass: str | None = None
-        if role:
-            # lease a free account for this role; wait up to the case timeout, else fail
-            lease_id = await leasing.acquire(
-                [c["id"] for c in candidates], ttl_s=to_s + 30, wait_s=to_s
-            )
-            if lease_id is None:
-                return await _finalize_case_error(live_id, run_id, f"角色「{role}」的账号都在忙")
-            acct = next(c for c in candidates if c["id"] == lease_id)
-            if acct["type"] == "storage_state":
-                login_state = acct["secret"]
-            else:
-                # password role account: reuse a captured bundle (capture once, single-flight)
-                # so we don't prompt-login every case; fall back to prompt-login if none.
-                bundle = await _ensure_bundle(
-                    acct["id"], "session_bundle", base_url, acct["username"], acct["secret"], to_s
+        # 2026-10-04 多角色：roles[1:] 的预备登录态，供 agent 中途 switch_account 用。
+        # 第一个角色走下面原有的单角色路径，行为与改动前完全一致 —— 这样 557 条
+        # 存量单角色用例的执行链路一个字节都没变，回归风险为零。
+        extra_logins: list[RoleLogin] = []
+        if case_roles:
+            # 每个角色都要有账号，缺任何一个都明确失败（绝不悄悄用别的账号顶替）
+            for r in case_roles:
+                rl = await _prepare_role_login(
+                    s, run.project_id, r, env_id, base_url, to_s
                 )
-                if bundle:
-                    login_state = bundle
-                    bundle_cred_id = acct["id"]
-                    bundle_field = "session_bundle"
-                    refresh_user = acct["username"]
-                    refresh_pass = acct["secret"]
+                if rl.account is None:
+                    why = (
+                        "没有可用账号"
+                        if not await _role_candidates(s, run.project_id, r, env_id)
+                        else "账号都在忙"
+                    )
+                    return await _finalize_case_error(live_id, run_id, f"角色「{r}」{why}")
+                _leased_ids.append(rl.lease_id)
+                if r == role:
+                    # 首个角色：沿用原来的单角色变量，heal 信息也照旧填
+                    login_state = rl.bundle
+                    login_user = rl.user
+                    login_pass = rl.password
+                    account_label = rl.label
+                    lease_id = rl.lease_id
+                    if rl.heal_cred_id:
+                        bundle_cred_id = rl.heal_cred_id
+                        bundle_field = rl.heal_field
+                        refresh_user = rl.account["username"]
+                        refresh_pass = rl.account["secret"]
                 else:
-                    login_user = acct["username"]
-                    login_pass = acct["secret"]
-            who = acct["label"] or acct["username"] or f"#{acct['id']}"
-            account_label = f"{role} · {who}"
+                    extra_logins.append(rl)
         else:
             login_state, login_user, login_pass, state_cred_id, pw_cred_id = default_login
             # default account's bundle lives in the storage_state cred's `secret`; the robot
@@ -598,12 +869,25 @@ async def execute_one_case(run_id: int, case_id: int) -> str:
 
         spec = CaseSpec(
             case_id=case_id,
+            name=case.name or "",
             prompt=prompt,
             expected=expected,
             start_url=start_url,
             login_state=login_state,
             login_username=login_user,
             login_password=login_pass,
+            # 2026-10-04 多角色：把额外角色的登录态交给执行器，供 agent 中途切换。
+            # 单角色时是空列表，switch_account 工具不会被注册。
+            extra_role_logins=[
+                {
+                    "role": rl.role,
+                    "bundle": rl.bundle,
+                    "user": rl.user,
+                    "password": rl.password,
+                    "label": rl.label,
+                }
+                for rl in extra_logins
+            ],
             timeout_s=to_s,
             max_steps=max_st,
             result_id=live_id,
@@ -613,6 +897,11 @@ async def execute_one_case(run_id: int, case_id: int) -> str:
             project_id=run.project_id,
             concurrency=locals().get("slots") or 1,
             persistent_profile=True,
+            record_video=_rec_video,
+            shot_every=_shot_every,
+            # 数据隔离提示：只在用例作者显式写了才注入。默认不注入 ——
+            # 给每个用例都塞一段"环境可能不干净"的话，只会让真正相关的用例被淹没。
+            data_hygiene=case.data_hygiene or None,
         )
 
         async def on_step(steps: list) -> None:
@@ -621,14 +910,19 @@ async def execute_one_case(run_id: int, case_id: int) -> str:
                 if row is not None:
                     row.diagnostics = steps
 
+        async def run_cancelled() -> bool:
+            """这个 run 是否已被取消。取消后绝不能再起新的一次尝试 ——
+            取消的语义是"停下"，重试会让它重新跑起来，白烧一个完整预算。"""
+            async with db_session() as s:
+                r = await s.get(Run, run_id)
+                return r is None or r.status == "cancelled"
+
         async def should_abort() -> bool:
             """Cancelling a run used to only flip the run row: cases already driving a
             browser ran to completion, so the button did nothing for up to case_timeout_s
             each and the results sat at 'running' forever. Checked once per step, on the
             session the step callback opens anyway."""
-            async with db_session() as s:
-                r = await s.get(Run, run_id)
-                return r is None or r.status == "cancelled"
+            return await run_cancelled()
 
         from dataclasses import replace
 
@@ -657,6 +951,7 @@ async def execute_one_case(run_id: int, case_id: int) -> str:
                 and base_url
             ):
                 healed = True
+                infra_attempts += 1  # heal 也要计入预算，见下面 should_retry 处的说明
                 fresh = await _ensure_bundle(
                     bundle_cred_id,
                     bundle_field,
@@ -669,11 +964,11 @@ async def execute_one_case(run_id: int, case_id: int) -> str:
                 if fresh:
                     spec = replace(spec, login_state=fresh)
                     continue
-            if r.status != "error":  # only infra errors are retried, not judge failures
+            if await run_cancelled():
+                break
+            if not should_retry(r, retries, infra_attempts):
                 break
             infra_attempts += 1
-            if infra_attempts > retries:
-                break
         final, flaky = resolve_attempts(attempt_statuses)
 
         async with db_session() as s:
@@ -688,7 +983,17 @@ async def execute_one_case(run_id: int, case_id: int) -> str:
                 # final history-based diagnostics (with results/errors) supersede live ones
                 row.diagnostics = r.diagnostics or row.diagnostics
                 row.judge_reason = r.judge_reason
+                # 2026-10-04 失败根因分类 + 判定依据步骤。
+                # `or row.*` 的原因同 failure_narrative：一次重试若没产出分类
+                # （例如被取消），不能把上一轮已经得到的分类擦掉。
+                row.root_cause = r.root_cause or row.root_cause
+                row.verdict_evidence = r.verdict_evidence or row.verdict_evidence
                 row.final_answer = r.final_answer
+                # AI bug description for failed/errored cases (NULL for passed).
+                # `or row.failure_narrative` keeps the last non-empty value: the live
+                # heartbeat path may have written a progress snapshot, and a later retry
+                # that produced no narrative must not erase a good one.
+                row.failure_narrative = r.failure_narrative or row.failure_narrative
                 row.account_label = account_label
                 row.latency_ms = r.latency_ms
                 row.error = r.error
@@ -697,6 +1002,26 @@ async def execute_one_case(run_id: int, case_id: int) -> str:
                 run_row.processed_count += 1
                 if final == "passed":
                     run_row.passed_count += 1
+        # Heartbeat after every case; it self-throttles to ~1 message per interval.
+        # Outside any transaction: the push can take seconds and must not hold a lock.
+        try:
+            from app import feishu_notify
+
+            await feishu_notify.push_run_progress(run_id)
+        except Exception:
+            pass
+        # 积累"操作经验"：把本次的过程记录提炼成记忆写回用例，下次跑同一条时注入，
+        # 减少重新摸索、让运行路径更稳。见 app/case_memory.py。
+        #
+        # 同样放在事务外：提炼要走一次 LLM 调用（可能几十秒），绝不能占着数据库锁。
+        # 也**只传过程（diagnostics），不传判定结果** —— 记忆里不允许出现"通过/失败"，
+        # 否则下次就变成背答案。传什么由这里决定，过滤由 case_memory 的白名单兜底。
+        try:
+            from app.case_memory import remember_case
+
+            await remember_case(case_id, (r.diagnostics if r is not None else None) or [])
+        except Exception:
+            pass
         # passive account health: the leased role account is healthy on a pass, unhealthy
         # on an infra error (likely login). A judge 'failed' is a test bug, not the account.
         if lease_id is not None and final in ("passed", "error"):
@@ -707,7 +1032,14 @@ async def execute_one_case(run_id: int, case_id: int) -> str:
         # would never fire. The run's counters/summary are reconciled in finalize_run.
         return "error"
     finally:
-        await leasing.release(lease_id)
+        # 2026-10-04 多角色：释放**所有**租到的账号，不只是第一个。
+        # 只释放 lease_id 会让 roles[1:] 的账号一直被占住，跑第二轮就报「账号都在忙」，
+        # 而且 leasing 有 TTL 只是兜底 —— 那等于并发上限被慢慢吃光。
+        for _lid in _leased_ids:
+            try:
+                await leasing.release(_lid)
+            except Exception:
+                pass
         await leasing.run_slot_release(run_slot)
 
 
@@ -934,6 +1266,14 @@ async def run_suite(run_id: int) -> dict:
     async with db_session() as s:
         run = await s.get(Run, run_id)
         concurrency = (run.concurrency if run else None) or 2
+    # Tell the phone the run started, before any case has had time to finish. Everything
+    # here is best-effort: a failed push must never stop the run itself.
+    try:
+        from app import feishu_notify
+
+        await feishu_notify.push_run_started(run_id)
+    except Exception:
+        pass
     await drain(
         case_ids,
         lambda cid: execute_one_case(run_id, cid),

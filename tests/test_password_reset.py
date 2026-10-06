@@ -26,7 +26,7 @@ def _link_path(link: str) -> str:
 
 def _run(tmp_db: str) -> dict:
     os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///{tmp_db}"
-    os.environ["TESTPILOT_SECRET_KEY"] = "x" * 32
+    os.environ["POTATO_SECRET_KEY"] = "x" * 32
     os.environ["AUTH_ENABLED"] = "true"
     os.environ["JWT_SECRET"] = "y" * 32
 

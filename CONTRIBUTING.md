@@ -23,7 +23,7 @@ playwright install chromium
 cd web && npm install && npm run dev
 ```
 
-只想起服务、不需要热更新的话，跑 `python run_server.py 18080`
+只想起服务、不需要热更新的话，跑 `python run_server.py 18081`
 （加 `pythonw` 是后台无窗口运行，日志会写进 `logs/potato.log`）。
 
 ## 提交前自检

@@ -21,6 +21,9 @@ from app.config import get_settings
 from app.crypto import decrypt, encrypt, secret_configured
 from app.gitlab_client import GitLabClient
 from app.gitlab_sync import resolve_token
+# 根因分类表（分类标识 / 中文标签 / 是否算真缺陷）。放在 judge 里作为唯一来源，
+# 这里只引用 —— 前端再抄一份必然会出现"新增分类忘了同步"的空白分组。
+from app.judge import ROOT_CAUSE_IS_REAL_DEFECT, ROOT_CAUSE_LABELS_ZH
 from app.db import db_session
 from app.engine import run_suite
 from app.models import (
@@ -44,6 +47,7 @@ from app.schemas import (
     ChangePasswordIn,
     CredentialCaptureIn,
     CredentialIn,
+    CredentialPatch,
     EnvironmentIn,
     EnvironmentPatch,
     FeishuSettingsIn,
@@ -65,6 +69,7 @@ from app.schemas import (
     ResetIn,
     RolesIn,
     RunIn,
+    ResultPatch,
     RunPatch,
     SuiteAssignIn,
     SuiteIn,
@@ -72,6 +77,7 @@ from app.schemas import (
     TestCaseIn,
     TestCasePatch,
     UserPatch,
+    _roles_of,
 )
 
 
@@ -182,7 +188,22 @@ async def _read_upload_capped(file: UploadFile, max_bytes: int) -> bytes:
 
 # ---- auth ----
 def _iso(dt: datetime | None) -> str | None:
-    return dt.isoformat() if dt else None
+    """ISO-8601 with an explicit UTC offset, so browsers parse it as UTC.
+
+    SQLite (via SQLAlchemy's DateTime(timezone=True)) does NOT preserve tzinfo: the column
+    stores a UTC wall-clock value and hands back a NAIVE datetime. `.isoformat()` on a naive
+    datetime emits '2026-10-02T02:37:08.681319' — no offset. A browser reads an offset-less
+    string as LOCAL time, so on a GMT+8 machine every timestamp silently shifted back 8
+    hours: the running-run tile showed '8h17m' elapsed for a run 19 minutes old.
+
+    Everything the API emits goes through here (see `_expired` just below — the same trap,
+    already handled there for comparisons). Do NOT go back to bare `.isoformat()`.
+    """
+    if not dt:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return dt.isoformat()
 
 
 def _expired(dt: datetime | None) -> bool:
@@ -742,6 +763,9 @@ def _project(p: Project) -> dict:
         "case_timeout_s": p.case_timeout_s,
         "case_max_steps": p.case_max_steps,
         "run_concurrency": p.run_concurrency,
+        # 证据采集开关（用户自己选）。None 表示该字段从未设过，跟随服务器全局默认。
+        "case_record_video": p.case_record_video,
+        "live_shot_every": p.live_shot_every,
         "roles": p.roles or [],
         "feishu_chat_id": p.feishu_chat_id,
         "feishu_bitable_bound": bool(p.feishu_bitable_app_token and p.feishu_bitable_table_id),
@@ -781,17 +805,41 @@ def _case(c: TestCase, last: LastResult | None = None) -> dict:
         "status": c.status,
         "owner": c.owner,
         "role": c.role,
+        # 2026-10-04 multi-role: the ordered list the agent switches through.
+        # Always at least [role] when a role is set, so the UI can bind to this one
+        # field and render old single-role cases without a special case.
+        "roles": _roles_of(c.role, c.roles),
         "references": c.references or "",
         "preconditions": c.preconditions or "",
         "prompt": c.prompt,
         "steps": c.steps or [],
         "test_data": c.test_data or "",
+        "data_hygiene": c.data_hygiene or "",
         "expected": c.expected,
         "start_url": c.start_url,
         "tags": c.tags or [],
         "enabled": c.enabled,
-        "updated_at": c.updated_at.isoformat() if c.updated_at else None,
+        "updated_at": _iso(c.updated_at),
+        # 操作经验记忆（见 app/case_memory.py）。前端要能看到"它到底学到了什么"，
+        # 否则用户没法判断这份记忆可不可信。
+        # `memory_stale` 表示记忆还在、但用例已被改过导致指纹对不上 —— 运行时会被忽略，
+        # 这里显式告诉用户，免得他看到一份"看起来很新其实已经作废"的笔记。
+        "memory": c.memory,
+        "memory_updated_at": _iso(c.memory_updated_at),
+        "memory_stale": bool(
+            c.memory and c.memory_fingerprint and c.memory_fingerprint != _case_fingerprint(c)
+        ),
     }
+
+
+def _case_fingerprint(c: TestCase) -> str:
+    """与 app/case_memory.fingerprint 同一套算法；放在这里只为了让 _case() 能判断是否过期。"""
+    try:
+        from app.case_memory import fingerprint
+
+        return fingerprint(c)
+    except Exception:  # noqa: BLE001
+        return ""
 
 
 def _run(r: Run) -> dict:
@@ -806,9 +854,9 @@ def _run(r: Run) -> dict:
         "processed_count": r.processed_count,
         "passed_count": r.passed_count,
         "summary": r.summary,
-        "started_at": r.started_at.isoformat() if r.started_at else None,
-        "finished_at": r.finished_at.isoformat() if r.finished_at else None,
-        "created_at": r.created_at.isoformat() if r.created_at else None,
+        "started_at": _iso(r.started_at),
+        "finished_at": _iso(r.finished_at),
+        "created_at": _iso(r.created_at),
         "created_by": r.created_by,
         "suite_id": r.suite_id,
         "ran_by_user_id": r.ran_by_user_id,
@@ -830,10 +878,27 @@ def _result(x: RunResult) -> dict:
         "steps": x.steps or [],
         "diagnostics": x.diagnostics or [],
         "judge_reason": x.judge_reason,
+        # 2026-10-04 失败根因分类与判定依据。
+        # root_cause="" 表示通过（无根因）；None 表示分类功能上线前的历史结果 ——
+        # 前端要区分这两种，别把历史数据一律显示成"未分类"而误导。
+        "root_cause": x.root_cause,
+        # 该分类是否代表被测系统的真实缺陷。前端/统计直接用它分流，
+        # 不必在前端再维护一份分类表（两边各存一份迟早会不一致）。
+        "is_real_defect": (x.root_cause in ROOT_CAUSE_IS_REAL_DEFECT) if x.root_cause else False,
+        "root_cause_label": ROOT_CAUSE_LABELS_ZH.get(x.root_cause or "", ""),
+        "verdict_evidence": x.verdict_evidence or [],
         "final_answer": x.final_answer,
+        "failure_narrative": x.failure_narrative or None,
         "account_label": x.account_label,
         "latency_ms": x.latency_ms,
         "error": x.error,
+        # 2026-10-06 人工改判痕迹。前端据此把"人改的"和"AI 判的"区分开 ——
+        # 混在一起的话，通过率/真缺陷率这些数字就没有可信度了。
+        "verdict_override": x.verdict_override,
+        "override_reason": x.override_reason,
+        "override_by": x.override_by,
+        "override_at": x.override_at,
+        "original_status": x.original_status,
     }
 
 
@@ -891,7 +956,7 @@ async def list_projects(request: Request) -> list[dict]:
                     "id": last.id,
                     "status": last.status,
                     "pass_rate": (last.summary or {}).get("pass_rate") if last.summary else None,
-                    "finished_at": last.finished_at.isoformat() if last.finished_at else None,
+                    "finished_at": _iso(last.finished_at),
                 }
                 if last
                 else None
@@ -903,7 +968,23 @@ async def list_projects(request: Request) -> list[dict]:
 @router.post("/projects")
 async def create_project(body: ProjectIn, request: Request) -> dict:
     async with db_session() as s:
-        p = Project(name=body.name, base_url=body.base_url, login_state=body.login_state)
+        # Seed the run-tuning fields from the server defaults instead of leaving them
+        # NULL. NULL means "follow the system default", which would still work — but the
+        # settings form renders NULL as an EMPTY box, so a freshly created project looks
+        # unconfigured even though it is not. Seeding makes the effective values visible
+        # and editable, and keeps every project consistent with the tuned defaults
+        # (2026-10-04: 160s / 40 steps / 1 concurrent — 1 because a browser case needs
+        # ~0.5 GB and this 16 GB soldered box only ever had 3.5-5 GB free).
+        # A project can still blank any field to go back to "follow the default".
+        _s = get_settings()
+        p = Project(
+            name=body.name,
+            base_url=body.base_url,
+            login_state=body.login_state,
+            case_timeout_s=_s.case_timeout_s,
+            case_max_steps=_s.case_max_steps,
+            run_concurrency=_s.run_concurrency,
+        )
         s.add(p)
         await s.flush()
         # the creator owns the project (so it's visible + manageable under RBAC)
@@ -919,6 +1000,14 @@ async def update_project(pid: int, body: ProjectPatch, request: Request) -> dict
     async with db_session() as s:
         p = await _get_project_or_404(s, pid)
         data = body.model_dump(exclude_none=True)
+        # 这两个证据开关的 null **有语义**（= 改回"跟随服务器默认"），而 exclude_none
+        # 会把 null 直接丢掉，于是"恢复默认"这个操作永远表达不出来。所以单独按
+        # model_fields_set 判断"调用方到底有没有传这个键"：传了就照传的值设（哪怕是 None），
+        # 没传就完全不碰。
+        for _k in ("case_record_video", "live_shot_every"):
+            if _k in body.model_fields_set:
+                setattr(p, _k, getattr(body, _k))
+                data.pop(_k, None)
         if "feishu_bitable_url" in data:
             from app.feishu_bitable import parse_bitable_url
 
@@ -1344,7 +1433,7 @@ async def project_stats(pid: int, request: Request) -> dict:
                 "run_id": r.id,
                 "name": r.name,
                 "pass_rate": (r.summary or {}).get("pass_rate", 0.0),
-                "finished_at": r.finished_at.isoformat() if r.finished_at else None,
+                "finished_at": _iso(r.finished_at),
             }
             for r in completed[-10:]
         ]
@@ -1442,13 +1531,35 @@ async def list_cases(pid: int, request: Request) -> list[dict]:
 
 
 async def _next_case_key(s, pid: int) -> str:
-    """Readable per-project id like TC-001 (count-based; not uniqueness-enforced)."""
-    n = (
+    """Readable per-project id like TC-001.
+
+    2026-10-04 修两个缺陷：
+
+    1. **删过用例就会重号。** 旧实现用 `COUNT(*)` 当序号：删掉 TC-005 后总数少 1，
+       下一条新建的又拿到 TC-005 —— 两条不同用例撞同一个编号，报告和缺陷单里
+       无法区分。改成取**已用编号的最大值 +1**，序号只增不减。
+    2. **跨项目只靠前缀区分。** 每个项目都从 TC-001 开始，所以光看 "TC-001"
+       根本不知道是哪个项目的。这里保持 TC-NNN 的显示格式（563 条存量用例都在用，
+       改格式等于让所有历史报告对不上号），但把项目维度交给
+       `(project_id, case_key)` 唯一约束去保证，并在所有按编号查找的地方
+       强制带 project_id —— 见 _find_case_by_key。
+    """
+    rows = (
         await s.execute(
-            select(func.count()).select_from(TestCase).where(TestCase.project_id == pid)
+            select(TestCase.case_key).where(
+                TestCase.project_id == pid, TestCase.case_key.is_not(None)
+            )
         )
-    ).scalar_one()
-    return f"TC-{n + 1:03d}"
+    ).scalars().all()
+
+    top = 0
+    for k in rows:
+        # 只认 TC-<数字> 形式；导入的 Excel 里可能有自由文本编号（如 "REQ-12"），
+        # 那些不参与序号计算，否则 int() 会抛异常把整批导入打断。
+        m = re.fullmatch(r"TC-(\d+)", (k or "").strip())
+        if m:
+            top = max(top, int(m.group(1)))
+    return f"TC-{top + 1:03d}"
 
 
 @router.post("/projects/{pid}/testcases")
@@ -1459,6 +1570,12 @@ async def create_case(pid: int, body: TestCaseIn, request: Request) -> dict:
         data = body.model_dump()
         if not data.get("case_key"):
             data["case_key"] = await _next_case_key(s, pid)
+        # 2026-10-04 多角色：归一化后再落库，并让 role 始终镜像 roles[0]。
+        # 这样无论读哪一列、无论请求里只传了 role 还是只传了 roles，
+        # 存下来的数据都自洽 —— 执行层也只需要认 roles 一个来源。
+        _rs = _roles_of(body.role, body.roles)
+        data["roles"] = _rs
+        data["role"] = _rs[0] if _rs else None
         c = TestCase(project_id=pid, **data)
         s.add(c)
         await s.flush()
@@ -1472,8 +1589,55 @@ async def update_case(cid: int, body: TestCasePatch, request: Request) -> dict:
         if c is None:
             raise HTTPException(404, "test case not found")
         await _project_access(request, c.project_id, "editor")
-        for k, v in body.model_dump(exclude_none=True).items():
+        data = body.model_dump(exclude_none=True)
+        # 2026-10-04 多角色归一化。三种传法都要区分清楚，否则会出现两种错：
+        #
+        #   roles 被改动 -> 顺序被旧 role 打乱。
+        #     上一版把 c.role（库里那个旧首项）当"缺省值"混进 _roles_of，
+        #     结果用户把单角色改成多角色时，旧 role 仍留在库里并被排到最前，
+        #     实际拿到 ['admin','applicant','hr'] 而不是用户设的顺序。
+        #     **传了 roles 就以 roles 为准，不再回头看旧 role。**
+        #   roles=[] 传了却没生效。
+        #     `exclude_none=True` 会把 [] 留下（空列表不是 None），但旧写法还
+        #     叠加了 `body.roles is not None` 的分支去回落旧值，于是清空失效。
+        #
+        # 规则：调用方显式传了 roles -> 只按 roles 算（空列表就是清空成默认账号）；
+        #       只传了 role     -> 单角色更新；
+        #       都没传           -> 保持原样，不碰这两列。
+        if "roles" in body.model_fields_set:
+            # 只认本次传来的 roles；旧 role 一律不参与（它就是顺序错乱的来源）
+            _rs = _roles_of(body.role, body.roles or [])
+            data["roles"] = _rs
+            data["role"] = _rs[0] if _rs else None
+        elif "role" in body.model_fields_set:
+            # 只改了单角色字段
+            _rs = _roles_of(body.role, None)
+            data["roles"] = _rs
+            data["role"] = _rs[0] if _rs else None
+        for k, v in data.items():
             setattr(c, k, v)
+        await s.flush()
+        return _case(c)
+
+
+@router.delete("/testcases/{cid}/memory")
+async def clear_case_memory(cid: int, request: Request) -> dict:
+    """清空一条用例的"操作经验记忆"（见 app/case_memory.py）。
+
+    什么时候用户会想清空：
+      * 记忆里记错了（比如页面改版，原来记的路径/元素已经不存在了）——
+        虽然指纹机制会在用例被改动时自动作废，但页面本身变了用例内容却没变，
+        这种就得手动清；
+      * 单纯想让 agent 完全从零跑一遍，看看它现在自己能不能走通。
+    """
+    async with db_session() as s:
+        c = await s.get(TestCase, cid)
+        if c is None:
+            raise HTTPException(404, "test case not found")
+        await _project_access(request, c.project_id, "editor")
+        c.memory = None
+        c.memory_fingerprint = None
+        c.memory_updated_at = None
         await s.flush()
         return _case(c)
 
@@ -1506,8 +1670,8 @@ def _cred(c: Credential) -> dict:
         "healthy": c.healthy,
         "last_error": c.last_error,
         "last_checked_at": _iso(c.last_checked_at),
-        "expires_at": c.expires_at.isoformat() if c.expires_at else None,
-        "created_at": c.created_at.isoformat() if c.created_at else None,
+        "expires_at": _iso(c.expires_at),
+        "created_at": _iso(c.created_at),
     }
 
 
@@ -1591,7 +1755,7 @@ async def capture_credential(pid: int, body: CredentialCaptureIn, request: Reque
     from app.executor import capture_session
 
     try:
-        state = await capture_session(base_url, body.username, body.password)
+        state = await capture_session(base_url, body.username, body.password, pid)
     except Exception as exc:
         raise HTTPException(
             502, f"login capture failed: {type(exc).__name__}: {exc}"[:300]
@@ -1664,6 +1828,9 @@ async def recheck_credential(cid: int, request: Request) -> dict:
                 base_url = env.base_url
         username = c.username
         password = decrypt(c.secret)
+        # 在 session 内取出项目 id：db_session 关闭后 ORM 对象可能已过期，
+        # 那时再读 c.project_id 会触发 refresh 并报 DetachedInstanceError。
+        c_pid = c.project_id
     if not base_url:
         raise HTTPException(400, "set the project or environment Base URL first")
 
@@ -1672,7 +1839,7 @@ async def recheck_credential(cid: int, request: Request) -> dict:
     ok = True
     err: str | None = None
     try:
-        await capture_session(base_url, username, password)
+        await capture_session(base_url, username, password, c_pid)
     except Exception as exc:
         ok = False
         err = f"{type(exc).__name__}: {exc}"[:400]
@@ -1684,6 +1851,55 @@ async def recheck_credential(cid: int, request: Request) -> dict:
         c.healthy = ok
         c.last_error = None if ok else err
         c.last_checked_at = datetime.now(UTC)
+        return _cred(c)
+
+
+@router.patch("/credentials/{cid}")
+async def update_credential(cid: int, body: CredentialPatch, request: Request) -> dict:
+    """就地修改一条既有凭据（密码轮换、改标签/角色/环境）。
+
+    只有传了的字段会被改（`model_fields_set`），没传的保持原值。
+
+    改密码或改用户名时**必须丢掉 `session_bundle`**，这不是顺手清理，是正确性要求：
+      * 会话缓存是"上一个身份"的登录态。换了用户名还沿用旧缓存，等于让用例跑在
+        别人的身份下 —— 这正是本轮花大力气修掉的那类污染（见 _enforce_identity）。
+      * 密码改错时（如 role01 那份只有百度统计 cookie 的假 bundle），
+        缓存里存的根本不是一个有效登录，留着只会让下一次运行继续"看起来正常"。
+    代价是下一次运行要重新登录一次，这是应该付的价。
+    """
+    if not secret_configured():
+        raise HTTPException(
+            400, "POTATO_SECRET_KEY not configured — credential storage disabled"
+        )
+    fields = body.model_fields_set
+    async with db_session() as s:
+        c = await s.get(Credential, cid)
+        if c is None:
+            raise HTTPException(404, "credential not found")
+        await _project_access(request, c.project_id, "editor")
+
+        if "label" in fields and body.label is not None:
+            c.label = body.label
+        if "role" in fields:
+            c.role = body.role or None
+        if "environment_id" in fields:
+            c.environment_id = body.environment_id
+
+        identity_changed = False
+        if "username" in fields and body.username != c.username:
+            c.username = body.username or None
+            identity_changed = True
+        if "secret" in fields and body.secret is not None:
+            c.secret = encrypt(body.secret)
+            identity_changed = True
+
+        # 密码账号必须有用户名，否则这条凭据没法用来登录（create 也守这一条）。
+        if c.type == "password" and not (c.username or "").strip():
+            raise HTTPException(400, "username is required for a password credential")
+
+        if identity_changed:
+            c.session_bundle = None
+            c.last_error = None
         return _cred(c)
 
 
@@ -1725,7 +1941,7 @@ async def case_results(cid: int, request: Request) -> list[dict]:
                 "judge_reason": rr.judge_reason,
                 "video_url": rr.video_url,
                 "trace_url": rr.trace_url,
-                "finished_at": run.finished_at.isoformat() if run.finished_at else None,
+                "finished_at": _iso(run.finished_at),
             }
             for rr, run in rows
         ]
@@ -1819,8 +2035,37 @@ async def create_run(pid: int, body: RunIn, request: Request) -> dict:
             cases = [c for c in cases if wanted & set(c.tags or [])]
         if not cases:
             raise HTTPException(400, "no matching test cases")
-        # concurrency: explicit request wins, else the project's setting, else default
-        concurrency = body.concurrency if body.concurrency != 2 else (proj.run_concurrency or 2)
+        # 2026-10-04 前置条件里的用例依赖：被引用的用例插到前面先跑（用户要求）。
+        # 只解析本项目内的编号，依赖的依赖也会被收进来（见 engine 里的说明）。
+        # 放在这里而不是 engine 层，是因为要按**用户选中的顺序**去扩展，
+        # 而选中的顺序只有这一层知道（cases 的排列）。
+        from app.engine import resolve_case_dependencies
+
+        _ordered_ids = await resolve_case_dependencies(s, pid, [c.id for c in cases])
+        if _ordered_ids and len(_ordered_ids) != len(cases):
+            _by_id = {c.id: c for c in cases}
+            _extra = [i for i in _ordered_ids if i not in _by_id]
+            if _extra:
+                _rows = (
+                    (await s.execute(
+                        select(TestCase).where(
+                            TestCase.project_id == pid, TestCase.id.in_(_extra)
+                        )
+                    )).scalars().all()
+                )
+                for _c in _rows:
+                    _by_id[_c.id] = _c
+            cases = [_by_id[i] for i in _ordered_ids if i in _by_id]
+        # concurrency: explicit request wins, else the project's setting, else the
+        # server default (Settings.run_concurrency, was a hard-coded 2).
+        # The `!= 2` sentinel means "the UI did not choose" — 2 is the schema default.
+        # It is kept as-is so the frontend contract does not change; only the final
+        # fallback moved from a literal to the setting.
+        concurrency = (
+            body.concurrency
+            if body.concurrency != 2
+            else ((proj.run_concurrency if proj else None) or get_settings().run_concurrency)
+        )
         run = Run(
             project_id=pid,
             name=body.name,
@@ -1876,6 +2121,60 @@ async def get_results(rid: int, request: Request) -> list[dict]:
             .all()
         )
         return [_result(x) for x in rows]
+
+
+@router.patch("/results/{res_id}")
+async def override_result(res_id: int, body: ResultPatch, request: Request) -> dict:
+    """人工改判一条用例的结论（2026-10-06）。
+
+    AI 判定会不准，测试工程师必须能自己拍板。改判直接写进 `status`（而不是另起一个
+    "人工结论"字段），这样报表、KPI、筛选、重跑逻辑全都自动跟着走，不用每个查询
+    都判断一遍"有没有被改过"。改判这件事本身另存 verdict_override* 四列 + 一个
+    original_status（存 AI 原判，供撤销），用于审计和在界面上标出"这条是人改的"。
+
+    body.clear=True 表示撤销改判，恢复 AI 的原始结论 —— 所以 status 允许为 null。
+    """
+    from datetime import UTC, datetime
+
+    async with db_session() as s:
+        row = await s.get(RunResult, res_id)
+        if row is None:
+            raise HTTPException(404, "result not found")
+        run = await s.get(Run, row.run_id)
+        if run is None:
+            raise HTTPException(404, "run not found")
+        await _project_access(request, run.project_id, "editor")
+        user = await auth.current_user(request)
+
+        if body.clear:
+            # 撤销改判：回到 AI 的原始结论。original_status 是首次改判时存下的，
+            # 老数据（加列之前就改判过的）没有它 —— 那种情况清标记、status 不动，
+            # 至少不会把结论改成一个编造的值。
+            if row.original_status:
+                row.status = row.original_status
+            row.verdict_override = None
+            row.override_reason = None
+            row.override_by = None
+            row.override_at = None
+            row.original_status = None
+            await s.commit()
+            return _result(row)
+
+        if body.status is None:
+            raise HTTPException(400, "status is required (or pass clear=true)")
+
+        # 首次改判时把 AI 的原判留一份，撤销时才有得还原。
+        # 已经是人工结论的再改一次时**不覆盖** original_status ——
+        # 否则连改两次就把第一次的 AI 原判冲掉了。
+        if row.verdict_override is None:
+            row.original_status = row.status
+        row.status = body.status
+        row.verdict_override = body.status
+        row.override_reason = (body.reason or "").strip() or None
+        row.override_by = (getattr(user, "email", None) if user else None) or "unknown"
+        row.override_at = datetime.now(UTC).isoformat()
+        await s.commit()
+        return _result(row)
 
 
 @router.post("/runs/{rid}/cancel")
@@ -2019,10 +2318,18 @@ async def export_run(rid: int, request: Request) -> Response:
             "flaky",
             "latency_ms",
             "judge_reason",
+            # The AI bug description for failed cases, split into the three sections the
+            # tester actually pastes into a bug tracker. Empty for passed cases.
+            "缺陷标题",
+            "严重程度",
+            "操作步骤",
+            "实际结果",
+            "预期结果",
         ]
     )
     for x in results:
         c = by_case.get(x.case_id)
+        nar = x.failure_narrative or {}
         writer.writerow(
             [
                 (c.case_key if c else "") or f"#{x.case_id}",
@@ -2034,6 +2341,11 @@ async def export_run(rid: int, request: Request) -> Response:
                 "yes" if x.flaky else "",
                 x.latency_ms,
                 (x.judge_reason or x.error or "").replace("\n", " "),
+                nar.get("title", ""),
+                nar.get("severity", ""),
+                (nar.get("steps", "") or "").replace("\n", " "),
+                (nar.get("actual", "") or "").replace("\n", " "),
+                (nar.get("expected", "") or "").replace("\n", " "),
             ]
         )
     filename = f"run-{rid}-results.csv"
@@ -2266,7 +2578,8 @@ async def run_suite_now(sid: int, request: Request) -> dict:
             project_id=x.project_id,
             name=x.name,
             case_ids=case_ids,
-            concurrency=(project.run_concurrency if project else None) or 2,
+            concurrency=(project.run_concurrency if project else None)
+            or get_settings().run_concurrency,
             total_count=len(case_ids),
             suite_id=x.id,
             ran_by_user_id=user.id if user else None,
@@ -2386,8 +2699,8 @@ def _issue(i: Issue) -> dict:
         "result_id": i.result_id,
         "gitlab_iid": i.gitlab_iid,
         "gitlab_url": _gitlab_web_url(i.gitlab_project, i.gitlab_iid),
-        "created_at": i.created_at.isoformat() if i.created_at else None,
-        "updated_at": i.updated_at.isoformat() if i.updated_at else None,
+        "created_at": _iso(i.created_at),
+        "updated_at": _iso(i.updated_at),
     }
 
 
@@ -2397,7 +2710,7 @@ def _comment(c: IssueComment) -> dict:
         "issue_id": c.issue_id,
         "body": c.body,
         "author": c.author,
-        "created_at": c.created_at.isoformat() if c.created_at else None,
+        "created_at": _iso(c.created_at),
     }
 
 
@@ -2533,7 +2846,7 @@ def _feedback(f: FeedbackItem) -> dict:
         "status": f.status,
         "project_id": f.project_id,
         "issue_id": f.issue_id,
-        "created_at": f.created_at.isoformat() if f.created_at else None,
+        "created_at": _iso(f.created_at),
     }
 
 

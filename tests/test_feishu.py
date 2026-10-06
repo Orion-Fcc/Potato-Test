@@ -5,6 +5,7 @@ No network, no DB, no LLM — just the functions with tricky logic.
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 import pytest
@@ -14,6 +15,7 @@ from app.feishu import (
     _parse_bind_command,
     _parse_json,
     _parse_run_command,
+    _status_reply,
     parse_message_event,
 )
 from app.feishu_cards import confirm_run_card, run_result_card
@@ -322,3 +324,91 @@ def test_multi_problem_message_splits_into_items() -> None:
     assert single[0]["content"] == "只有一个问题"
     assert single[0]["severity"] == "medium"
     assert _feedback_items({}, "裸文本")[0]["title"] == "裸文本"
+
+
+# --------------------------------------------------------------- 按需查询「状态」
+
+class _Bound:
+    """Minimal stand-in for the bound Project (only .id / .name are read)."""
+
+    def __init__(self, pid: int, name: str) -> None:
+        self.id = pid
+        self.name = name
+
+
+class _Row:
+    """Minimal stand-in for a Run row (only the fields the card reads)."""
+
+    def __init__(self, rid: int, status: str) -> None:
+        self.id = rid
+        self.status = status
+        self.name = f"run-{rid}"
+        self.total_count = 10
+        self.processed_count = 4
+        self.passed_count = 3
+        self.started_at = None
+        self.finished_at = None
+
+
+class _FakeSession:
+    def __init__(self, rows: list) -> None:
+        self._rows = rows
+
+    async def execute(self, *_a, **_k):  # noqa: ANN002, ANN003
+        rows = self._rows
+
+        class _Scalars:
+            def all(self_inner):
+                return rows
+
+        class _Result:
+            def scalars(self_inner):
+                return _Scalars()
+
+        return _Result()
+
+
+def test_status_query_answers_when_the_project_has_runs() -> None:
+    """回归：只要项目有运行记录，「状态」曾经**必定**崩，群里永远等不到回复。
+
+    根因是 app/feishu.py 里 `live = next(...)` 被错缩进到 `if not rows:` 块内、
+    且排在 `return` 之后 —— 不可达代码 + 名字未绑定，于是下面那句
+    `run = live or rows[0]` 抛 UnboundLocalError。
+    现场证据：logs/feishu_poll.log 里 5 条真实消息（om_x100b64...）全是这一个错。
+
+    这个测试的价值不在"卡片长得对"，而在**把这条路径真的走一遍** ——
+    原来没有任何测试调用过 _status_reply，所以一个让核心命令 100% 失效的
+    错缩进能一直躺在主干上。
+    """
+    card, text = asyncio.run(_status_reply(_FakeSession([_Row(7, "completed")]), _Bound(1, "项目A")))
+
+    assert text == "", "有运行记录时必须回卡片，而不是文字说明"
+    assert card is not None
+    assert "📊" in card["header"]["title"]["content"]
+    assert "#7" in card["elements"][0]["text"]["content"] or "run-7" in card["elements"][0]["text"]["content"]
+
+
+def test_status_query_prefers_a_run_that_is_still_going() -> None:
+    """正在跑的要优先显示 —— 问「状态」的人最想知道的是当前进度。"""
+    rows = [_Row(9, "completed"), _Row(8, "running")]
+    card, text = asyncio.run(_status_reply(_FakeSession(rows), _Bound(1, "项目A")))
+
+    assert text == ""
+    body = card["elements"][0]["text"]["content"]
+    assert "#8" in body or "run-8" in body, f"应显示正在跑的 #8，实际：{body}"
+
+
+def test_status_query_explains_itself_when_there_is_nothing_to_show() -> None:
+    """零运行记录是正常状态，要给一句能照着做的话，而不是空回复。"""
+    card, text = asyncio.run(_status_reply(_FakeSession([]), _Bound(1, "项目A")))
+
+    assert card is None
+    assert "还没有运行记录" in text
+
+
+def test_status_query_without_a_binding_tells_you_how_to_bind() -> None:
+    """没绑定项目时要说清怎么绑 —— 否则用户只会觉得机器人坏了。"""
+    card, text = asyncio.run(_status_reply(_FakeSession([]), None))
+
+    assert card is None
+    assert "绑定" in text

@@ -18,6 +18,14 @@ const PRIORITIES: CasePriority[] = ["P0", "P1", "P2", "P3"];
 const TYPES: CaseType[] = ["functional", "smoke", "regression", "acceptance", "negative"];
 const STATUSES: CaseStatus[] = ["draft", "active", "deprecated"];
 
+// 经验笔记的三类内容，与后端 app/case_memory.py 的白名单一一对应。
+// 这里刻意只列这三类 —— 界面上能显示什么，就等于后端允许记什么。
+const MEMORY_LABELS: [keyof NonNullable<TestCase["memory"]>, string][] = [
+  ["navigation", "Last known navigation path"],
+  ["page_notes", "Page quirks"],
+  ["element_notes", "Element tips"],
+];
+
 export function CaseDrawer({
   caseData,
   onClose,
@@ -36,6 +44,7 @@ export function CaseDrawer({
   const [c, setC] = useState<TestCase>(caseData);
   const [tags, setTags] = useState((caseData.tags ?? []).join(", "));
   const [history, setHistory] = useState<CaseResult[]>([]);
+  const [clearingMemory, setClearingMemory] = useState(false);
   const [roles, setRoles] = useState<string[]>([]);
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState("");
@@ -63,12 +72,18 @@ export function CaseDrawer({
       type: c.type,
       status: c.status,
       owner: c.owner || null,
-      role: c.role || null,
+      // 2026-10-04 多角色：roles 传完整序列，role 传首项保持向后兼容。
+      // 不能直接传 c.role —— 用户可能只动过 roles 没动 role，后端归一化
+      // 会把 role 拼到 roles 前面，导致顺序错乱（"先当审批人" 变成 "先当申请人"）。
+      // 传首项让 role 永远是 roles[0]，两列永远自洽。
+      roles: c.roles ?? [],
+      role: (c.roles ?? [])[0] ?? c.role ?? null,
       references: c.references,
       preconditions: c.preconditions,
       prompt: c.prompt,
       steps: c.steps.filter((s) => s.action.trim() || s.expected.trim()),
       test_data: c.test_data,
+      data_hygiene: c.data_hygiene ?? "",
       expected: c.expected,
       start_url: c.start_url || null,
       tags: tags.split(",").map((x) => x.trim()).filter(Boolean),
@@ -82,6 +97,21 @@ export function CaseDrawer({
       setErr(String(e));
     } finally {
       setSaving(false);
+    }
+  };
+
+  // 清空经验笔记。用例内容一变，后端本来就会靠指纹把旧笔记作废；
+  // 但"页面改版了、用例却没改"这种情况指纹发现不了，所以得留一个手动出口。
+  const clearMemory = async () => {
+    setClearingMemory(true);
+    try {
+      const updated = await api.clearCaseMemory(caseData.id);
+      // 就地更新，不关闭抽屉 —— 用户清完通常还想接着看别的
+      setC((p) => ({ ...p, memory: updated.memory ?? null, memory_stale: false }));
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setClearingMemory(false);
     }
   };
 
@@ -168,12 +198,80 @@ export function CaseDrawer({
             </div>
 
             <Field label={t("Runs as (role) — which account executes this case")}>
-              <Select value={c.role ?? ""} onValueChange={(v) => set("role", v || null)}>
-                <option value="">{t("— default account —")}</option>
-                {roles.map((r) => (
-                  <option key={r} value={r}>{r}</option>
-                ))}
-              </Select>
+              <div className="space-y-2">
+                <Select
+                  value=""
+                  onValueChange={(v) => {
+                    // 2026-10-04 多角色：下拉里选一个角色 = 追加到切换序列末尾。
+                    // 顺序即执行时的切换顺序，所以追加而不是替换。
+                    if (!v) return;
+                    set("roles", [...(c.roles ?? []), v]);
+                  }}
+                >
+                  <option value="">{t("— add a role to the sequence —")}</option>
+                  {roles
+                    .filter((r) => !(c.roles ?? []).includes(r))
+                    .map((r) => (
+                      <option key={r} value={r}>{r}</option>
+                    ))}
+                </Select>
+
+                {(c.roles ?? []).length > 0 && (
+                  <div className="space-y-1">
+                    <div className="text-xs text-muted-foreground">
+                      {t("Switch order — the case starts as the first one and switches through the rest:")}
+                    </div>
+                    {(c.roles ?? []).map((r, i) => (
+                      <div
+                        key={r}
+                        className="flex items-center gap-2 rounded-md border px-2 py-1 text-sm"
+                      >
+                        <span className="w-5 shrink-0 text-center text-xs tabular-nums text-muted-foreground">
+                          {i + 1}
+                        </span>
+                        <span className="flex-1 truncate">{r}</span>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          disabled={i === 0}
+                          onClick={() => {
+                            const next = [...(c.roles ?? [])];
+                            [next[i - 1], next[i]] = [next[i], next[i - 1]];
+                            set("roles", next);
+                          }}
+                          title={t("Move up")}
+                        >
+                          ↑
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          disabled={i === (c.roles ?? []).length - 1}
+                          onClick={() => {
+                            const next = [...(c.roles ?? [])];
+                            [next[i + 1], next[i]] = [next[i], next[i + 1]];
+                            set("roles", next);
+                          }}
+                          title={t("Move down")}
+                        >
+                          ↓
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => set("roles", (c.roles ?? []).filter((x) => x !== r))}
+                          title={t("Remove")}
+                        >
+                          ×
+                        </Button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
             </Field>
 
             <Field label={t("References (linked requirements / tickets)")}>
@@ -224,6 +322,17 @@ export function CaseDrawer({
               <Field label={t("Test data")}>
                 <Textarea rows={2} value={c.test_data} onChange={(e) => set("test_data", e.target.value)} placeholder="厂区A / 料号 X" />
               </Field>
+              <Field
+                label={t("Data isolation note")}
+                hint={t("Filled in when your expected result hard-codes a count (like \"1 row\"): the app's data is changed by other cases, so the note tells the agent not to treat leftovers as a defect. Empty = not injected.")}
+              >
+                <Textarea
+                  rows={3}
+                  value={c.data_hygiene ?? ""}
+                  onChange={(e) => set("data_hygiene", e.target.value)}
+                  placeholder={t("Leave empty unless the expected result mentions a specific number of rows")}
+                />
+              </Field>
               <Field label={t("Expected outcome (for the judge)")}>
                 <Textarea
                   rows={2}
@@ -256,6 +365,47 @@ export function CaseDrawer({
                 {t("Cancel")}
               </Button>
             </div>
+
+            {!isNew && (c.memory || c.memory_stale) && (
+            <div className="border-t border-[var(--line)] pt-4">
+              <div className="mb-2 flex items-center justify-between">
+                <div className="text-sm font-medium text-ink-900">
+                  {t("What it learned (experience notes)")}
+                </div>
+                <Button size="sm" variant="ghost" onClick={clearMemory} disabled={clearingMemory}>
+                  {clearingMemory ? t("Clearing…") : t("Clear")}
+                </Button>
+              </div>
+
+              {c.memory_stale ? (
+                <p className="text-[13px] text-ink-500">
+                  {t("This case was edited after these notes were written, so they are ignored when it runs. They will be rebuilt on the next run.")}
+                </p>
+              ) : (
+                <div className="space-y-1.5">
+                  {MEMORY_LABELS.map(([key, label]) => {
+                    const items = (c.memory?.[key] as string[] | undefined) ?? [];
+                    if (!items.length) return null;
+                    return (
+                      <div key={key} className="text-[13px]">
+                        <span className="mr-1 font-medium text-ink-700">{t(label)}：</span>
+                        <span className="text-ink-800">{items.join("；")}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
+              <p className="mt-2 text-xs text-ink-500">
+                {t("Notes only record how to get around — navigation paths and page quirks. They deliberately never record whether a run passed: that would turn the next run into copying an answer instead of testing.")}
+              </p>
+              {c.memory_updated_at && (
+                <p className="mt-1 text-xs text-ink-500">
+                  {t("Updated")}: {relTime(c.memory_updated_at)}
+                </p>
+              )}
+            </div>
+            )}
 
             {!isNew && (
             <div className="border-t border-[var(--line)] pt-4">

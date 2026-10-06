@@ -31,7 +31,7 @@ cp .env.example .env
 
 Edit `.env` — the minimum for a real deployment:
 
-- `TESTPILOT_SECRET_KEY` — Fernet key (see [configuration.md](configuration.md#security))
+- `POTATO_SECRET_KEY` — Fernet key (see [configuration.md](configuration.md#security))
 - `GATEWAY_BASE_URL` / `GATEWAY_API_KEY` / `GATEWAY_MODEL` — your LLM endpoint
 - `POSTGRES_PASSWORD` — anything but the default
 - For multi-user: `AUTH_ENABLED=true`, `JWT_SECRET`, `ADMIN_EMAIL`, `ADMIN_PASSWORD`, `PUBLIC_BASE_URL`

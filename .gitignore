@@ -67,6 +67,7 @@ _*.tmp
 #
 # 注意用 `/_*.py` 而不是 `_*.py`：后者会连带匹配到 app/__init__.py 这类包文件。
 /_*.py
+/_*.txt
 
 # 归档的过时备份（.env / potato.db / BAT 快照）——留作后悔药，不入库
 scripts/desktop/_superseded/

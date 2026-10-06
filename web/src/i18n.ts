@@ -182,6 +182,13 @@ const zh: Record<string, string> = {
   action: "操作",
   expected: "预期",
   "Test data": "测试数据",
+  "Test data files (Excel / CSV / TXT)": "测试数据文件（Excel / CSV / TXT）",
+  "Test data files hint":
+    "声明要生成的文件，执行前由平台物化成真实文件，agent 再用 upload_file 传给被测系统。支持 xlsx / csv / txt；" +
+    "占位符：{{i}} 行号（从 1 起）、{{case_key}} 用例编号、{{rand:18}} 18 位随机数字、{{uuid:8}}、{{today}}、{{now}}。" +
+    'rows 可以写数组，也可以写 {"count": 200, "template": ["B{{i}}"]} 批量生成。留空 = 这条用例不需要上传文件。',
+  "Insert a template": "插入模板",
+  Template: "模板",
   "No cases match the filters.": "没有符合筛选条件的用例。",
 
   // runs

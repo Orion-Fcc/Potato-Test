@@ -33,6 +33,10 @@ const blankCase = (pid: number): TestCase => ({
   prompt: "",
   steps: [],
   test_data: "",
+  // 不声明要上传的文件。留 null 而不是空对象：后端看到 null 就不会生成任何东西，
+  // 空对象会被当成"声明了一个空文件列表"，多一次无意义的解析。
+  data_files: null,
+  data_files_error: null,
   expected: "",
   start_url: null,
   tags: [],

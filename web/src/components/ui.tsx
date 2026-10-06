@@ -371,12 +371,30 @@ export function LiveDot({ className }: { className?: string }) {
   return <span aria-hidden className={clsx("h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-brand-600", className)} />;
 }
 
-export function Field({ label, hint, children }: { label: string; hint?: string; children: ReactNode }) {
+// error 是后加的：声明式输入（JSON/正则/路径）出错时，光标停在框里没有任何线索，
+// 用户只能猜。放在 Field 上而不是每个调用点自己渲染，是为了让"出错了长什么样"
+// 在整个应用里是同一套 —— 分散渲染的红色提示最后会变成五种样子。
+export function Field({
+  label,
+  hint,
+  error,
+  children,
+}: {
+  label: string;
+  hint?: string;
+  error?: string;
+  children: ReactNode;
+}) {
   return (
     <label className="block space-y-1.5">
       <span className="block text-xs font-medium tracking-wide text-ink-500">{label}</span>
       {children}
-      {hint && <span className="block text-xs leading-relaxed text-ink-500">{hint}</span>}
+      {hint && !error && <span className="block text-xs leading-relaxed text-ink-500">{hint}</span>}
+      {error && (
+        <span role="alert" className="block text-xs leading-relaxed text-red-600 dark:text-red-400">
+          {error}
+        </span>
+      )}
     </label>
   );
 }

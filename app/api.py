@@ -814,6 +814,11 @@ def _case(c: TestCase, last: LastResult | None = None) -> dict:
         "prompt": c.prompt,
         "steps": c.steps or [],
         "test_data": c.test_data or "",
+        # 2026-10-06 测试数据文件声明（供用例编辑页渲染）。
+        # 永远序列化，哪怕解析失败也要把原文带回去 —— 否则用户在界面上看到空白，
+        # 无从判断是自己没填还是后端把它吞了。
+        "data_files": c.data_files,
+        "data_files_error": _data_files_error(c.data_files),
         "data_hygiene": c.data_hygiene or "",
         "expected": c.expected,
         "start_url": c.start_url,
@@ -830,6 +835,24 @@ def _case(c: TestCase, last: LastResult | None = None) -> dict:
             c.memory and c.memory_fingerprint and c.memory_fingerprint != _case_fingerprint(c)
         ),
     }
+
+
+def _data_files_error(decl: object) -> str | None:
+    """声明不合法时给出原因，合法或为空时返回 None。
+
+    为什么把校验放在"读"路径上也做一遍：写路径已经拦过一次，但库里可能躺着
+    改 schema 之前写入的、或手工改过的数据。界面上直接显示这句话，比让用户
+    跑到执行期才发现"文件没准备好"要早得多。
+    """
+    if decl in (None, "", {}):
+        return None
+    from app import testdata
+
+    try:
+        testdata.parse(decl)
+    except testdata.SpecError as exc:
+        return str(exc)
+    return None
 
 
 def _case_fingerprint(c: TestCase) -> str:
@@ -1614,6 +1637,18 @@ async def update_case(cid: int, body: TestCasePatch, request: Request) -> dict:
             _rs = _roles_of(body.role, None)
             data["roles"] = _rs
             data["role"] = _rs[0] if _rs else None
+        # 2026-10-06 测试数据声明在**保存时**就校验。
+        # 为什么不留到执行期：执行期遇到坏声明会降级成"没有文件"（见
+        # app/testdata_runtime.py），那对运行是对的，但对用户是延迟的坏体验 ——
+        # 他要等一条用例跑完，才知道自己填错了。所以这里 400 回去，界面当场显示。
+        if "data_files" in body.model_fields_set:
+            from app import testdata
+
+            try:
+                # parse() 兼做归一化：字符串 JSON / 裸数组都能收下
+                data["data_files"] = {"files": testdata.parse(body.data_files)} or None
+            except testdata.SpecError as exc:
+                raise HTTPException(422, f"测试数据声明无效：{exc}") from exc
         for k, v in data.items():
             setattr(c, k, v)
         await s.flush()

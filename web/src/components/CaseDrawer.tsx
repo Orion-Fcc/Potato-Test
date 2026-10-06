@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
   api,
@@ -17,6 +17,25 @@ import { Modal } from "./Modal";
 const PRIORITIES: CasePriority[] = ["P0", "P1", "P2", "P3"];
 const TYPES: CaseType[] = ["functional", "smoke", "regression", "acceptance", "negative"];
 const STATUSES: CaseStatus[] = ["draft", "active", "deprecated"];
+
+// 「测试数据文件」声明的模板。放在代码里而不是后端下发，是因为它必须与
+// app/testdata.py 的判据一起演进 —— 两处分叉的模板比没有模板更糟。
+const DATA_FILES_TEMPLATE = `{
+  "files": [
+    {
+      "name": "导入模板.xlsx",
+      "kind": "xlsx",
+      "sheets": [
+        {
+          "name": "Sheet1",
+          "header": ["学号", "姓名", "证件号"],
+          "rows": [["S001", "张三", "{{rand:18}}"], ["S002", "李四", "{{rand:18}}"]]
+        }
+      ]
+    }
+  ]
+}`;
+
 
 // 经验笔记的三类内容，与后端 app/case_memory.py 的白名单一一对应。
 // 这里刻意只列这三类 —— 界面上能显示什么，就等于后端允许记什么。
@@ -48,6 +67,23 @@ export function CaseDrawer({
   const [roles, setRoles] = useState<string[]>([]);
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState("");
+  // 测试数据文件声明。用文本编辑而不是做表单控件：JSON 嵌套两层以上，
+  // 表单会把"哪些字段是必填"藏起来，而这里一眼能看出整份声明长什么样。
+  const [dataFilesText, setDataFilesText] = useState(() =>
+    caseData.data_files ? JSON.stringify(caseData.data_files, null, 2) : "",
+  );
+  // 客户端只查 JSON 语法；语义校验（文件名/上限/占位符）由后端做，它才是权威。
+  // 两边都查的意义是：语法错在本地下就显示，不用等一个网络往返。
+  const dataFilesJsonError = useMemo(() => {
+    const s = dataFilesText.trim();
+    if (!s) return "";
+    try {
+      JSON.parse(s);
+      return "";
+    } catch (e) {
+      return String(e);
+    }
+  }, [dataFilesText]);
 
   useEffect(() => {
     if (!isNew) api.getCaseResults(caseData.id).then(setHistory).catch(() => {});
@@ -83,6 +119,12 @@ export function CaseDrawer({
       prompt: c.prompt,
       steps: c.steps.filter((s) => s.action.trim() || s.expected.trim()),
       test_data: c.test_data,
+      // 空文本 -> null（后端看到 null 就不会生成文件）。
+      // 语法错时也发 null：后端的校验只对"有内容"的声明负责，
+      // 而把半截 JSON 发过去只会得到一句更难懂的报错。
+      data_files: dataFilesText.trim() && !dataFilesJsonError
+        ? JSON.parse(dataFilesText)
+        : null,
       data_hygiene: c.data_hygiene ?? "",
       expected: c.expected,
       start_url: c.start_url || null,
@@ -321,6 +363,31 @@ export function CaseDrawer({
             <div className="grid grid-cols-2 gap-3">
               <Field label={t("Test data")}>
                 <Textarea rows={2} value={c.test_data} onChange={(e) => set("test_data", e.target.value)} placeholder="厂区A / 料号 X" />
+              </Field>
+              {/* 测试数据文件声明。放在"测试数据"旁边而不是另开一节：
+                  两者在用户脑子里是同一件事（"这条用例要准备什么数据"），
+                  分成两处会让人以为它们互不相干。 */}
+              <Field
+                label={t("Test data files (Excel / CSV / TXT)")}
+                hint={t("Test data files hint")}
+                error={dataFilesJsonError || c.data_files_error || undefined}
+              >
+                <div className="flex gap-2 items-start">
+                  <Textarea
+                    rows={7}
+                    className="font-mono text-xs"
+                    value={dataFilesText}
+                    onChange={(e) => setDataFilesText(e.target.value)}
+                    placeholder={'{\n  "files": [ ... ]\n}'}
+                  />
+                  <Button
+                    type="button"
+                    onClick={() => setDataFilesText(DATA_FILES_TEMPLATE)}
+                    title={t("Insert a template")}
+                  >
+                    {t("Template")}
+                  </Button>
+                </div>
               </Field>
               <Field
                 label={t("Data isolation note")}

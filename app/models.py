@@ -124,6 +124,15 @@ class TestCase(Base):
     # structured steps kept as human documentation: [{"action": str, "expected": str}]
     steps: Mapped[list] = mapped_column(JSON, default=list)
     test_data: Mapped[str] = mapped_column(Text, default="")
+
+    # ★ 2026-10-06 测试数据文件声明（JSON）：{"files":[{"name","kind","sheets"/"content"}]}。
+    # 执行前由 app/testdata.py 物化成真实文件，agent 用 upload_file 传给被测系统
+    # —— 有些用例是"先导入一份 Excel，再验证导入结果"。
+    #
+    # 为什么单开一列而不复用 test_data：那一列已经有 181 条存量用例在写自由文本
+    # （"名称=SIT手测-场地审批；使用范围=…"），塞结构化声明进去会把两种语义搅在一起，
+    # 存量内容也会被当成声明解析。
+    data_files: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     # 数据隔离提示（可选）。原样拼进 agent 的任务提示，见 app/data_hygiene.py。
     # 存在的原因：实测这批用例里 12 条的 expected 写死了"1 行""2 条"这类绝对数字，
     # 而新增类用例跑完不清理 —— 于是它们**第一次对、第二次必然假失败**

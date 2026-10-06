@@ -236,6 +236,12 @@ export interface TestCase {
   prompt: string;
   steps: TestStep[];
   test_data: string;
+  // 2026-10-06 测试数据文件声明（后端 app/testdata.py 消费）。
+  // data_files 是原样保存的声明；data_files_error 是后端校验后的原因（没有则为空）——
+  // 界面靠它当场显示"哪里写错了"，而不是等一条用例跑完才发现文件没准备好。
+  // 保存走 Partial<TestCase>，所以加在这里就同时覆盖 createCase / updateCase 的请求体。
+  data_files: { files?: unknown[] } | null;
+  data_files_error: string | null;
   // 数据隔离提示：拼进 agent 任务提示。留空 = 不注入。
   // 见后端 app/data_hygiene.py —— 预期里写死了"1 行""2 条"这类绝对数字时必填，
   // 否则用例会被自己上次留下的数据污染，第二次跑必然假失败。

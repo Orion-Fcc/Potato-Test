@@ -48,6 +48,9 @@ _ADDITIVE_COLUMNS: tuple[tuple[str, str, str], ...] = (
     # **保留不动** —— 378 条存量用例都带着它，删掉等于逼所有人重录一遍。
     # roles 为空时执行层回落到 role，所以老用例不迁移也能照常跑。
     ("test_case", "roles", "JSON"),
+    # 2026-10-06 测试数据文件声明：让"先导入 Excel 再验证"这类用例把文件内容
+    # 写进用例，执行前物化成真文件（见 app/testdata.py）。存量行为 NULL = 不声明文件。
+    ("test_case", "data_files", "JSON"),
     # 2026-10-04 失败根因分类：让报告能区分"真缺陷"与"环境/账号/前置数据"类假失败。
     # 取值见 app/judge.py 的 _ROOT_CAUSES；存量行为 NULL（分类功能上线前的结果），
     # 报告侧要按"未分类"展示，不能当成 unclear —— 那会冤枉历史数据。

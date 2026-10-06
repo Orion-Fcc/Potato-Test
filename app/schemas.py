@@ -120,6 +120,9 @@ class TestCasePatch(BaseModel):
     preconditions: str | None = None
     steps: list[TestStep] | None = None
     test_data: str | None = None
+    # 2026-10-06 测试数据文件声明。接受 dict / 数组 / JSON 字符串三种形态：
+    # 前端 textarea 给出的是字符串，API 编程调用给 dict 更顺手，都不该逼用户转换。
+    data_files: dict | list | str | None = None
     data_hygiene: str | None = None
     start_url: str | None = None
     tags: list[str] | None = None

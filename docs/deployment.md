@@ -101,18 +101,52 @@ store to upload instead (see [configuration.md](configuration.md#artifact-storag
 
 ## Running without Docker
 
+有一条命令做完的版本（幂等，重复跑只补缺的部分）：
+
+```bash
+git clone https://github.com/Orion-Fcc/Potato-Test.git && cd Potato-Test && ./scripts/deploy.sh
+```
+
+手工版：
+
 ```bash
 pip install -e .
 playwright install --with-deps chromium
-cd web && npm install && npm run build && cd ..
-export WEB_DIST=$PWD/web/dist
+# web/dist 随仓库发布，所以这一步只在你要改界面时才需要：
+# cd web && pnpm install && pnpm build && cd ..
+# 没配 WEB_DIST 时 run_server.py 会自动使用 ./web/dist
 alembic upgrade head
 uvicorn app.main:app --host 0.0.0.0 --port 8000
 # optional, for GitLab sync + queued runs:
 celery -A app.celery_app.celery worker -l info --concurrency=16
 celery -A app.celery_app.celery beat -l info
-python -m app.feishu_ws        # optional Feishu bot
 ```
 
 Without `REDIS_URL`, runs execute in-process in the API (fine for small setups)
 and GitLab sync stays disabled.
+
+### 飞书机器人不需要单独起进程（2026-10-06 起）
+
+机器人**默认随 API 服务一起启动和停止**（`FEISHU_WORKER_IN_PROCESS=true`），
+所以上面的启动命令已经包含了它 —— 不要再去起第二个进程。
+
+为什么改：以前它只能靠桌面 `.bat` 额外 `start pythonw -m app.feishu_poll`。于是
+"服务起来了、机器人没起"这种部署状态下，群里 @机器人 问状态永远没人理，而且
+`logs/` 下**什么都不会有** —— 没有进程，自然没有日志。排查一个不存在的问题，
+是最浪费时间的一类故障。
+
+三种启动方式的关系（都靠 `potato-feishu-poll` 内核级单实例锁排队，抢不到的会
+自己退出并记录原因，**绝不会出现一条消息回两次**）：
+
+| 场景 | 用什么 | 配置 |
+|---|---|---|
+| 本机 / 单机部署（默认） | 进程内轮询，随服务起停 | 什么都不用做 |
+| 想独立控制机器人进程 | `python -m app.feishu_poll` | `FEISHU_WORKER_IN_PROCESS=false` |
+| Docker Compose | 仓库自带的 `feishu` 服务（WebSocket 长连接） | compose 里已设 `FEISHU_WORKER_IN_PROCESS=false` |
+
+轮询用的是普通 REST 调用，**不依赖 `lark-oapi`**（那个 SDK 光 import 在冷缓存下
+要几分钟，不适合当一个"随时可能在群里被问一句"的进程的启动成本）。只有
+`python -m app.feishu_ws` 这条 WebSocket 路线才需要 `pip install -e ".[feishu]"`。
+
+机器人日志在 `logs/feishu_poll.log`（独立文件：服务日志是 WARNING 起步，
+而"群里为什么没人回"恰恰只能靠这里的 INFO/WARNING 看出来）。

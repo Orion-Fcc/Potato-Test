@@ -101,18 +101,30 @@ Best-effort: a send failure is logged, never raised — an invite still returns 
 
 ## Feishu (Lark) bot (optional)
 
-Requires `ENABLE_FEISHU=true`. Create a self-built app on the Feishu open platform, enable the long-connection (WebSocket) event mode, then either set these or configure them at runtime in **System settings** in the UI.
+Requires `ENABLE_FEISHU=true`. Create a self-built app on the Feishu open platform, then either set these or configure them at runtime in **System settings** in the UI.
+
+Two scopes are needed, and a version must be **published** for either to take effect:
+
+- `im:message` — send cards and replies.
+- `im:message.history:readonly` — read group history. **Without it the bot can push but never sees a question**, which is exactly what 「群里问『状态』没人理」 looks like. The worker logs a hint mentioning this scope when the API answers `99991672`.
 
 | Variable | Default | Notes |
 |---|---|---|
 | `FEISHU_APP_ID` / `FEISHU_APP_SECRET` | *(empty)* | Empty ⇒ bot disabled. |
-| `FEISHU_VERIFICATION_TOKEN` | *(empty)* | Event-subscription verification token; when set, incoming events must match. |
+| `FEISHU_WORKER_IN_PROCESS` | `true` | Run the bot **inside the API process** so it starts and stops with the server. Set `false` if something else already runs one: the bundled `docker-compose` `feishu` service (WebSocket transport), or a standalone `python -m app.feishu_poll`. All three take the same kernel-level single-instance lock, so the extras bow out on their own instead of answering twice. |
+| `FEISHU_POLL_INTERVAL_SEC` | `8` | Poll interval — also the worst-case latency before the bot answers. After a failure the worker backs off by doubling, capped at 60 s (was 300 s: a transient blip then looked like a dead bot for five minutes). |
+| `FEISHU_IGNORE_PROXY` | `true` | Ignore `HTTP(S)_PROXY` when calling `open.feishu.cn`. Set `false` only if Feishu is reachable solely through a proxy. |
+| `FEISHU_VERIFICATION_TOKEN` | *(empty)* | Event-subscription verification token; only used by the HTTP-webhook transport. |
 | `FEISHU_API_BASE` | `https://open.feishu.cn` | Use `https://open.larksuite.com` for international Lark. |
 | `FEISHU_AUTO_ANSWER_DETECTED` | `true` | Also answer questions detected from context, not just @-mentions / DMs. |
 | `FEISHU_AMBIENT_REQUIRE_KEYWORD` | `true` | Cost gate: non-@ messages need a problem keyword before the LLM classifies them. `false` ⇒ classify every message (higher cost). |
+
+The in-process worker needs **no** extra dependency — it talks plain REST. Only the
+WebSocket transport (`python -m app.feishu_ws`, which docker-compose uses) needs
+`pip install -e ".[feishu]"`.
 
 ## Serving the SPA
 
 | Variable | Default | Notes |
 |---|---|---|
-| `WEB_DIST` | *(empty)* | Path to the built frontend, served by the API at `/`. The Docker image sets `/app/web_dist`; leave empty in dev (Vite serves the SPA). |
+| `WEB_DIST` | *(empty)* | Path to the built frontend, served by the API at `/`. The Docker image sets `/app/web_dist`. **Left empty, `run_server.py` auto-detects `./web/dist`** — which ships in the repo, so a fresh clone serves the UI with no configuration and no Node install. Only set it explicitly to point somewhere else. |

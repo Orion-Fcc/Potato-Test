@@ -136,9 +136,24 @@ def main() -> int:
     import uvicorn
 
     from app.config import get_settings
-    from app.main import app
 
     s = get_settings()
+
+    # 前端兜底：.env 没配 WEB_DIST 时，自动使用仓库里自带的 web/dist。
+    #
+    # 为什么需要（2026-10-06）：web/dist 此前是 gitignore 的，于是"clone 下来直接跑"
+    # 只得到 API，访问 / 是 404，看起来像坏了；而构建前端需要 Node + pnpm，
+    # 测试同事的机器上往往没有。现在 dist 随仓库发布，这一行让它**零配置**生效。
+    #
+    # 必须在导入 app.main 之前改：create_app() 在导入时就会读这个值并决定是否挂载 SPA。
+    # get_settings 是 lru_cache 的，所以这里改的是同一个对象，导入时能看到。
+    if not (s.web_dist or "").strip():
+        candidate = ROOT / "web" / "dist"
+        if (candidate / "index.html").is_file():
+            s.web_dist = str(candidate)
+            log.info("WEB_DIST 未配置，自动使用仓库自带的前端 %s", candidate)
+
+    from app.main import app
     log.info(
         "LLM 网关 %s / 模型 %s （密钥%s）",
         s.gateway_base_url,

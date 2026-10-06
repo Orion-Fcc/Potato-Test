@@ -1,0 +1,1 @@
+const o={contentStyle:{background:"var(--panel)",border:"1px solid var(--line)",borderRadius:8,color:"var(--text)",fontSize:12},labelStyle:{color:"var(--muted)"},itemStyle:{color:"var(--text)"}};export{o as c};

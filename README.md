@@ -25,6 +25,37 @@ Agent 自己想清楚该点哪里；裁判读截图和动作记录下结论，**
 
 ## 快速开始
 
+### 一键部署（推荐，先看这里）
+
+把下面整段复制进终端就行。它会拉代码、建虚拟环境、装依赖、下 Chromium、生成 `.env`，
+然后启动服务 —— 中间不需要任何手工操作。
+
+Windows（cmd 或 PowerShell）：
+
+```bat
+git clone https://github.com/Orion-Fcc/Potato-Test.git "%USERPROFILE%\Potato-Test"
+cd /d "%USERPROFILE%\Potato-Test" && scripts\deploy.bat
+```
+
+macOS / Linux：
+
+```bash
+git clone https://github.com/Orion-Fcc/Potato-Test.git ~/Potato-Test
+cd ~/Potato-Test && ./scripts/deploy.sh
+```
+
+几点说明：
+
+- **脚本是幂等的。** 重复运行只会补齐缺失的部分，不会覆盖你已有的 `.env` 或数据库。
+- **路径里有空格没关系。** `D:\agent_study\Potato Test` 就是验证过的部署位置，
+  所有脚本里的路径都加过引号。
+- **换端口**：`PORT=9000 ./scripts/deploy.sh`（Windows 改 `scripts\deploy.bat` 开头的 `set "PORT="`）。
+- **默认端口 18081**，与桌面启动器 `PotatoTest.bat` 一致。
+- **启动前会提醒你填 `GATEWAY_API_KEY`。** 它是空的，测试执行和 AI 判定都跑不了 ——
+  这是唯一一个必须自己填的东西（网关地址/模型同样在 `.env` 里）。
+
+如果同事的机器上装不了 Python，或者你想手工控制每一步，看下面的分步做法。
+
 ### Windows
 
 装好 Python ≥ 3.11 后，在项目目录里执行一次（首次约 5-10 分钟，`browser-use` 依赖树较大）：
@@ -77,12 +108,19 @@ python run_server.py 18081
 
 ### 前端
 
+**构建产物 `web/dist` 随仓库一起发布**，所以克隆下来直接就有界面，不需要装 Node。
+`run_server.py` 在 `WEB_DIST` 没配置时会自动使用它，零配置。
+
+改界面的人要重新构建，并且**把新的 `web/dist` 和源码放在同一个提交里**：
+
 ```bash
-cd web && npm install && npm run build   # 产出 web/dist，由 API 直接托管
+cd web && pnpm install && pnpm build     # 产出 web/dist；npm 也可以
 ```
 
-只想改后端、不碰界面的话，这一步跑一次就行，之后不用重复。
-开发期要热更新则改用 `npm run dev`（Vite 会把 `/api` 和 `/artifacts` 代理到后端）。
+否则随仓库发布的界面会悄悄落后于代码 —— 而看界面的人不会知道。
+`scripts/deploy.*` 在检测到 Node 时会自动重建，所以开发者本机不会用到旧包。
+
+开发期要热更新则改用 `pnpm dev`（Vite 会把 `/api` 和 `/artifacts` 代理到后端）。
 
 （`pip install -e .` 会按 `pyproject.toml` 装齐全部依赖。注意 `browser-use` 和 `playwright` 的版本是**锁死**的，别随手升级——它们的接口在版本间会变。）
 
@@ -97,6 +135,45 @@ cd web && npm install && npm run build   # 产出 web/dist，由 API 直接托�
 4. 写用例（用大白话描述预期行为），然后点运行
 
 界面里 LLM 的配置**优先于** `.env`，改完立即生效，不用重启。
+
+### 飞书机器人（可选）
+
+配好之后，可以在群里用手机问进度、按需发起运行 —— **不会自动推送刷屏**。
+
+1. 到 <https://open.feishu.cn> 建一个**自建应用**，拿到 `App ID` / `App Secret`。
+2. 给应用开这两个权限，然后**发布版本**（不发布不生效）：
+   - `im:message` —— 发消息
+   - `im:message.history:readonly` —— 读群历史。**缺了它机器人只能推卡片、看不到你问的话**，
+     表现就是「群里问『状态』没人理」。
+3. 在 `.env` 里填好，并把开关打开：
+
+   ```ini
+   ENABLE_FEISHU=true
+   FEISHU_APP_ID=cli_xxx
+   FEISHU_APP_SECRET=xxx
+   ```
+
+4. 重启服务。机器人**跟着服务一起起停**（`FEISHU_WORKER_IN_PROCESS=true` 是默认值），
+   不需要额外开进程。启动日志里会出现一行「飞书轮询已随服务启动」。
+5. 把机器人拉进群，在群里发 `@机器人 绑定 <项目名>`，然后 `@机器人 状态` 试一下。
+
+支持的指令：`状态` / `跑` / `重跑` / `绑定 <项目名>` / `帮助`。
+
+排查用这两条：
+
+```bash
+# 看机器人有没有在跑、有没有报错（轮询日志是独立文件）
+tail -f logs/feishu_poll.log
+```
+
+- 「已有轮询实例在运行（PID …）」—— 说明另有一个机器人在跑（可能是 Docker 里的
+  `feishu` 服务，或你自己起的 `python -m app.feishu_poll`）。一条消息只该被回一次，
+  所以后来者会主动退出，这是**正常行为**，不是故障。
+- 「拉取群消息失败（… ConnectError/ReadTimeout）」—— 网络抖动。机器人会退避重试，
+  最多安静 60 秒就会恢复。持续失败则检查出网/代理（`FEISHU_IGNORE_PROXY`）。
+
+Docker 部署请设 `FEISHU_WORKER_IN_PROCESS=false` —— `docker-compose.yml` 里已经有独立的
+`feishu` 服务走 WebSocket 长连接，两边同时在线会把同一条消息回两次。
 
 ---
 

@@ -36,6 +36,9 @@
 from __future__ import annotations
 
 import argparse
+import json
+import os
+import pathlib
 import re
 import subprocess
 import sys
@@ -73,25 +76,50 @@ SHAPE_ALLOW = (
     re.compile(r"sk-xxx"),
 )
 
-# 本项目**真实**的标识串：不是凭据，但同样不该出现在公开仓库里。
+# ★★ 本机/本项目的**真实标识清单不在仓库里** ★★
 #
-# 为什么单列一类：第一版审计只找"长得像密钥的东西"和凭据值，结论是"干净"，
-# 却漏掉了 LLM 网关地址与模型名 —— 它们不长得像密钥，但会暴露"谁在用哪家网关"，
-# 而且比密钥更难轮换（换网关要走流程）。这类东西只能靠一张显式清单来守。
+# 这份清单的内容，恰恰就是"不能公开的东西"：LLM 网关地址、模型名、客户名、
+# 被测系统内网地址、角色账号前缀、本地目录名。把清单放进版本库，等于一边擦掉
+# 一边把清单抄了一份留在原地。
 #
-# ★ 这份清单是**单一事实来源**：改这里就要同步 redact 脚本的替换规则，反之亦然。
-#   两份不一致的后果是"检查说干净、实际没抹掉"。
-KNOWN_IDENTIFIERS: list[tuple[str, str]] = [
-    ("api.example.com", "用户的 LLM 网关主机名"),
-    ("example-model", "实际使用的模型名"),
-    ("example-model", "实际使用的模型名"),
-    ("192.0.2.10", "被测系统内网地址（RFC1918，但能反推客户）"),
-    ("192.168.1.", "常见内网段（示例里见到也要确认是不是真地址）"),
-    ("示例", "客户名称"),
-    ("培训", "客户租户名"),
-    ("系统管理员", "客户环境里的管理员显示名"),
-    ("role", "客户环境里的角色账号前缀"),
-    ("<WORK_DIR>", "旧的本地工作目录名（会暴露目录命名习惯）"),
+# 而且它会**自我失效**：自动脱敏会把清单里的真实串一起换成占位符，于是检查器
+# 开始用 `api.example.com`、`示例`、`role` 这类**占位符和常用词**去搜正常文档 ——
+# 实测 190 处假警报（`role` 这个英文词能命中半个仓库）。一个永远报红的检查器
+# 和没有检查器等价。
+#
+# 所以仓库只提供**机制**：危险路径、密钥形状、.env/数据库里真正配置着的值 ——
+# 这三类不需要任何本地知识，对公开仓库来说是最合适的默认检查。
+# 标识类检查需要清单，清单放在 .secrets.local.json（已 gitignore），
+# 由仓库主人本地维护。redact_history.py 用的是同一份清单。
+LOCAL_RULES_FILE = ".secrets.local.json"
+
+
+def load_local_rules(
+    path: str | os.PathLike[str] = LOCAL_RULES_FILE,
+) -> tuple[list[tuple[str, str, str]], list[tuple[str, str]]]:
+    """读本机清单。文件不存在 → 返回空清单（**不是**报错）。
+
+    格式见 scripts/secrets.local.example.json。
+    """
+    p = pathlib.Path(path)
+    if not p.is_file():
+        return [], []
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return [], []
+    redactions = [tuple(str(x) for x in item) for item in data.get("redactions", [])]
+    extra = [tuple(str(x) for x in item) for item in data.get("extra_identifiers", [])]
+    return redactions, extra
+
+
+#: 替换表：(真实串, 占位符, 为什么)。检查与重写共用，保证两者永不脱节。
+REDACTIONS, EXTRA_IDENTIFIERS = load_local_rules()
+
+# KNOWN_IDENTIFIERS 由上面两张表推导，不再单独维护一份 ——
+# tests/test_no_secrets_committed.py 里有断言钉住这个不变式。
+KNOWN_IDENTIFIERS: list[str] = [old for old, _new, _why in REDACTIONS] + [
+    needle for needle, _why in EXTRA_IDENTIFIERS
 ]
 
 # 上面这些串出现在**示例/文档**里时是否算通过。
@@ -172,17 +200,43 @@ def value_hits(text: str, values: dict[str, str]) -> list[str]:
     return sorted(k for k, v in values.items() if v in text)
 
 
+def _identifier_present(text: str, needle: str) -> bool:
+    return needle in text and not any(a.search(needle) for a in IDENTIFIER_ALLOW)
+
+
 def identifier_hits(text: str) -> list[str]:
-    """文本里出现了哪些**本项目的真实标识串**（网关、客户名、内网地址……）。
+    """文本里出现了哪些**本机清单里的真实标识串**（网关、客户名、内网地址……）。
 
     返回的是给人和报告看的说明，不是命中的原文 —— 报告里回显一遍
     等于又把它们写进了日志和终端历史。
     """
-    found = []
-    for needle, why in KNOWN_IDENTIFIERS:
-        if needle in text and not any(a.search(needle) for a in IDENTIFIER_ALLOW):
-            found.append(f"{why}")
+    found = [why for needle, _new, why in REDACTIONS if _identifier_present(text, needle)]
+    found += [why for needle, why in EXTRA_IDENTIFIERS if _identifier_present(text, needle)]
     return sorted(set(found))
+
+
+def redact_bytes(blob: bytes) -> tuple[bytes, list[str]]:
+    """按 REDACTIONS 替换 blob 里的真实标识，返回 (新内容, 命中的规则说明)。
+
+    为什么要按**字节**、并且为同一个词生成多种编码：
+      * 历史里的文件可能是 UTF-8（源码），也可能是 GBK（.bat）；只替换 UTF-8 字节串，
+        同一个中文词在 .bat 里会原样留下。
+      * 用字节处理才不会因为"文件解码失败"而漏掉某个文件。
+    """
+    out = blob
+    applied: list[str] = []
+    for old, new, why in sorted(REDACTIONS, key=lambda r: -len(r[0])):
+        for enc in ("utf-8", "gbk", "gb18030"):
+            try:
+                o = old.encode(enc)
+                n = new.encode(enc)
+            except UnicodeEncodeError:
+                continue
+            if o in out:
+                out = out.replace(o, n)
+                applied.append(f"{why}（{enc}）")
+                break
+    return out, applied
 
 
 def collect_env_values(env_text: str) -> dict[str, str]:
@@ -304,6 +358,19 @@ def main(argv: list[str] | None = None) -> int:
         print(f"（对照 {len(values)} 个已配置的敏感项：{', '.join(sorted(values))}）")
     else:
         print("（.env 里没有可用的敏感值，数据库也没读到 —— 跳过值匹配）")
+
+    # 本机清单（有它才会做标识类检查）
+    if REDACTIONS or EXTRA_IDENTIFIERS:
+        print(
+            f"（标识清单：{len(REDACTIONS)} 条替换规则 + {len(EXTRA_IDENTIFIERS)} 条只查项，"
+            f"来自 {LOCAL_RULES_FILE}）"
+        )
+    else:
+        print(
+            f"（没有 {LOCAL_RULES_FILE} —— **标识类检查已跳过**。这是公开仓库的合理默认：\n"
+            f"  清单本身就是不能公开的内容，所以不入库。要启用它，复制\n"
+            f"  scripts/secrets.local.example.json -> {LOCAL_RULES_FILE} 并填好。）"
+        )
 
     # 3) + 4) 形状与图片
     images: list[str] = []

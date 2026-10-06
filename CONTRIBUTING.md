@@ -77,11 +77,34 @@ python scripts/check_secrets.py --head     # 已提交版本 ★
 python scripts/check_secrets.py --history  # 全部历史（慢，发布前跑一次）
 ```
 
-它会检查高危路径、`.env`/数据库里**真正配置着的**值、密钥形状、以及上面那张
-"本项目真实标识"清单（`scripts/check_secrets.py::KNOWN_IDENTIFIERS`）。
+它会检查高危路径（`.env` / `*.db` / `.potato-secret.key` / `profiles/` / `artifacts/`）、
+`.env` 与数据库里**真正配置着的**值、以及密钥形状（`cli_…` / `sk-…` / 私钥块）。
 
-**改那张清单时，要同步任何脱敏/重写脚本的替换规则** —— 两份不一致的后果是
-"检查说干净、实际没抹掉"。对应的回归测试在 `tests/test_no_secrets_committed.py`。
+### 标识类检查需要一份**本机清单**
+
+网关地址、客户名、内网地址这类东西**不长得像密钥**，只能靠显式清单守。而清单本身
+正是不能公开的内容，所以它**不入库**：
+
+```bash
+cp scripts/secrets.local.example.json .secrets.local.json   # 然后填上你的真实值
+```
+
+`.secrets.local.json` 已被 `.gitignore` 忽略。没有它时，检查器会明确告诉你
+"标识类检查已跳过"——这是公开仓库的合理默认，不是故障。
+
+> 为什么这么绕：这份清单原本写在 `check_secrets.py` 里，于是自动脱敏把清单里的真实串
+> 一起换成了占位符，检查器开始用 `role`、`示例` 这类**占位符和常用词**去搜正常文档，
+> 实测 190 处假警报。一个永远报红的检查器等于没有检查器。
+
+### 要改历史里的字符串，用同一份清单
+
+```bash
+python scripts/redact_history.py --print-rules    # 先看会替换什么
+```
+
+然后按 `scripts/redact_history.py` 顶部的步骤在**镜像副本**上做（备份 → 重写 →
+清 refs/original + gc → 验证 → force push）。清单为空时它会拒绝运行：空跑一遍
+重写会得到"看起来成功、实际什么都没改"的结果。
 
 注意：**历史是删不掉的。** 一旦某个字符串进过一次提交，公开仓库上它就存在过
 （`git log -p` 能看到），重写历史 + 强推也只是让新克隆看不到它 —— 旧的 commit

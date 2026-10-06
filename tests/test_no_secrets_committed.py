@@ -15,8 +15,10 @@ python -m pytest tests/test_no_secrets_committed.py
 from __future__ import annotations
 
 import importlib.util
+import os
 import pathlib
 import subprocess
+import tempfile
 
 import pytest
 
@@ -185,26 +187,153 @@ def test_env_value_collection_keeps_secrets_and_drops_placeholders() -> None:
     assert "POTATO_SECRET_KEY" not in got
 
 
-def test_identifier_scan_catches_the_projects_own_strings() -> None:
-    """网关地址与客户名不长得像密钥，只能靠显式清单守。
+def _load_with_rules(tmp_path, monkeypatch):
+    """在 tmp 里放一份清单并切 cwd，让检查器加载**夹具**规则。
 
-    这条来自一次真实的漏判：第一版审计只找"密钥形状"，结论是"干净"，
-    却把 `api.example.com` 放过去了 —— 它不长得像密钥，但它说明了
-    "谁在用哪家网关"，而且比密钥更难轮换。
+    为什么必须用夹具、而不是开发者本机那份 .secrets.local.json：
+    依赖未跟踪文件的测试，在别人的新克隆里会静默失去意义（变成"什么都没查"），
+    而这种测试全绿的时候恰恰最危险 —— 它看起来在保护你，实际没有。
     """
-    mod = _load()
+    import importlib.util
+    import json
 
-    hits = mod.identifier_hits("GATEWAY_BASE_URL=https://api.example.com/v1")
-    assert any("网关" in h for h in hits), hits
+    (tmp_path / ".secrets.local.json").write_text(
+        json.dumps(
+            {
+                "redactions": [
+                    ["real-gw.internal.example", "api.example.com", "网关主机名"],
+                    ["real-model-x", "example-model", "模型名"],
+                    ["10.9.8.7", "192.0.2.10", "内网地址"],
+                    ["示例客户", "示例", "客户名"],
+                ],
+                "extra_identifiers": [["192.168.1.", "常见内网段"]],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    spec = importlib.util.spec_from_file_location(
+        "cs_fixture", ROOT / "scripts" / "check_secrets.py"
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
 
-    assert mod.identifier_hits("被测系统 192.0.2.10:8600") != []
-    assert mod.identifier_hits("tenantName=示例培训") != []
-    assert mod.identifier_hits("D:\\<WORK_DIR>\\Potato_Test") != []
 
-    # 脱敏后的写法必须放过，否则脱敏完检查器还在报警，就没人信它了
+def test_the_repo_ships_no_identifier_list_of_its_own() -> None:
+    """★ 仓库本身不许携带本项目的真实标识清单。
+
+    这条来自一次真实事故：清单原本写在 `check_secrets.py` 里，于是自动脱敏把
+    清单里的真实串一起换成了占位符 —— 检查器开始用 `role`、`示例`、
+    `api.example.com` 这类**占位符和常用词**去搜正常文档，实测 190 处假警报。
+    一个永远报红的检查器等于没有检查器。
+
+    所以清单移到 .secrets.local.json（gitignore），仓库只提供机制。
+    """
+    import importlib.util
+
+    with tempfile.TemporaryDirectory() as empty:
+        spec = importlib.util.spec_from_file_location(
+            "cs_clean", ROOT / "scripts" / "check_secrets.py"
+        )
+        clean = importlib.util.module_from_spec(spec)
+        cwd = os.getcwd()
+        try:
+            os.chdir(empty)  # 空目录 => 没有任何本机清单
+            spec.loader.exec_module(clean)
+        finally:
+            os.chdir(cwd)
+
+    assert clean.REDACTIONS == [], "干净环境里不该凭空长出替换规则"
+    assert clean.KNOWN_IDENTIFIERS == []
+    assert clean.identifier_hits("host=whatever-gateway.example") == []
+
+
+def test_the_local_rules_file_is_never_tracked() -> None:
+    """本机清单与它的模板：模板要入库，清单绝不能。"""
+    files = set(_tracked())
+
+    assert ".secrets.local.json" not in files, "本机标识清单被跟踪了 —— 它正是不能公开的东西"
+    assert "scripts/secrets.local.example.json" in files, "缺少模板，别人不知道怎么配"
+
+
+def test_identifier_scan_uses_the_local_rules(tmp_path, monkeypatch) -> None:
+    mod = _load_with_rules(tmp_path, monkeypatch)
+
+    assert mod.identifier_hits("GATEWAY_BASE_URL=https://real-gw.internal.example/v1") != []
+    assert mod.identifier_hits("被测系统 10.9.8.7:8600") != []
+    assert mod.identifier_hits("tenant=示例客户") != []
+
+    # 脱敏后的占位写法必须放过，否则脱敏完检查器还在报警，就没人信它了
     assert mod.identifier_hits("https://api.example.com/v1") == []
     assert mod.identifier_hits("被测系统 192.0.2.10:8600") == []
     assert mod.identifier_hits("MODEL=example-model") == []
+
+
+def test_extra_identifiers_are_checked_but_not_replaced(tmp_path, monkeypatch) -> None:
+    mod = _load_with_rules(tmp_path, monkeypatch)
+
+    assert mod.identifier_hits("网关在 192.168.1.5 上") != []
+    _out, applied = mod.redact_bytes(b"host 192.168.1.5")
+    assert applied == [], "只查项不该被自动替换（它需要人工确认）"
+
+
+def test_redaction_rules_are_ordered_by_length_when_applied(tmp_path, monkeypatch) -> None:
+    """长规则必须先生效，否则会把长串截成半截。
+
+    `real-model-x` 先跑，`real-model-xyz` 就变成 `SHORTyz`。应用时按长度降序。
+    """
+    mod = _load_with_rules(tmp_path, monkeypatch)
+    mod.REDACTIONS[:] = [("real-model-x", "SHORT", "短的"), ("real-model-xyz", "LONG", "长的")]
+
+    out, _ = mod.redact_bytes(b"model=real-model-xyz")
+    assert out == b"model=LONG", out
+
+
+def test_redaction_handles_gbk_encoded_blobs(tmp_path, monkeypatch) -> None:
+    """历史里的 .bat 是 GBK；只按 UTF-8 替换，中文词会原样留下。"""
+    mod = _load_with_rules(tmp_path, monkeypatch)
+
+    out, applied = mod.redact_bytes("示例客户的租户".encode("gbk"))
+
+    assert out == "示例的租户".encode("gbk"), out
+    assert applied and "gbk" in applied[0]
+
+
+def test_redact_history_refuses_to_run_without_rules(tmp_path, monkeypatch) -> None:
+    """没有规则时必须**拒绝**运行，而不是"成功地什么都没做"。
+
+    空跑是这里最坏的失败形态：filter-branch 会照常重写所有提交、输出漂亮的进度、
+    推出一个什么都没变的分支，而人以为已经脱敏了。
+    """
+    import importlib.util
+
+    monkeypatch.chdir(tmp_path)  # 空目录 => 没有 .secrets.local.json
+    spec = importlib.util.spec_from_file_location(
+        "redact_history", ROOT / "scripts" / "redact_history.py"
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    assert mod.main(["--print-rules"]) == 2
+    assert mod.main(["--index-filter"]) == 2
+    assert mod.main(["--msg-filter"]) == 2
+
+
+def test_known_identifiers_is_derived_not_duplicated(tmp_path, monkeypatch) -> None:
+    """KNOWN_IDENTIFIERS 必须由 REDACTIONS 推导，不能再单独维护一份。
+
+    两份清单不一致时不会报错 —— 只会表现为"检查说干净、实际没抹掉"，
+    而这种问题要等到有人真的去翻历史才会发现。所以这里把它钉成一条不变式。
+    """
+    mod = _load_with_rules(tmp_path, monkeypatch)
+
+    derived = [old for old, _new, _why in mod.REDACTIONS] + [
+        n for n, _why in mod.EXTRA_IDENTIFIERS
+    ]
+    assert mod.KNOWN_IDENTIFIERS == derived, (
+        "KNOWN_IDENTIFIERS 与 REDACTIONS 脱钩了 —— 检查器会漏掉一部分真实标识"
+    )
 
 
 def test_value_hits_finds_the_offending_keys() -> None:

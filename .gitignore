@@ -73,6 +73,12 @@ _*.tmp
 # 模板见 scripts/secrets.local.example.json。
 .secrets.local.json
 
+# 后悔药：重写历史前的完整备份（git bundle）。
+# 它保存的是**重写之前**的历史 —— 也就是"已经从远端抹掉、但仍可恢复"的那一份，
+# 所以性质和 .env 一样敏感，只是用途不同。放在项目里而不是项目外，因为它是
+# 这个仓库的一部分；靠这一行保证它永远不会被 git add -A 带进去。
+/.backups/
+
 # 归档的过时备份（.env / potato.db / BAT 快照）——留作后悔药，不入库
 scripts/desktop/_superseded/
 

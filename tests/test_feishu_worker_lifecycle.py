@@ -67,6 +67,27 @@ def test_a_broken_bot_never_blocks_the_api(monkeypatch) -> None:
     assert asyncio.run(main_mod._start_feishu_worker()) is None
 
 
+def _use_private_lock(monkeypatch) -> str:
+    """把互斥体换成这次测试专属的名字，并返回它。
+
+    为什么必须换：`potato-feishu-poll` 是**进程级**锁，而用户可能正开着服务跑用例
+    —— 服务里的 worker 持着它。于是硬编码锁名的测试会在"app 正在运行"时变红，
+    而那与被测代码毫无关系。实测 2026-10-06：用户一打开 app，
+    `test_serve_in_process_bows_out_when_the_lock_is_taken` 与
+    `test_cancelling_the_worker_releases_the_lock` 双双失败 —— 看起来像刚改坏了
+    什么，实际上只是"用户在场"。
+
+    名字带上 pid：同一台机器上两个 pytest 进程并行时也不互相干扰。
+    """
+    import os
+
+    from app import feishu_poll
+
+    name = f"potato-feishu-poll-test-{os.getpid()}-{id(monkeypatch):x}"
+    monkeypatch.setattr(feishu_poll, "LOCK_NAME", name)
+    return name
+
+
 def test_serve_in_process_bows_out_when_the_lock_is_taken(monkeypatch) -> None:
     """单实例：一条消息只该被回一次。
 
@@ -75,7 +96,8 @@ def test_serve_in_process_bows_out_when_the_lock_is_taken(monkeypatch) -> None:
     from app import feishu_poll
     from app.single_instance import SingleInstance
 
-    holder = SingleInstance("potato-feishu-poll")
+    name = _use_private_lock(monkeypatch)
+    holder = SingleInstance(name)
     assert holder.acquire(), "前置：本进程先占住锁"
     try:
         assert asyncio.run(feishu_poll.serve_in_process()) is None
@@ -91,6 +113,10 @@ def test_cancelling_the_worker_releases_the_lock(monkeypatch) -> None:
     """
     from app import feishu_poll
     from app.single_instance import SingleInstance
+
+    # ★ 必须在 serve_in_process() **之前**换锁名：worker 是在那里抢锁的，
+    # 事后替换等于让它去抢真锁 —— 而真锁正被用户开着的服务持着，于是任务为 None。
+    name = _use_private_lock(monkeypatch)
 
     async def _never(_interval_s: int) -> None:
         await asyncio.Event().wait()
@@ -108,7 +134,7 @@ def test_cancelling_the_worker_releases_the_lock(monkeypatch) -> None:
 
     asyncio.run(_run())
 
-    other = SingleInstance("potato-feishu-poll")
+    other = SingleInstance(name)
     assert other.acquire(), "取消后没有释放锁"
     other.release()
 

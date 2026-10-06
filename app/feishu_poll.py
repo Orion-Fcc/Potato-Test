@@ -150,9 +150,15 @@ async def _loop(interval_s: int) -> None:
 # 让"谁在持锁"这件事在代码里一眼可见，也避免以后有人给 SingleInstance 加 __del__。
 _LOCK = None
 
+#: 互斥体的名字。做成模块常量而不是写死在函数里，是为了让测试能换成自己的名字 ——
+#: 这把锁是**进程级**的，而用户随时可能正开着服务跑用例（服务里的 worker 持锁）。
+#: 硬编码锁名的测试会在"用户正在用 app"时变红，而那与被测代码毫无关系，
+#: 只会让人以为是自己刚改的东西坏了（2026-10-06 实测：app 一开，这两个测试就红）。
+LOCK_NAME = "potato-feishu-poll"
+
 
 def _acquire_lock():
-    """抢 `potato-feishu-poll` 单实例锁；抢不到返回 None 并说明是谁在持有。
+    """抢单实例锁；抢不到返回 None 并说明是谁在持有。
 
     单实例是硬要求：两份轮询会各自读同一个群并各回一次消息，用户收到重复回复
     （2026-10-02 实测漏过两份，其中一份已跑 190 分钟）。pidfile 挡不住这件事 ——
@@ -161,7 +167,7 @@ def _acquire_lock():
     global _LOCK
     from app.single_instance import SingleInstance
 
-    lock = SingleInstance("potato-feishu-poll")
+    lock = SingleInstance(LOCK_NAME)
     if not lock.acquire():
         log.warning(
             "已有轮询实例在运行（PID %s，锁文件 %s），本次不启动机器人 —— "

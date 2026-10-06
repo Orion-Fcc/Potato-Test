@@ -101,18 +101,22 @@ def test_empty_input_yields_no_chunks() -> None:
 # ---- storage + retrieval (real sqlite) -------------------------------------
 
 
-async def test_replace_append_and_search_round_trip() -> None:
+async def test_replace_append_and_search_round_trip(tmp_db) -> None:
     """End to end: write chunks, append more, search finds the appended tail.
 
     The tail is the point — under the old single-column model it was the part that got
     truncated away, so a query about it returned nothing. `search` opens its own session
     deliberately, so the assertions run after the write session has committed.
+
+    `tmp_db` 是必须的，不是保险：这个测试原先直接 `await init_db()` + `db_session()`，
+    于是**每个测试项目都建在用户的真库上**。2026-10-06 因为这个，用户的项目列表里
+    多了 24 个 kb-* 空壳（当天我跑了 6 次全量套件，每次 4 个）。真库的增长由
+    conftest 的 `_never_touch_the_real_db` 盯着 —— 现在这个测试想写真库就会把套件弄红。
     """
-    from app.db import db_session, init_db
+    _engine, db_session, _db = tmp_db
     from app.knowledge import append_knowledge, replace_knowledge, search
     from app.models import Project
 
-    await init_db()
     async with db_session() as s:
         p = Project(name="kb-roundtrip", base_url="http://x")
         s.add(p)
@@ -144,12 +148,11 @@ async def test_replace_append_and_search_round_trip() -> None:
     assert miss["total_blocks"] == 2, "a miss still reports the true corpus size"
 
 
-async def test_replace_is_a_full_swap_not_an_append() -> None:
-    from app.db import db_session, init_db
+async def test_replace_is_a_full_swap_not_an_append(tmp_db) -> None:
+    _engine, db_session, _db = tmp_db
     from app.knowledge import replace_knowledge, search
     from app.models import Project
 
-    await init_db()
     async with db_session() as s:
         p = Project(name="kb-replace", base_url="http://x")
         s.add(p)
@@ -164,14 +167,13 @@ async def test_replace_is_a_full_swap_not_an_append() -> None:
     assert (await search(pid, "NEW_MARKER_BBB"))["hits"], "replace must install the new text"
 
 
-async def test_projects_do_not_see_each_others_knowledge() -> None:
+async def test_projects_do_not_see_each_others_knowledge(tmp_db) -> None:
     """The assistant is scoped to one project; a chunk leak across projects would let a
     question about project A be answered from project B's spec."""
-    from app.db import db_session, init_db
+    _engine, db_session, _db = tmp_db
     from app.knowledge import replace_knowledge, search
     from app.models import Project
 
-    await init_db()
     async with db_session() as s:
         pa = Project(name="kb-a", base_url="http://x")
         pb = Project(name="kb-b", base_url="http://x")

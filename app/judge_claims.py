@@ -241,3 +241,187 @@ def premature_done_note(pd: PrematureDone | None) -> str:
         f"而是推测。归类应为 agent_incomplete，不是 product_defect —— "
         f"系统无法与一个从未被观察到的预期结果相矛盾。"
     )
+
+
+# ════════════════════════════════════════════════════════════════════
+# 第三层：自述与判定直接矛盾（现场 2026-10-06 21:19-21:23，最新一批）
+# ════════════════════════════════════════════════════════════════════
+
+# 实测两条：
+#   result 5：agent final_answer =「尝试访问 …，但页面显示『正在加载中请稍后……』，
+#              未能加载出预期的培训…」（**这是放弃**）
+#             判定器 reason     =「最终截图显示页面已加载…符合预期」→ **判了 passed**
+#   result 2：agent final_answer = `Clicked button "查询"`（**根本没写结论**）
+#             判定器 reason     =「结果表格共 5 条记录…与 EXPECTED 一致」→ **判了 passed**
+#
+# 第一层（编造数字）和第二层（未落位）都拦不住这两种：它们查的是
+# "数字有没有出处"、"done 时操作有没有落地"，而这里是**判定结论本身**出了问题。
+#
+# 为什么这类最危险：passed 是会进报表的数字。假通过会同时污染通过率和真缺陷率，
+# 而且用户从界面上看不出任何异常 —— 报告一片绿，绿得毫无根据。
+
+# agent 自述里的"放弃/没做到"信号。刻意**只认明确��废**的表述，
+# 因为误伤通过的代价（让真通过变失败）远大于漏过一次假通过。
+_GAVE_UP_RE = re.compile(
+    r"(?:未能|未能|无法|没能|没有)\s*(?:加载|访问|进入|打开|到达|完成|验证|核对|读取|获取)"
+    r"|页面\s*(?:一直)?(?:显示|停留在?|是)?\s*[^。；\n]{0,12}"
+    r"(?:正在加载中|加载中请稍后|加载失败|无法访问|打不开)"
+    r"|加载\s*(?:失败|超时|不完整)"
+    r"|仍停留在?[^。；\n]{0,10}(?:登录页|加载|空白)"
+    r"|页面\s*(?:一直)?(?:没有|未)\s*(?:渲染|加载出|出现)"
+)
+
+# 判定理由里的"我看到了预期结果"信号。必须两者同时出现才判矛盾 ——
+# 只看一边会产生大量误判（agent 说自己没做到、判定器认可，那是正常的）。
+_JUDGE_SAW_PASS_RE = re.compile(
+    r"(?:符合预期|与预期一致|满足预期|符合\s*EXPECTED|与\s*EXPECTED\s*一致"
+    r"|已成功进入|已加载|已到达|显示正常|验证通过|核对无误|已达成预期)"
+)
+
+
+def find_contradiction(
+    final_answer: str,
+    judge_reason: str,
+) -> tuple[str, str] | None:
+    """自述说"没做到"而判定说"做到了" → 返回 (原因, 建议动作)，否则 None。
+
+    ★只在**判定器判通过**时才有意义（passed 才需要翻案）。
+      判定失败时 agent 说"没做到"完全正常，不算矛盾。
+    """
+    if not (final_answer or "").strip():
+        return None
+    if not _GAVE_UP_RE.search(final_answer):
+        return None
+    if not _JUDGE_SAW_PASS_RE.search(judge_reason or ""):
+        return None
+    return (
+        "agent 自述明确表示未能完成（页面未加载/无法访问/未读到结果），"
+        "而判定理由却称看到了预期结果",
+        "failed",
+    )
+
+
+# ════════════════════════════════════════════════════════════════════
+# 第四层：结论其实是工具回显（agent 根本没写结论）
+# ════════════════════════════════════════════════════════════════════
+
+# 现场 result 2：final_answer = `Clicked button "查询"` —— 19 个字符，
+# 就是一行工具回显。判定器照样给了 passed 并写了一段像模像样的核对理由。
+#
+# 这类"空结论"不该被判通过：判定器是拿截图在推理，不是在读 agent 的观察。
+# 它判passed 时的理由质量再高，也只是**从截图里猜的**，而截图可能来自
+# 任何时刻（比如展开下拉的那一刻）。
+
+# 单行动作回显的形态：`Clicked xxx` / `Sent keys: X` / `Input: x` / `🔗 Navigated to x`
+_ECHO_ONLY_RE = re.compile(
+    r"^(?:Clicked|Sent keys|Input|Typed|Pressed|Scrolled|Selected|Extracted)"
+    r"[^\n]{0,120}$",
+    re.I,
+)
+_NAV_ONLY_RE = re.compile(r"^(?:🔗\s*)?Navigated\s+to\s+\S{0,200}$", re.I)
+# 正常的结论至少要说清"看到了什么"。
+# ★ 门槛定25 而不是 40：实测「列名符合预期，通过。」只有 10 个字符却是合法的通过，
+# 门槛太高会把这类短结论误杀。25 是个实测平衡点 —— 比"单行动作回显"长，
+# 又比正常的核对结论短。
+_MIN_ANSWER_CHARS = 25
+
+# 结论性表述：出现了它就说明 agent 真的下了判断，而不是只回显了一个动作。
+# 这类词在中文报告里很稳定（判定理由也在用同一套，见 _JUDGE_SAW_PASS_RE）。
+_CONCLUSION_RE = re.compile(
+    r"(?:符合预期|与预期一致|满足预期|一致|不符|不通过|通过|失败|成功|已完成|未完成"
+    r"|确认|核对|结果|第\s*\d+\s*列|\d+\s*条|列名|列数|顺序)"
+)
+
+
+def looks_like_echo_only(final_answer: str) -> str:
+    """final_answer 只是工具回显就返回其形态，否则返回空串。
+
+    ★ 顺序有意：先判形态（回显），再判长度。形态判据是**结构性**的
+    （整句就是一个 `Clicked xxx`），比长度可靠；长度只是兜底。
+    """
+    t = (final_answer or "").strip()
+    if not t:
+        return "empty"
+    if _ECHO_ONLY_RE.match(t) or _NAV_ONLY_RE.match(t):
+        return "tool_echo"
+    # 长度兜底：单行且极短。**但要先看有没有结论性表述**——
+    # 「列名符合预期，通过。」只有 10 个字符，可它确实给出了结论，
+    # 按纯长度判会误杀（实测过）。所以只在"既短、又没有任何结论词"时才算空。
+    if len(t) < _MIN_ANSWER_CHARS and "\n" not in t and not _CONCLUSION_RE.search(t):
+        return "too_short"
+    return ""
+
+
+def echo_only_note(kind: str) -> str:
+    """给判定器的提示。"""
+    if not kind:
+        return ""
+    label = {
+        "empty": "final_answer 为空",
+        "tool_echo": "final_answer 只是工具回显（如一行 `Clicked button \"查询\"`），"
+                     "agent 根本没有给出观察结论",
+        "too_short": f"final_answer 单行且短于 {_MIN_ANSWER_CHARS} 字符，看不出它核对到了什么",
+    }.get(kind, kind)
+    return (
+        f"【agent 未给出结论】{label}。此刻你唯一的依据是截图，而截图反映的是"
+        f"**某一刻**的页面状态（可能是展开下拉、弹窗打开的中间态），"
+        f"不是 agent 核对后的结果。判 passed 属于**无依据的通过**。"
+        f"正确做法：failed + agent_incomplete，说明 agent 没有完成核对。"
+    )
+
+
+# ════════════════════════════════════════════════════════════════════
+# 汇总闸门：闸门优先于判定器
+# ════════════════════════════════════════════════════════════════════
+
+
+@dataclass(frozen=True)
+class Gate:
+    """一条硬闸门。命中即改判，不再采信判定器。"""
+
+    gate: str
+    reason: str
+    root_cause: str
+
+
+def override_gate(
+    final_answer: str,
+    evidence: list[str] | None,
+    verdict_status: str,
+    verdict_reason: str,
+) -> Gate | None:
+    """判定器出结果**之后**再跑一次：只抓"无依据的通过"。
+
+    与 find_unverified_claims / find_premature_done 的区别：那两层是给判定器**提示**，
+    本层是**直接改判** —— 因为它们对应的是"判定器被自己没看见的东西骗了"，
+    提示它反而会被它自己反驳（它会坚持说"我确实看到了"）。
+
+    ★只在 verdict_status == "passed" 时动手：假通过必须拦，假失败不拦
+      （误伤通过的代价远大于漏过一次假通过）。
+    """
+    if verdict_status != "passed":
+        return None
+
+    # ① agent 压根没给结论 → 无依据的通过
+    kind = looks_like_echo_only(final_answer)
+    if kind:
+        return Gate(
+            gate="no_agent_conclusion",
+            reason=echo_only_note(kind),
+            root_cause="agent_incomplete",
+        )
+
+    # ② agent 说没做到，判定说做到了 → 直接矛盾
+    c = find_contradiction(final_answer, verdict_reason)
+    if c:
+        why, action = c
+        return Gate(
+            gate="self_contradiction",
+            reason=(
+                f"【自述与判定矛盾】{why}。判定理由：{verdict_reason[:160]}。"
+                f"两者的观察不可能同时成立 —— 以自述为准（它记录了 agent 实际看到什么），"
+                f"判 failed。"
+            ),
+            root_cause="agent_incomplete",
+        )
+    return None

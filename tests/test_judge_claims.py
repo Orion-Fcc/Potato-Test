@@ -269,3 +269,119 @@ def test_evidence_carries_action_prefix():
     assert i != -1, "找不到 evidence 构造"
     seg = src[i:i + 500]
     assert "【" in seg and "action" in seg, "evidence 没有带 action 前缀"
+
+
+# ══════════════════════════════════════════════════════════════════
+# 第三/四层：无依据的通过（现场 2026-10-06 21:19-21:23）
+# ══════════════════════════════════════════════════════════════════
+
+from app.judge_claims import (  # noqa: E402
+    echo_only_note,
+    find_contradiction,
+    looks_like_echo_only,
+    override_gate,
+)
+
+# 现场 result 5 的真实数据：agent 说没加载出来，判定器说符合预期。
+_FA5_ANSWER = (
+    "尝试访问 http://10.152.126.139:8600/training/resource-management/config，"
+    "但页面显示「正在加载中请稍后......」，未能加载出预期的培训资源管理界面。"
+)
+_FA5_REASON = (
+    "最终截图显示『资源审批配置』页面已加载：使用范围与状态下拉框均为空值（占位文本），"
+    "列表展示全部 11 条记录，符合『使用范围与状态回到空值，列表恢复全量』的期望结果。"
+)
+
+# 现场 result 2 的真实数据：final_answer 只有 19 字符的工具回显。
+_FA2_ANSWER = 'Clicked button "查询"'
+
+
+def test_contradiction_caught():
+    """★核心：agent 说没做到 + 判定说做到了 → 必须抓到。"""
+    got = find_contradiction(_FA5_ANSWER, _FA5_REASON)
+    assert got is not None, "自述与判定的直接矛盾没被抓到"
+    assert "未能完成" in got[0]
+
+
+def test_contradiction_not_triggered_when_judge_agrees():
+    """判定也认为失败 → 不是矛盾（那是正常的）。"""
+    got = find_contradiction(_FA5_ANSWER, "页面未加载成功，无法核对")
+    assert got is None, "把正常的失败判成矛盾了"
+
+
+def test_contradiction_not_triggered_on_consistent_pass():
+    """agent 正常完成 + 判定通过 → 不是矛盾。这条防误伤。"""
+    ans = "已成功进入资源审批配置，点击查询后列表仅显示使用范围=场地资源的 5 条记录，符合预期。"
+    got = find_contradiction(ans, "结果符合预期")
+    assert got is None, "正常通过被误判成矛盾"
+
+
+def test_echo_only_detected():
+    """final_answer 只是工具回显 → 认出来。"""
+    assert looks_like_echo_only(_FA2_ANSWER) == "tool_echo"
+    assert looks_like_echo_only("🔗 Navigated to http://x/y") == "tool_echo"
+    assert looks_like_echo_only("") == "empty"
+    assert looks_like_echo_only("太短了") == "too_short"
+
+
+def test_real_conclusion_not_flagged():
+    """正常结论不该被当成回显 —— 这条防误伤。样本是现场 result 7 的真实结论。"""
+    good = (
+        "已成功进入「资源审批配置」，确认列顺序为 规则名称/使用范围/资源范围/审批/状态/操作，"
+        "第 4 列是「审批」，符合预期。"
+    )
+    assert looks_like_echo_only(good) == ""
+
+
+def test_short_but_conclusive_not_flagged():
+    """★短但有结论的必须放行 —— 按纯长度判会误杀（实测踩过）。
+
+    「列名符合预期，通过。」只有 10 个字符，可它确实下了判断。
+    这条钉住"长度只是兜底，结论性表述才是主判据"。
+    """
+    assert looks_like_echo_only("列名符合预期，通过。") == ""
+
+
+def test_giteless_conclusion_is_flagged():
+    """既短、又没有任何结论词 → 确实没有结论。"""
+    assert looks_like_echo_only("嗯嗯") == "too_short"
+
+
+def test_override_gate_blocks_unfounded_pass():
+    """★闸门核心：假通过必须被改判成 failed。"""
+    g = override_gate(_FA2_ANSWER, ["【click】Clicked button 查询"], "passed", "结果符合预期")
+    assert g is not None
+    assert g.root_cause == "agent_incomplete"
+    assert "passed" not in g.reason or "不能" in g.reason or "无依据" in g.reason
+
+
+def test_override_gate_blocks_contradiction():
+    g = override_gate(_FA5_ANSWER, ["【navigate】Navigated to x"], "passed", _FA5_REASON)
+    assert g is not None
+    assert g.gate == "self_contradiction"
+
+
+def test_override_gate_never_touches_failed():
+    """★假失败不拦：只处理 passed。误伤通过的代价比漏假通过更大。"""
+    g = override_gate(_FA2_ANSWER, [], "failed", "未完成")
+    assert g is None, "闸门不该动 failed —— 那会让报表无端变红"
+
+
+def test_override_gate_passes_real_pass():
+    good = "已成功进入资源审批配置页面，点击查询后列表仅显示 5 条场地资源记录，列名列数不变，符合预期。"
+    g = override_gate(good, ["【click】Clicked button 查询"], "passed", "结果符合预期")
+    assert g is None, "正常的通过被闸门拦了 —— 这是最不能接受的误伤"
+
+
+def test_wired_into_judge_exit():
+    """★闸门必须接在 ask() 的返回处（判定之后翻案），不是只提示。"""
+    import inspect as _i
+
+    from app import judge
+
+    src = _i.getsource(judge.judge)
+    assert "override_gate" in src, "闸门没接进 judge"
+    # 必须在 Verdict 构造之前改判
+    i_gate = src.find("override_gate(final_answer")
+    i_verdict = src.find("return Verdict(", i_gate)
+    assert 0 < i_gate < i_verdict, "闸门必须在返回 Verdict 之前"

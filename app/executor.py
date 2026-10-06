@@ -604,7 +604,20 @@ def _install_safe_batching() -> bool:
                     "—— 防止后续动作落在挪位后的元素上",
                     len(kept), len(actions),
                 )
-            return await original(self, kept)
+            out = await original(self, kept)
+            # ★ 导航后自动等页面就绪（2026-10-06）。
+            # 现场：result 3/4 只走 1 步就放弃 —— navigate 之后页面还在
+            # 「正在加载中请稍后......」，agent 看到的就是占位，于是宣布无法访问。
+            # 它不是想放弃，是**从来没机会看到第二眼**。
+            #
+            # 放在这一步之后而不是步回调里：只有这里知道"这批动作里有没有导航"，
+            # 而 SPA 内部的路由切换（点菜单）不经过 navigate，那种情况由
+            # 下一轮模型自己看到新页面解决。
+            if any(_action_name(a) in ("navigate", "go_back") for a in kept):
+                _st = await _wait_until_ready(self.browser_session)
+                if not _st.startswith("ready"):
+                    log.info("executor: 导航后页面未就绪（%s），已等待", _st)
+            return out
 
         safe_multi_act._tp_safe_batch = True
         Agent.multi_act = safe_multi_act
@@ -717,6 +730,80 @@ def _warn_prune_once(key: str, msg: str, *args) -> None:
         return
     _PRUNE_WARNED.add(key)
     log.warning(msg, *args)
+
+
+# ---------------------------------------------------------------------------
+# 导航后自动等页面就绪（2026-10-06）
+#
+# 现场（21:19-21:23 那批）：result 3 / 4 **只走 1 步**就放弃 ——
+# navigate 之后页面还在「正在加载中请稍后......」，agent 看到的就是一个加载占位，
+# 于是宣布"无法访问目标页面"。它不是想放弃，是**从来没机会看到第二眼**：
+# 下一步要等模型返回，而模型看到的就是占位。
+#
+# 为什么不能靠提示词：agent 的判断没错——它看到的东西确实是个加载占位。
+# 要求它"多试几次"没有意义，它手里没有别的信息。**要给它时间**。
+#
+# 为什么不做成"让 agent 自己 wait"：那要消耗一个步数配额，而步数是硬预算
+# （120 步）。这里走代码层：导航后自动轮询 DOM，等到可交互元素出现为止，
+# 不消耗任何步数 —— 这也正好对应用户说的"多花点时间没关系，但是不要无效操作"。
+# ---------------------------------------------------------------------------
+
+# 页面级"还在加载"的判据。刻意只看**整页无交互元素 + 出现加载字样**：
+# 只匹配文案会误伤（有页面在正文里写"加载中"这种说明），
+# 只匹配 0 交互元素会误伤（空态页也是 0 交互）。
+# 必须是 raw string：这段 JS 要原样送进浏览器，\. 在 Python 里若不r 开头
+# 会先被当成无效转义序列（SyntaxWarning），送到浏览器时就成了裸的 "."，
+# 正则含义从"字面三个点"变成"任意字符"。
+_WAIT_READY_JS = r"""
+() => {
+  const txt = (document.body?.innerText || '').slice(0, 400);
+  const loading = /正在加载|加载中|loading\.\.\.|please wait/i.test(txt);
+  const interactive = document.querySelectorAll(
+    'a[href], button:not([disabled]), input:not([disabled]), select, textarea, ' +
+    '[role="button"], [role="tab"], [role="combobox"], [role="menuitem"], [contenteditable="true"]'
+  ).length;
+  return JSON.stringify({ loading, interactive });
+}
+"""
+
+# 轮询参数。首屏 SPA（Vue）实测 1-3 秒渲染完；给到 12 秒是给慢网络留余量，
+# 而单步上限是 45s（见上面的慢步骤告警），所以这个等待不会成为新的瓶颈。
+_WAIT_READY_TIMEOUT_S = 12.0
+_WAIT_READY_INTERVAL_S = 0.6
+
+
+async def _wait_until_ready(browser, timeout_s: float = _WAIT_READY_TIMEOUT_S) -> str:
+    """轮询直到页面出现可交互元素（或超时）。返回就绪状态描述，供日志核对。
+
+    刻意**不抛异常**：等不到就返回描述，让调用方继续走 —— agent 随后会自己看到
+    那个占位并给出结论，而那份结论此时是合法的（页面确实没加载出来）。
+    """
+    import json as _json
+    import time as _time
+
+    try:
+        cdp = await browser.get_or_create_cdp_session()
+    except Exception as exc:  # noqa: BLE001 — 拿不到 CDP 就别拖住用例
+        return f"skip(cdp:{type(exc).__name__})"
+
+    deadline = _time.monotonic() + timeout_s
+    last = "?"
+    while _time.monotonic() < deadline:
+        try:
+            res = await cdp.cdp_client.send.Runtime.evaluate(
+                params={"expression": _WAIT_READY_JS, "returnByValue": True},
+                session_id=cdp.session_id,
+            )
+            raw = (res or {}).get("result", {}).get("value")
+            if isinstance(raw, str):
+                d = _json.loads(raw)
+                if d.get("interactive", 0) > 0:
+                    return f"ready({d['interactive']})"
+                last = "loading" if d.get("loading") else "empty"
+        except Exception:  # noqa: BLE001 — 中途失败就再试一轮，不放弃
+            last = "err"
+        await _time.sleep(_WAIT_READY_INTERVAL_S)
+    return f"timeout(last={last})"
 
 
 async def _install_sprite_pruner(browser) -> None:

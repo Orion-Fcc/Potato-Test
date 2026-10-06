@@ -305,6 +305,7 @@ async def judge(
     from app.judge_claims import (
         find_premature_done,
         find_unverified_claims,
+        override_gate,
         premature_done_note,
         unverified_note,
     )
@@ -366,6 +367,33 @@ async def judge(
             gap = False
         elif cause in ROOT_CAUSE_RETRYABLE and status == "failed":
             gap = True
+
+        # ── 硬闸门：无依据的通过，一律翻案（2026-10-06 21:19-21:23 现场）─────
+        # 抓到两条实测假通过：
+        #   result 2  final_answer = `Clicked button "查询"`（agent 根本没写结论）
+        #             判定理由 =「结果表格共 5 条…与 EXPECTED 一致」→ passed
+        #   result 5  final_answer =「页面显示正在加载中，未能加载出预期的…」
+        #             判定理由 =「最终截图显示页面已加载…符合预期」→ passed
+        #
+        # 为什么这里必须**直接改判**而不能只提示：上面两层（编造数字 / 执行未落位）
+        # 是给判定器看的，而这两种情况里判定器**确信自己看到了**——它是从截图推理的。
+        # 提示它"你的依据不成立"会被它自己反驳。所以只能在出口拦。
+        #
+        # ★只拦 passed，不动 failed：假通过必须拦（它污染通过率和真缺陷率，
+        # 而且界面上看不出异常），而误伤真通过会把报表染红，代价更大。
+        _gate = override_gate(final_answer, evidence, status, reason)
+        if _gate is not None:
+            log.warning(
+                "judge: ★ 无依据的通过，已翻案（gate=%s）：%s",
+                _gate.gate, reason[:120],
+            )
+            return Verdict(
+                status="failed",
+                reason=_gate.reason[:500],
+                evidence=ev,
+                evidence_gap=True,
+                root_cause=_gate.root_cause,
+            )
         return Verdict(
             status=status, reason=reason, evidence=ev, evidence_gap=gap, root_cause=cause
         )

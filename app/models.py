@@ -518,3 +518,46 @@ class KnowledgeChunk(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
     __table_args__ = (Index("ix_knowledge_chunk_proj_idx", "project_id", "chunk_index"),)
+
+
+class CaseChange(Base):
+    """用例改动审计（2026-10-06）。
+
+    为什么必须有这张表：失败清单（`/projects/{id}/failure-digest`）是**实时算出来的
+    派生视图** —— 用例一旦通过就自动从清单里消失，不需要人工维护。
+    但一旦允许助手自动改用例（用户明确要求"都要"），就会产生一个新问题：
+    **改完之后没人说得清改了什么**。没有留痕的话，清单条目消失可能是
+    「用例真的修好了」，也可能是「助手把断言改宽松了让它通过」——
+    后者是**假通过**，比原来的假失败更难发现。
+
+    所以这张表只记一件事：**谁在什么时候把哪个字段从什么改成了什么**。
+    不存 diff 全文（那样很快会变成没人读的日志），只存被改字段 + 前后值截断。
+
+    刻意不与 run_result 关联：改用例和跑用例是两件事，
+    一次改动可能对应 0 次或多次运行。
+    """
+
+    __tablename__ = "case_change"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(
+        ForeignKey("project.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    case_id: Mapped[int] = mapped_column(
+        ForeignKey("test_case.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    # field / before / after —— 一行只记一个字段。
+    # 批量改一条用例的 5 个字段 = 5 行：这样"改了哪些"一目了然，
+    # 也不会把 before/after 塞成一大段 JSON 变得没法读。
+    field: Mapped[str] = mapped_column(String(60), nullable=False)
+    before: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    after: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    # "assistant" | "human" | "import" —— 助手自动改的必须能单独筛出来。
+    # 用户明确要求「都要」：既让助手能改，也要能一眼看出哪些是它改的。
+    source: Mapped[str] = mapped_column(String(20), nullable=False, default="human")
+    # 这次改动对应清单里的哪条（signal 键），便于从清单反查改动。
+    digest_signal: Mapped[str] = mapped_column(String(80), nullable=False, default="")
+    by_label: Mapped[str] = mapped_column(String(200), nullable=False, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+    __table_args__ = (Index("ix_case_change_proj_idx", "project_id", "id"),)

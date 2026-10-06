@@ -27,6 +27,7 @@ from app.judge import ROOT_CAUSE_IS_REAL_DEFECT, ROOT_CAUSE_LABELS_ZH
 from app.db import db_session
 from app.engine import run_suite
 from app.models import (
+    CaseChange,
     Credential,
     Environment,
     FeedbackItem,
@@ -925,6 +926,29 @@ def _result(x: RunResult) -> dict:
     }
 
 
+def _case_change(x: CaseChange) -> dict:
+    """一条用例改动审计记录。
+
+    刻意只回字段级前后值、不回完整用例：审计的目的是回答
+    "这条用例被改过吗、哪一格被动了" ，不是重建历史快照。
+    """
+    return {
+        "id": x.id,
+        "project_id": x.project_id,
+        "case_id": x.case_id,
+        "field": x.field,
+        "before": x.before,
+        "after": x.after,
+        # assistant = 助手自动改的。前端要把这类单独标出来 ——
+        # 助手改用例是用户明确要求的，但"AI 改的断言"天然可疑，
+        # 必须能一眼区分，否则通过率会被悄悄污染。
+        "source": x.source,
+        "digest_signal": x.digest_signal,
+        "by_label": x.by_label,
+        "created_at": x.created_at.isoformat() if x.created_at else "",
+    }
+
+
 # ---- projects ----
 @router.get("/projects")
 async def list_projects(request: Request) -> list[dict]:
@@ -1649,10 +1673,91 @@ async def update_case(cid: int, body: TestCasePatch, request: Request) -> dict:
                 data["data_files"] = {"files": testdata.parse(body.data_files)} or None
             except testdata.SpecError as exc:
                 raise HTTPException(422, f"测试数据声明无效：{exc}") from exc
+        # 改动前先快照这些字段的值 —— setattr 是就地的，事后拿不到旧值。
+        # 审计要回答"哪一格被动了"，只有改之前的值才能回答。
+        for k in data:
+            _AUDIT_BEFORE[(id(c), k)] = _str_field(getattr(c, k, None))
         for k, v in data.items():
             setattr(c, k, v)
         await s.flush()
+        _audit_case_change(s, c, body, data, request)
         return _case(c)
+
+
+# 改写前的值暂存。用模块级 dict 而不是参数透传，是为了不打乱 setattr 的就地语义；
+# 键是 (id(obj), field)，update_case 同一事务内 id 不会复用。
+_AUDIT_BEFORE: dict[tuple[int, str], str] = {}
+# 助手改用例时带上"这是为了清单第几条"，便于从清单反查改动。
+_AUDIT_SIGNAL: dict[tuple[int, str], str] = {}
+
+
+async def _audit_case_change(
+    s,
+    case: TestCase,
+    body: "TestCasePatch",
+    applied: dict,
+    request: Request | None = None,
+) -> None:
+    """把一条用例的字段级改动写进 case_change 审计表。
+
+    单独抽出来是因为 PUT /testcases/{cid} 和助手自动改用例走同一条路——
+    助手那侧不该另写一份记录逻辑，否则两边迟早漂移。
+    """
+    # 只看调用方**显式传了**的字段：exclude_none 会把没传的也带进来，
+    # 而模型常常带着一堆未修改字段回传，全记一遍审计表就没人读了。
+    explicit = (set(body.model_fields_set) & set(applied.keys())) - _AUDIT_SKIP_FIELDS
+    if not explicit:
+        return
+
+    # source：助手那条路会带 x-change-source 头，分不开的宁可贵——
+    # "把助手的改动混进人改的"比反过来危险得多。
+    source = "human"
+    by_label = ""
+    if request is not None:
+        source = request.headers.get("x-change-source") or "human"
+        by_label = request.headers.get("x-change-by") or ""
+    if source not in ("human", "assistant", "import"):
+        source = "human"
+
+    for field in sorted(explicit):
+        before = _AUDIT_BEFORE.pop((id(case), field), "")
+        signal = _AUDIT_SIGNAL.pop((id(case), field), "")
+        after = _str_field(getattr(case, field, None))
+        if before == after:
+            continue  # 没真变，不记
+        s.add(CaseChange(
+            project_id=case.project_id,
+            case_id=case.id,
+            field=field,
+            before=before[:2000],
+            after=after[:2000],
+            source=source,
+            by_label=by_label[:200],
+            digest_signal=(signal or "")[:80],
+        ))
+    # 清掉没被消费的快照（值没变的字段也会进这里）
+    for field in list(applied):
+        _AUDIT_BEFORE.pop((id(case), field), None)
+
+
+# 审计时忽略的字段：元数据类，改它们不影响用例语义，记录只会淹没审计表。
+_AUDIT_SKIP_FIELDS = frozenset({"updated_at", "memory", "memory_fingerprint", "memory_updated_at"})
+
+
+def _str_field(v) -> str:
+    """把字段值转成可比较/可读的字符串。JSON 列存 json 字符串，不存 repr。"""
+    import json as _json
+
+    if v is None:
+        return ""
+    if isinstance(v, (dict, list)):
+        try:
+            return _json.dumps(v, ensure_ascii=False, sort_keys=True)
+        except (TypeError, ValueError):
+            return str(v)
+    if isinstance(v, datetime):
+        return v.isoformat()
+    return str(v)
 
 
 @router.delete("/testcases/{cid}/memory")
@@ -2315,6 +2420,154 @@ async def delete_run(rid: int, request: Request) -> dict:
         await s.execute(delete(RunResult).where(RunResult.run_id == rid))
         await s.delete(r)
     return {"deleted": rid}
+
+
+@router.get("/projects/{pid}/failure-digest")
+async def failure_digest(
+    pid: int,
+    request: Request,
+    limit: int = 200,
+    backfill: bool = True,
+) -> dict:
+    """本项目**当前**所有未通过用例的失败清单（2026-10-06）。
+
+    需求原文：「弄一个该项目里面所有未通过的用例整一个完整的错误清单，
+    如果因为相同的原因，不同的测试用例的，可以合并，但要讲清楚，
+    但是不能讲废话」。
+
+    三条设计约束，都是为了满足"不讲废话"：
+
+    1. **只取每条用例最近一次未通过的结果**。同一用例跑过 5 次取最新那次，
+       否则清单里会重复列出同一条用例（实测 case 4 有4 次失败）。
+    2. **合并靠确定性信号，不靠 LLM 语义聚类**。`app/failure_digest.py` 只在
+       信号完全相同时合并；分不清的单列。见该模块 docstring 里
+       「代理」一词被误聚类的实例。
+    3. **LLM 只用于补历史 root_cause**（`backfill=True`）。实测 119 条历史失败
+       的 root_cause 全为空（分类功能 10-04 才上线），不补的话119 条会聚成
+       117 条、一条都合并不了。LLM 只出分类，不出分组。
+
+    `backfill=false` 可跳过 LLM 调用（离线/无网关时用），此时历史数据会落在
+    "原因待人工确认" 里，但清单照常返回。
+    """
+    from app.failure_backfill import backfill_root_causes
+    from app.failure_digest import build_groups
+
+    await _project_access(request, pid, "viewer")
+    cap = max(1, min(int(limit), 2000))
+
+    async with db_session() as s:
+        # 每条用例最近一次未通过的结果。
+        # 用"取 max(id) 的那一条"而不是"全部"，因为用户要的是"当前清单"，
+        # 而历史失败里可能有一次是真缺陷、后来又通过了 —— 那不该继续占着清单。
+        rows = (
+            (
+                await s.execute(
+                    select(RunResult, TestCase)
+                    .join(TestCase, TestCase.id == RunResult.case_id)
+                    .where(
+                        TestCase.project_id == pid,
+                        RunResult.status.in_(("failed", "error")),
+                    )
+                    .order_by(RunResult.case_id.desc(), RunResult.id.desc())
+                )
+            ).all()
+        )
+        if not rows:
+            return {
+                "project_id": pid,
+                "generated_at": datetime.now(UTC).isoformat(timespec="seconds"),
+                "backfilled": 0,
+                "group_count": 0,
+                "case_count": 0,
+                "groups": [],
+                "note": "本项目当前没有未通过的用例。",
+            }
+
+        latest: dict[int, dict] = {}
+        for res, case in rows:
+            if res.case_id in latest:      # 已取到该用例更新的一次
+                continue
+            latest[res.case_id] = {
+                "id": res.id,
+                "case_id": res.case_id,
+                "case_key": case.case_key,
+                "name": case.name,
+                "module": case.module,
+                "root_cause": res.root_cause,
+                "judge_reason": res.judge_reason,
+                "error": res.error,
+                "created_at": res.created_at.isoformat() if res.created_at else "",
+                "run_id": res.run_id,
+                "video_url": res.video_url,
+            }
+            if len(latest) >= cap:
+                break
+
+    data = list(latest.values())
+
+    # 历史数据补分类：让"相同原因合并"真正可用。
+    #
+    # ★必须**回填写库**，不能每次现算（实测踩过）：
+    # 现算意味着每次打开清单都要发 114 条分类请求，而免费额度网关
+    # 实测第 3 批就开始 429 —— 清单直接打不开，而且把额度耗光会让正在跑的用例失败。
+    # 现在改成：未分类的才分类，且结果写回 run_result.root_cause，
+    # 于是第二次打开是 0 次 LLM 调用。429 也会被分类模块吞掉降级为unclear，
+    # 不会让整个端点失败。
+    backfilled = 0
+    if backfill:
+        need = [d for d in data if not (d.get("root_cause") or "").strip()]
+        if need:
+            mapped = await backfill_root_causes(need)
+            if mapped:
+                async with db_session() as s2:
+                    for d in data:
+                        new_cause = mapped.get(d["id"])
+                        if not new_cause:
+                            continue
+                        res = await s2.get(RunResult, d["id"])
+                        if res is not None and not (res.root_cause or "").strip():
+                            res.root_cause = new_cause
+                            backfilled += 1
+                    await s2.commit()
+                for d in data:
+                    if d["id"] in mapped:
+                        d["root_cause"] = mapped[d["id"]]
+    data.sort(key=lambda d: d["id"], reverse=True)
+
+    groups = build_groups(data)
+    return {
+        "project_id": pid,
+        "generated_at": datetime.now(UTC).isoformat(timespec="seconds"),
+        "backfilled": backfilled,
+        "uncategorized": sum(1 for d in data if not (d.get("root_cause") or "").strip()),
+        "group_count": len(groups),
+        "case_count": len(data),
+        "groups": [g.to_dict() for g in groups],
+    }
+
+
+@router.get("/projects/{pid}/case-changes")
+async def case_changes(pid: int, request: Request, limit: int = 100) -> list[dict]:
+    """本项目用例的改动审计（2026-10-06，用户要求"通过后也需要修改清单"的配套）。
+
+    清单本身是从run_result 实时算出来的派生视图 —— 用例一旦通过就自动消失，
+    不需要人工维护。但"是谁在什么时候把哪条用例改成了什么"需要留痕：
+    没有这条审计，助手自动改过用例之后就没人说得清改了什么。
+    """
+    await _project_access(request, pid, "viewer")
+    async with db_session() as s:
+        rows = (
+            (
+                await s.execute(
+                    select(CaseChange)
+                    .where(CaseChange.project_id == pid)
+                    .order_by(CaseChange.id.desc())
+                    .limit(max(1, min(int(limit), 500)))
+                )
+            ).scalars()
+            .all()
+        )
+        return [_case_change(x) for x in rows]
 
 
 @router.get("/runs/{rid}/export")

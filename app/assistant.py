@@ -132,10 +132,12 @@ def _system_prompt(catalog: str, project_name: str = "Potato Test", pid: int = 0
         "你的手段：\n"
         "1) 便捷工具：list_cases（带筛选/分页/字段裁剪）/ list_runs / list_issues / get_run / "
         "search_knowledge / create_case / start_run；\n"
-        "2) 文档工具：generate_document（把成果写成可下载的 Markdown 业务文档）、list_documents；\n"
-        "3) 通用工具 `potato-test_api`：可调用下面列出的任意平台接口——"
+        "2) **失败清单**：get_failure_digest（本项目当前未通过用例，按相同原因合并）/ "
+        "update_case（改用例）/ list_case_changes（改动审计）；\n"
+        "3) 文档工具：generate_document（把成果写成可下载的 Markdown 业务文档）、list_documents；\n"
+        "4) 通用工具 `potato-test_api`：可调用下面列出的任意平台接口——"
         "用例/套件/运行/缺陷/项目/成员/凭据/角色/环境/系统设置 的增删改查都能做；\n"
-        "4) 项目『需规/资料』：用 `search_knowledge(query)` 检索需求规格，再据此作答或写文档。\n"
+        "5) 项目『需规/资料』：用 `search_knowledge(query)` 检索需求规格，再据此作答或写文档。\n"
         "\n"
         + _identity_block(project_name)
         + "\n"
@@ -155,6 +157,20 @@ def _system_prompt(catalog: str, project_name: str = "Potato Test", pid: int = 0
         "不要只在对话里写一大段——用 generate_document 落成文件，"
         "然后把 download_url 原样给出，并说明这是一份可下载的 Markdown。\n"
         "7) 文档要有实际内容：章节、表格、编号步骤都要写全，不要写「此处省略」「同上」这类占位。\n"
+        "\n"
+        "怎么用失败清单（用户 2026-10-06 明确要求『按清单去修改相应用例』）：\n"
+        "8) 要诊断问题、或问『哪些用例有问题』，先 get_failure_digest，不要自己去翻 run 记录 —— "
+        "清单已按相同原因合并，直接看它更省事也更准。\n"
+        "9) 清单每条带一个 action 字段，它就是该做什么：\n"
+        "   改用例(fix_case) / 改测试数据(fix_data) / 改环境或凭据(fix_env) / "
+        "提缺陷给开发(report_to_dev) / 重跑观察(rerun) / 需人工看一眼(inspect)。"
+        "**先看 action 再动手**：action 不是 fix_case 的就别去改用例。\n"
+        "10) ★改 expected（预期）之前，必须先分清是**用例写错了**还是**系统真有缺陷**：\n"
+        "   - action=report_to_dev 的条目，**不要改 expected** —— 那是真缺陷，改预期等于掩盖它。\n"
+        "   - 只有当 expected 写成了页面 UI 串、量词、或与需规矛盾时，才属于『用例写错』，可以改。\n"
+        "   - 拿不准就 search_knowledge 查需规，或者先问用户，不要自己拍板。\n"
+        "11) 改完之后如实说明：改了哪条用例的哪个字段、为什么这么改。"
+        "所有改动都在审计里，用户会看得到；含糊其辞会让人不敢用这个功能。\n"
         "\n"
         "回答风格：\n"
         "- 用中文（或用户使用的语言）分段作答，先给结论再给细节；\n"
@@ -283,6 +299,72 @@ def _tools() -> list[dict]:
         {
             "type": "function",
             "function": {
+                "name": "get_failure_digest",
+                "description": (
+                    "本项目当前所有未通过用例的失败清单。按「相同原因」合并，"
+                    "每条给出：原因、该做什么动作（改用例/改数据/改环境/提缺陷/重跑）、"
+                    "受影响的用例列表。要诊断问题或决定改哪条用例时，先读它。"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "backfill": {
+                            "type": "boolean",
+                            "description": (
+                                "是否给缺根因的历史失败补分类（会调一次大模型，约十几秒）。"
+                                "默认 true —— 不补的话清单会因无法合并而变得很长。"
+                            ),
+                        },
+                    },
+                    "required": [],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "update_case",
+                "description": (
+                    "修改当前项目里的一条用例（只传要改的字段）。"
+                    "每次修改都会记入审计（谁、何时、哪个字段、从什么改成什么）。"
+                    "改expected（预期）之前必须先确认是**用例写错**而不是**系统有缺陷** —— "
+                    "把预期改宽松来让用例通过等于掩盖真缺陷。"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "case_id": {"type": "integer", "description": "用例 id"},
+                        "name": {"type": "string", "description": "用例名称"},
+                        "prompt": {"type": "string", "description": "操作说明"},
+                        "expected": {"type": "string", "description": "预期结果"},
+                        "preconditions": {"type": "string", "description": "前置条件"},
+                        "role": {"type": "string", "description": "执行角色/账号标识"},
+                        "digest_signal": {
+                            "type": "string",
+                            "description": "这次改动对应清单里的哪条（signal），便于追溯",
+                        },
+                    },
+                    "required": ["case_id"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "list_case_changes",
+                "description": "本项目用例的改动审计（谁在什么时候改了哪个字段）。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "limit": {"type": "integer", "description": "返回条数，默认 30"},
+                    },
+                    "required": [],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "create_case",
                 "description": "在当前项目新建一条测试用例。",
                 "parameters": {
@@ -367,10 +449,15 @@ def _tools() -> list[dict]:
     ]
 
 
-async def _api(method: str, path: str, body: dict | None = None):
+async def _api(
+    method: str,
+    path: str,
+    body: dict | None = None,
+    headers: dict[str, str] | None = None,
+):
     # Loopback: never route through a proxy (see _api_catalog for why).
     async with httpx.AsyncClient(timeout=60, trust_env=False) as c:
-        r = await c.request(method, _self_base() + path, json=body)
+        r = await c.request(method, _self_base() + path, json=body, headers=headers or {})
         if r.status_code >= 400:
             return {"error": f"HTTP {r.status_code}", "detail": r.text[:400]}
         try:
@@ -509,6 +596,56 @@ async def _run_tool(name: str, args: dict, pid: int) -> dict:
         if scope_err is not None:
             return scope_err
         return await _api(method, path, args.get("body") or None)
+    if name == "get_failure_digest":
+        # backfill 默认开：历史失败的 root_cause 是空的（分类功能晚于那批数据上线），
+        # 不补的话清单会因无法合并而变得很长 —— 那正是用户要求「相同原因要合并」
+        # 要解决的问题。显式传 false 才跳过（离线/网关不可用时用）。
+        if args.get("backfill") is False:
+            return await _api("GET", f"/api/projects/{pid}/failure-digest?backfill=false")
+        return await _api("GET", f"/api/projects/{pid}/failure-digest")
+
+    if name == "update_case":
+        case_id = args.get("case_id")
+        if not isinstance(case_id, int):
+            return {"error": "case_id 必须是整数"}
+        payload: dict = {}
+        for f in ("name", "prompt", "expected", "preconditions", "role"):
+            v = args.get(f)
+            if v is not None:
+                payload[f] = v
+        if not payload:
+            return {"error": "没有要改的字段。至少传name/prompt/expected/preconditions/role 之一。"}
+        res = await _api(
+            "PUT",
+            f"/api/testcases/{case_id}",
+            payload,
+            # 审计标记：让这条改动在 case_change 表里能区分出是助手改的。
+            # 用户明确要求「都要」——既让助手能改，也要能一眼看出哪些是它改的。
+            {
+                "x-change-source": "assistant",
+                "x-change-by": str(args.get("digest_signal") or "")[:200],
+            },
+        )
+        if isinstance(res, dict) and res.get("error"):
+            return res
+        return {
+            "updated_case_id": case_id,
+            "fields": sorted(payload.keys()),
+            "note": (
+                "已记入改动审计。**若你改的是 expected（预期），必须在回复里说明"
+                "为什么是用例写错、而不是系统有缺陷** —— 把预期改宽松让用例通过"
+                "等于掩盖真缺陷。"
+            ),
+            "case": res if isinstance(res, dict) else {},
+        }
+
+    if name == "list_case_changes":
+        try:
+            limit = max(1, min(int(args.get("limit") or 30), 200))
+        except (TypeError, ValueError):
+            limit = 30
+        return await _api("GET", f"/api/projects/{pid}/case-changes?limit={limit}")
+
     if name == "search_knowledge":
         query = str(args.get("query", ""))
         res = await _knowledge_search(pid, query)

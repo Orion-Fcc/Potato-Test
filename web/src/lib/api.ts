@@ -43,6 +43,69 @@ export interface BrowserState {
   last_used: number;
 }
 
+/** 失败清单里的一条用例（同一用例多次失败只出现一次，fail_count 是次数）。 */
+export interface DigestCase {
+  case_id: number | null;
+  case_key: string;
+  name: string;
+  module: string;
+  fail_count: number;
+  latest_reason: string;
+  latest_error: string;
+  latest_at?: string;
+}
+
+/**
+ * 一条清单项 = 一组「同因」失败。
+ *
+ * action 决定该做什么，助手据此决定能不能改用例：
+ *   fix_case 改用例 / fix_data 改测试数据 / fix_env 改环境或凭据 /
+ *   report_to_dev 提缺陷给开发 / rerun 重跑观察 / inspect 需人工看一眼
+ *
+ * ★ report_to_dev 的条目绝不能去改 expected —— 那是真缺陷，改预期等于掩盖它。
+ */
+export interface DigestGroup {
+  signal: string;
+  summary: string;
+  action: string;
+  action_label: string;
+  case_count: number;
+  result_count: number;
+  cases: DigestCase[];
+  result_ids: number[];
+  latest_at: string;
+  /** 同一组里判定器给出了互相矛盾的根因 —— 需要人看，action 会降级为 inspect。 */
+  cause_conflict: boolean;
+  causes_seen: string[];
+}
+
+export interface FailureDigest {
+  project_id: number;
+  generated_at: string;
+  /** 本次调用新补了多少条历史根因分类（已写库，下次是 0）。 */
+  backfilled: number;
+  /** 仍然没有根因的条数：这些会落在「原因待人工确认」里。 */
+  uncategorized: number;
+  group_count: number;
+  case_count: number;
+  groups: DigestGroup[];
+  note?: string;
+}
+
+export interface CaseChange {
+  id: number;
+  project_id: number;
+  case_id: number;
+  field: string;
+  before: string;
+  after: string;
+  /** assistant = 内置助手自动改的。前端要单独标出来——AI 改的断言天然可疑。 */
+  source: string;
+  digest_signal: string;
+  by_label: string;
+  created_at: string;
+}
+
 export interface AssistantTurn {
   role: "user" | "assistant";
   content: string;
@@ -516,6 +579,17 @@ export const api = {
   // IndexedDB kept between cases and runs, isolated per project).
   getBrowserState: (pid: number, o?: Opts) =>
     req<BrowserState>(`/projects/${pid}/browser-state`, o),
+  // ── 失败清单（2026-10-06）─────────────────────────────────────────────
+  // backfill=true 会给缺根因的历史失败补一次分类（LLM，首次十几秒，之后走缓存）。
+  // 清单是从 run_result 实时算出来的：用例一旦通过就自动从清单消失，
+  // 所以**不需要任何手工维护**。
+  getFailureDigest: (pid: number, backfill = true, o?: Opts) =>
+    req<FailureDigest>(
+      `/projects/${pid}/failure-digest?backfill=${backfill ? "true" : "false"}`,
+      o,
+    ),
+  getCaseChanges: (pid: number, limit = 30, o?: Opts) =>
+    req<CaseChange[]>(`/projects/${pid}/case-changes?limit=${limit}`, o),
   resetBrowserState: (pid: number) =>
     req<{ reset: number }>(`/projects/${pid}/browser-state`, { method: "DELETE" }),
   getRoles: (pid: number, o?: Opts) => req<{ roles: string[] }>(`/projects/${pid}/roles`, o),

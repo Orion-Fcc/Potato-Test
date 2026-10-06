@@ -9,6 +9,7 @@ import { Badge, Button, Card, PageHeader, Stat, StatRing } from "../components/u
 import { chartTooltip } from "../components/table";
 import { Empty, PageSkeleton } from "../components/feedback";
 import { SetupChecklist } from "../components/SetupChecklist";
+import { FailureDigestPanel } from "../components/FailureDigestPanel";
 
 export function OverviewPage() {
   const { t } = useTranslation();
@@ -43,6 +44,9 @@ export function OverviewPage() {
         subtitle={t("Suite health at a glance.")}
       />
 
+      {/* 失败清单放在概览页顶部：它是"现在该做什么"的入口，
+          埋在下面会被 KPI 图表推到视线之外。 */}
+      <FailureDigestPanel />
       <SetupChecklist pid={pid} stats={stats} />
 
       <div className="tp-rise grid gap-4 sm:grid-cols-2 lg:grid-cols-4">

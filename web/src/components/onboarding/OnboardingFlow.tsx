@@ -168,7 +168,7 @@ export function OnboardingFlow({ onClose }: { onClose: () => void }) {
               {step === 4 && (
                 <>
                   <p className="text-sm leading-relaxed text-ink-700">
-                    {t("That's the setup. Running it launches a real Chrome, drives it through your case and records video — the first result takes roughly 30–90 seconds, and you'll watch it stream in.")}
+                    {t("That's the setup. Running it launches a real browser, drives it through your case and records video — the first result takes roughly 30–90 seconds, and you'll watch it stream in.")}
                   </p>
                   {!s.captured && (
                     <p className="tp-alert tp-alert-warn">

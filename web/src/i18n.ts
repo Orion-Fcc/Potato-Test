@@ -750,8 +750,8 @@ const zh: Record<string, string> = {
   Finish: "完成",
 
   // first-run report coaching
-  "Nothing has finished yet — that's expected. Each case launches a real Chrome, drives it and records video, so the first result takes roughly 30–90 seconds. Results stream in below as they land; you can leave this page.":
-    "还没有结果 —— 这是正常的。每条用例都要拉起一个真实 Chrome、操作它并录像，所以第一个结果大约要 30–90 秒。结果会实时出现在下方，你也可以先离开这个页面。",
+  "Nothing has finished yet — that's expected. Each case launches a real browser, drives it and records video, so the first result takes roughly 30–90 seconds. Results stream in below as they land; you can leave this page.":
+    "还没有结果 —— 这是正常的。每条用例都要拉起一个真实浏览器、操作它并录像；会话过期时还要先重新登录一次，所以第一个结果可能要一两分钟。结果会实时出现在下方，你也可以先离开这个页面。",
   "Your first report — what now?": "第一份报告 —— 接下来做什么?",
   "Everything passed. Save these cases as a suite and give it a schedule, and this becomes a regression run that happens without you.":
     "全部通过。把这些用例存成一个套件并设上定时，它就变成了不用你操心的例行回归。",
@@ -771,8 +771,8 @@ const zh: Record<string, string> = {
   "A project holds the cases for one system under test.": "一个项目装的是同一个被测系统的用例。",
   "{{n}} case(s) ready.": "已就绪 {{n}} 条用例。",
   "First run": "首次运行",
-  "That's the setup. Running it launches a real Chrome, drives it through your case and records video — the first result takes roughly 30–90 seconds, and you'll watch it stream in.":
-    "配置就到这儿。点运行会拉起一个真实 Chrome，按你的用例操作一遍并全程录像 —— 第一个结果大约 30–90 秒，你可以看着它实时出现。",
+  "That's the setup. Running it launches a real browser, drives it through your case and records video — the first result takes roughly 30–90 seconds, and you'll watch it stream in.":
+    "配置就到这儿。点运行会拉起一个真实浏览器，按你的用例操作一遍并全程录像；会话过期时还要先重新登录一次，所以第一个结果可能要一两分钟，你可以看着它实时出现。",
   "You skipped the account step, so anything behind a login will fail. That's fine for a first look — add an account in Settings when you need it.":
     "你跳过了账号那步，所以需要登录才能看到的页面会失败。第一次看效果没关系 —— 需要时到「设置」里补一个账号。",
   "Finish without running": "先不跑，完成",

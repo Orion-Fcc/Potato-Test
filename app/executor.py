@@ -567,7 +567,7 @@ def _sprite_prune_js() -> str:
 #     browser_state_summary = await self.browser_session.get_browser_state_summary(
 #         include_screenshot=True,   # always capture even if use_vision=False ...
 #     )
-# 注释说"反正很快"，但实测在 2880x1800 的窗口上并不快：profiler 抓到每步热点就是
+# 注释说"反正很快"，但实测在真实视口下并不快：profiler 抓到每步热点就是
 # `screenshot_watchdog.on_ScreenshotEvent → Page.captureScreenshot → await future`，
 # 而每步 11.3s 里 DOM(0.3s)+LLM(0.5s) 只占 0.8s，其余基本都耗在这条链上。
 #
@@ -2211,9 +2211,9 @@ async def execute_case(spec: CaseSpec, on_step=None, should_abort=None) -> Resul
                 except Exception as exc2:
                     res.error = (
                         f"浏览器启动失败：{type(exc2).__name__}: {exc2}"[:400]
-                        + " —— 通常是上一次运行异常结束后残留的 Chrome 仍占用浏览器配置目录。"
+                        + " —— 通常是上一次运行异常结束后残留的浏览器进程仍占用配置目录。"
                         "已在启动时自动清理；若持续出现，请在项目设置里执行一次"
-                        "『重置浏览器状态』，或确认没有手动打开的 Chrome 在用同一配置。"
+                        "『重置浏览器状态』，或确认没有手动打开的浏览器在用同一配置。"
                     )
                     raise
             await _block_third_party_beacons(browser)
@@ -2972,7 +2972,7 @@ async def capture_session(
             use_vision=False,
             register_new_step_callback=_capture_step_cb,
         )
-        # 登录捕获用自己的小预算，**不要**复用用例的 80 步 / 600 秒：
+        # 登录捕获用自己的小预算，**不要**复用用例的步数/时长上限：
         # 凭据失效时 agent 会开始猜账号密码，把整个预算烧光才失败，
         # 现场看起来就是"卡在登录"（实测空动作事件累计 526 次）。
         # 详见 config.py 里 login_capture_* 的说明。

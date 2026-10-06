@@ -77,7 +77,8 @@ class Settings(BaseSettings):
     # wizard needs 30+. Running out of steps ends the case cleanly and reports how far
     # it got, which is far more actionable than a clock cutting it off mid-action.
     #
-    # 2026-10-04 改：从 40 提到 80。
+    # 2026-10-04 改：40 → 80。2026-10-06 再改：80 → 120。
+    #
     # 用户明确要求"不要那个 160/40/1 了，直接告诉 agent 用最少步数和最快时间完成"。
     # 关键区分：**"最少步数"是给 agent 的目标，不是给系统的硬上限。**
     # 原来的 40 被当成预算用，长流程用例会跑到一半被砍断，报出来的失败是"步数用完"
@@ -85,7 +86,14 @@ class Settings(BaseSettings):
     # 所以这里把数值放宽成"只拦真正卡死的用例"，速度压力改由提示词承担
     # （见 executor.py 的 _EFFICIENCY_RULE）。工程上仍必须有上限，
     # 否则一个卡在等待循环里的用例能占掉一整夜 —— 这是 C5「有界自主」的要求。
-    case_max_steps: int = 80
+    #
+    # 80 → 120 的依据（实测 run_result 的动作数分布，150 用例/177 次执行）：
+    #   p50=22/ p90=54 / p95=65 / max=127，超过 80 的只有 4 条。
+    #   即 80 从未被正常用例触达 → 保持 80 零收益，却有"砍半长用例"的风险
+    #   （步数用完会被报成"失败"，而那不是真缺陷）。
+    # 配套动作：.env 里 CASE_MAX_STEPS=120。**改这里没用，.env 会覆盖它** ——
+    # 这是本项目的老坑（改运行参数先 grep .env，注意重复键取最后一次）。
+    case_max_steps: int = 120
     # Wall clock is a SAFETY NET, not the budget. A time-based cap that does not scale
     # with the work is what produced the "every case times out" symptom: a 60s cap
     # aborts a case that legitimately needs 90s, then reports it as a failure the code
@@ -98,7 +106,7 @@ class Settings(BaseSettings):
     case_timeout_s: int = 600  # per-case wall-clock safety net; per-project override wins
     # 登录态捕获（capture_session）自己的预算 —— **必须比用例小得多**。
     #
-    # 2026-10-05 新增。此前它直接复用 case_max_steps(80) / case_timeout_s(600)，
+    # 2026-10-05 新增。此前它直接复用 case_max_steps(当时 80) / case_timeout_s(600)，
     # 而登录本身正常只要 5 步左右；一旦凭据失效，agent 会开始**猜账号密码**
     # （实测日志里出现 admin/123456、role01/1234 等一轮轮试探，
     # 空动作事件累计 526 次），把 80 步和 600 秒全部烧光才报错。

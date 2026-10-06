@@ -27,8 +27,11 @@ Agent 自己想清楚该点哪里；裁判读截图和动作记录下结论，**
 
 ### 一键部署（推荐，先看这里）
 
-把下面整段复制进终端就行。它会拉代码、建虚拟环境、装依赖、下 Chromium、生成 `.env`，
+把下面整段复制进终端就行。它会拉代码、建虚拟环境、装依赖、备好浏览器、生成 `.env`，
 然后启动服务 —— 中间不需要任何手工操作。
+
+> 浏览器：优先直接用你本机已装的 Edge/Chrome（更快，也更接近真人环境）；
+> 都没有时才装 Playwright 自带的 Chromium 作为兜底。
 
 Windows（cmd 或 PowerShell）：
 
@@ -180,7 +183,7 @@ Docker 部署请设 `FEISHU_WORKER_IN_PROCESS=false` —— `docker-compose.yml`
 ## 功能
 
 - **自然语言用例** —— 按项目组织，可打标签，支持 Excel 批量导入导出
-- **真实浏览器执行** —— 每个用例一个 Chromium，录屏 + 每步截图 + 可回放的动作历史
+- **真实浏览器执行** —— 每个用例一个独立浏览器（优先用本机已装的 Edge/Chrome，找不到才回退自带 Chromium），录屏 + 每步截图 + 可回放的动作历史
 - **LLM 裁判** —— 给出通过/失败和书面理由；基础设施类错误会重试，裁判判的失败不重试
 - **自带模型** —— 任何 OpenAI 兼容接口都能接，界面里随时改，不用重新部署
 - **运行与报告** —— 并发执行带全局浏览器额度上限，实时进度，支持「只重跑失败的」，支持运行间对比
@@ -262,7 +265,9 @@ Docker 部署请设 `FEISHU_WORKER_IN_PROCESS=false` —— `docker-compose.yml`
 这类依赖是懒加载的，所以缺了不影响服务启动，只在真正跑用例时才暴露。
 
 **跑用例报「找不到浏览器」？**
-Chromium 没下载。执行 `.venv\Scripts\python -m playwright install chromium`。
+先确认机器上装了 Edge 或 Chrome —— 本项目默认直接用系统浏览器（启动更快，也更接近真人环境）。
+两个都没有时才会回退到 Playwright 自带的 Chromium，执行 `.venv\Scripts\python -m playwright install chromium`。
+想指定用哪个，见 `.env` 里的 `BROWSER_EXECUTABLE` / `BROWSER_CANDIDATES`。
 
 **为什么界面里没有「用户管理」？**
 因为它对单人本地使用没有意义 —— 没有登录就没有"用户"这个概念。开启 `AUTH_ENABLED=true` 后它就会出现。
@@ -275,7 +280,7 @@ Chromium 没下载。执行 `.venv\Scripts\python -m playwright install chromium
 ## 技术栈
 
 后端 FastAPI + SQLAlchemy（异步）；默认 SQLite，可换 Postgres。
-浏览器自动化 `browser-use` → Playwright → Chromium。
+浏览器自动化 `browser-use` → Playwright → 系统 Edge/Chrome（缺失时回退自带 Chromium）。
 前端 React + Vite + Tailwind。
 可选：Celery + Redis（队列）、飞书、GitLab。
 

@@ -294,7 +294,7 @@ export function RunReport() {
 
       {active && counts.passed + counts.failed + counts.error === 0 && (
         <div className="rounded-xl border border-brand-100 bg-brand-50 px-4 py-3 text-sm text-ink-700">
-          {t("Nothing has finished yet — that's expected. Each case launches a real Chrome, drives it and records video, so the first result takes roughly 30–90 seconds. Results stream in below as they land; you can leave this page.")}
+          {t("Nothing has finished yet — that's expected. Each case launches a real browser, drives it and records video, so the first result takes roughly 30–90 seconds. Results stream in below as they land; you can leave this page.")}
         </div>
       )}
 

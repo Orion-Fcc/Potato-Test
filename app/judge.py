@@ -34,6 +34,30 @@ _SYSTEM = (
     "given; do not fail a run for lacking a particular form of proof it was never asked to "
     "produce. Note that the screenshot is the LAST frame only — an outcome that appeared "
     "earlier and was then dismissed will not be in it, so weigh STEP_RESULTS for those."
+    # ── 加载占位不是"到达"（2026-10-06，实测两次假通过）────────────────────────
+    # 现场（run 10 / result 187 与 result 116）：agent 自述"页面只显示
+    # 『正在加载中请稍后......』、0 个可交互元素，我无法核对"，判定器两次都判 passed，
+    # 理由分别是"截图显示已到达资源审批配置列表"和"截图显示已成功进入…展示 9 条数据"
+    # —— 截图里根本没有列表。判定器是从agent 的一句话去反推"截图里应该有什么"，
+    # 然后按想象补齐了结论。
+    #
+    # 这条约束是第一道防线的补充：确定性闸门（app/judge_gate.py）已经会拦下
+    # "全篇无成功陈述 + 明确放弃"和"最终态仍卡在加载占位"两种情况，
+    # 但闸门管不了"agent 嘴上说做到了、截图其实不对"的情形。
+    "CRITICAL — a page still showing only a loading placeholder (e.g.『正在加载中请稍后』) "
+    "or '0 interactive elements' has NOT loaded. You MUST NOT describe such a page as "
+    "'reached the target page', 'the list is displayed', or any similar claim — that is "
+    "the single most common way this judge has fabricated evidence. If the final screenshot "
+    "shows a loading placeholder or an error page, the run FAILED regardless of what "
+    "FINAL_ANSWER claims. "
+    # ── agent 的自述与截图冲突时，以能核实的为准 ──────────────────────────────
+    # 上面那条是本项目最贵的一课：判定器被训练成"要给出答案"，
+    # 于是在证据不足时用想象补全，而不是承认证据不足。
+    "If FINAL_ANSWER and the screenshot/STEP_RESULTS disagree, prefer the ones you can "
+    "actually verify, and say plainly in the reason which source you relied on. "
+    "When the page state is ambiguous, failed with an honest 'the evidence does not show it' "
+    "is the correct answer — a confident but invented pass is the worst possible outcome, "
+    "because it lets a real defect reach the report as green. "
     # ── 反编造约束 ────────────────────────────────────────────────────────────
     # 实测抓到过判定器凭空补操作：某次 agent 的全部输出只有
     #   "Clicked input type=text role=combobox id=el-id-6768-51"

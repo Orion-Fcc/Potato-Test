@@ -23,6 +23,7 @@ from app import browser_binary
 from app.config import get_settings
 from app.failure_narrative import describe_failure
 from app.judge import judge
+from app.judge_gate import check_gates
 
 log = logging.getLogger("potato-test.executor")
 
@@ -2620,19 +2621,51 @@ async def execute_case(spec: CaseSpec, on_step=None, should_abort=None) -> Resul
     if res.error:
         res.status = "error"
     else:
-        verdict = await judge(
-            spec.expected,
-            res.final_answer or "",
-            res.steps,
-            task=spec.prompt,
-            evidence=evidence,
-            screenshot_b64=final_shot,
+        # ★ 判定闸门先行：拦下"物理上不可能通过"的情况，再交给 LLM 判定器。
+        #
+        # 现场（run 10 / result 187，2026-10-06）：agent 明确说"无法完成核对，
+        # 页面只有『正在加载中请稍后』、0 个可交互元素"，判定器却判passed，
+        # 理由是"截图显示已到达资源审批配置列表"—— 截图里根本没有列表。
+        # 根因是 judge.py 对模型输出的 status 没有任何校验，
+        # 而提示词里"截图是最强证据"权重过高，能被一句话说服。
+        #
+        # 闸门在 judge() 之前执行，命中就不调 LLM：既省一次调用，
+        # 也避免那个已经被证明会编造证据的判定器再开口。
+        # 设计取舍与180 条真实数据回归结果见 app/judge_gate.py 顶部注释。
+        _gate = check_gates(
+            res.final_answer or "", res.steps, evidence
         )
-        res.status = verdict.status
-        res.judge_reason = verdict.reason
-        res.evidence_gap = verdict.evidence_gap
-        res.root_cause = verdict.root_cause
-        res.verdict_evidence = list(verdict.evidence)
+        if _gate.blocked:
+            res.status = "failed"
+            res.judge_reason = _gate.reason
+            # agent 自己都说没做到 → 属于"没做到位"，重试有意义。
+            #根因归 environment/evidence_insufficient 取决于 agent 怎么描述，
+            # 交给 LLM 判定器去分类没有意义（它已经被证明会编），这里按
+            # 闸门类型直接给：页面没起来 = environment。
+            res.evidence_gap = True
+            res.root_cause = (
+                "environment" if _gate.gate == "page_not_ready" else "agent_incomplete"
+            )
+            res.verdict_evidence = []
+            log.warning(
+                "executor: ★ 判定闸门拦下假通过（gate=%s）—— %s",
+                _gate.gate,
+                spec.name or f"case{spec.case_id}",
+            )
+        else:
+            verdict = await judge(
+                spec.expected,
+                res.final_answer or "",
+                res.steps,
+                task=spec.prompt,
+                evidence=evidence,
+                screenshot_b64=final_shot,
+            )
+            res.status = verdict.status
+            res.judge_reason = verdict.reason
+            res.evidence_gap = verdict.evidence_gap
+            res.root_cause = verdict.root_cause
+            res.verdict_evidence = list(verdict.evidence)
 
     # Bug description for anything that did not pass. "error" counts: an errored case is
     # still a case the tester has to look at, and a narrative is what they read first.
@@ -2710,6 +2743,78 @@ def _capture_profile_dir(project_id: int | None) -> str:
     return os.path.join(root, "_capture_orphan")
 
 
+class _StageTimer:
+    """分段计时器 —— 只为把登录态捕获的耗时拆开，不参与任何控制逻辑。
+
+    为什么需要它（实测run 10，2026-10-06）：
+      UI 显示单条用例 2m29s，但 `case-timing` 日志只有 31.7s。
+      差的 145s 花在**用例开始之前**的 `capture_session`（凭据会话过期 → 重登），
+      而那一段没有任何日志，看起来像"系统在浪费时间"。
+
+      没有分解就不知道该优化哪里。现在每段都会落一条日志：
+      「capture-timing[user] 总 145.2s | 启浏览器 4.1s | 预导航 12.3s |
+        裁剪器 0.8s | 身份守卫 3.4s | agent登录 118.2s | 导出 6.4s」
+
+    用法：`with _stage_timer("capture", username) as t: ...` 然后 `t.mark("阶段名")`。
+    刻意不做成 contextmanager 链式调用 —— 阶段名要写在业务代码旁边，
+    自动推导反而看不出这一段到底做了什么。
+    """
+
+    __slots__ = ("_label", "_t0", "_last", "_marks", "_t_start")
+
+    def __init__(self, label: str):
+        self._label = label
+        self._marks: list[tuple[str, float]] = []
+        self._t0: float | None = None
+        self._t_start: float | None = None
+        self._last: float | None = None
+
+    def start(self) -> "_StageTimer":
+        """开始计时。返回 self 以便链式：`t = _StageTimer(x).start()`。"""
+        self._t0 = time.monotonic()
+        self._t_start = self._t0
+        self._last = self._t0
+        return self
+
+    def mark(self, stage: str) -> None:
+        """记一个阶段耗时（距上一个 mark 的增量）。"""
+        if self._last is None:
+            return
+        now = time.monotonic()
+        self._marks.append((stage, now - self._last))
+        self._last = now
+
+    def finish(self) -> None:
+        """输出分段日志。必须显式调用（不靠 __exit__，理由见调用处注释）。"""
+        if self._t0 is None:
+            return
+        total = time.monotonic() - self._t0
+        parts = " | ".join(f"{n} {d:.1f}s" for n, d in self._marks)
+        log.warning(
+            "executor: capture-timing[%s] 总 %.1fs | %s",
+            self._label,
+            total,
+            parts or "（无阶段记录）",
+        )
+        # 慢捕获要留痕：会话 TTL 有限，捕获 100s+ 意味着缓存期里一直在付这笔钱。
+        if total >= _CAPTURE_SLOW_WARN_S:
+            _ttl = get_settings().session_ttl_min
+            log.warning(
+                "executor: ★ 捕获登录态耗时 %.1fs（阈值 %.0fs）。会话 TTL %s 分钟，"
+                "即缓存期有约 %.0f%% 的时间都在付这笔开销 —— "
+                "批量跑用例时它是独立于用例本身的大头。",
+                total,
+                _CAPTURE_SLOW_WARN_S,
+                _ttl,
+                100.0 * total / (_ttl * 60.0),
+            )
+
+
+# 超过这个秒数就算"慢捕获"，值得单独提醒。
+# 依据：实测 145s；缓存 TTL 30min，即缓存 20% 的时间都在付这笔钱。
+_CAPTURE_SLOW_WARN_S = 60.0
+
+
 def _viewport_kwargs() -> dict:
     """把配置里的视口宽高转成 Browser(**kwargs) 形状。
 
@@ -2760,6 +2865,14 @@ async def capture_session(
         project_id if project_id else "未指定",
         profile,
     )
+    # 分段计时：这一段每 30 分钟就要重跑一次，实测能占到整轮耗时的大头，
+    # 之前却完全没有日志（详见 _StageTimer 的docstring）。
+    #
+    # ★ 刻意**不用** `with`、也不拆函数：那需要把整个函数体再缩进一层，
+    # 而这个函数里有嵌套的 async def（_capture_step_cb）和多段 try/except +
+    # 多个 return，大范围重排极易出错并留下不可达代码（已经踩过一次）。
+    # 局部计时器 + 显式 mark 是改动面最小的做法。
+    _t = _StageTimer(username).start()
     # keep_alive so the CDP session survives after agent.run() — otherwise
     # export_storage_state() fails with "Root CDP client not initialized".
     browser = Browser(
@@ -2778,6 +2891,8 @@ async def capture_session(
         # 否则内网地址会被送去代理并全线失败（详见 make_browser 里的长注释）。
         args=["--no-proxy-server"],
     )
+    await browser.start()
+    _t.mark("启浏览器")
     # 2026-10-05 补装图标精灵裁剪。
     # 为什么这里必须单独装：这条路径自己 new 了一个 Agent（不走 execute_case），
     # 而裁剪器原先只装在 execute_case 里。漏装的后果实测很明确 ——
@@ -2791,13 +2906,27 @@ async def capture_session(
     # 也会以"找不到页面目标"告警收场（实测过）。所以这里主动导航一次把 target
     # 拉起来，顺带让登录页在**裁剪器已注册**的前提下才开始解析。
     # agent 紧接着本来也要去同一个地址，多这一次导航不影响总时长。
+    #
+    # ★ 2026-10-06 补start()：现场日志「拿不到 CDP 会话，图标精灵裁剪未安装
+    # —— Root CDP client not initialized」查到的就是这里。
+    # `navigate_to()` 在浏览器未启动时**不会抛异常**：它 dispatch 一个事件，
+    # 而 `event_result(raise_if_any=True, raise_if_none=False)` 里
+    # `raise_if_none=False` 会把"事件根本没跑起来"静默当成成功。
+    # 于是后面的 `_install_sprite_pruner` 撞上 `get_or_create_cdp_session()`
+    # 里的 `assert self._cdp_client_root is not None`（session.py:1496）必炸，
+    # 裁剪器整轮装不上 —— 而登录页内联 3.3 万个 <path>，未裁剪时每步 DOM 采集
+    # 要20-27s（实测元素索引一路涨到 67346，agent 只能干等）。
+    # 这一条是**必须先 start** 才成立：没有 CDP 根客户端，注入脚本无处可挂。
+    # （start() 已挪到 Browser(...) 之后紧跟执行，见上方 _t.mark("启浏览器")。）
     try:
         await browser.navigate_to(base_url)
     except Exception as exc:  # noqa: BLE001 — 导航失败不该挡住后面的登录尝试
         _warn_prune_once(
             "prenav", "executor: 预导航 %s 失败（裁剪器可能装不上）：%s", base_url, exc
         )
+    _t.mark("预导航")
     await _install_sprite_pruner(browser)
+    _t.mark("装裁剪器")
     # 2026-10-06 身份守卫（捕获路径同样要守，而且这里是**最要命**的一处）。
     #
     # 捕获用的 profile 是长期复用的（profiles/project_N/_capture），里面也会残留
@@ -2816,6 +2945,7 @@ async def capture_session(
             )
         else:
             log.info("executor: 捕获登录态前身份守卫 %s", verdict)
+    _t.mark("身份守卫")
     try:
         task = (
             f"Go to {base_url}. Log in with username '{username}' and password '{password}'. "
@@ -2850,6 +2980,7 @@ async def capture_session(
             agent.run(max_steps=s.login_capture_max_steps),
             timeout=s.login_capture_timeout_s,
         )
+        _t.mark("agent登录")
         # P2.5: never store a garbage bundle — if login didn't actually complete (agent still
         # on a login page), fail loudly so the caller falls back to prompt-login instead of
         # caching a tokenless session that would make every future case fail.
@@ -2887,8 +3018,12 @@ async def capture_session(
         # Restored later via CDP (_restore_session), so sessionStorage-based auth
         # survives — unlike the Playwright storage_state format, which drops it.
         state = await browser._cdp_get_storage_state()  # noqa: SLF001 — private API, pinned to browser-use 0.13.x
+        _t.mark("导出登录态")
         return json.dumps(state, ensure_ascii=False)
     finally:
+        # finish 放在 finally：捕获失败（超时 / 凭据失效 / 被身份守卫拒绝）时
+        # 恰恰最需要知道"时间花在哪一段"，成功路径反而次要。
+        _t.finish()
         await _safe_async(lambda: browser.kill())
 
 

@@ -778,6 +778,12 @@ async def _wait_until_ready(browser, timeout_s: float = _WAIT_READY_TIMEOUT_S) -
     刻意**不抛异常**：等不到就返回描述，让调用方继续走 —— agent 随后会自己看到
     那个占位并给出结论，而那份结论此时是合法的（页面确实没加载出来）。
     """
+    # ★`time.sleep()` 是**同步**的，返回 None，不能 await ——
+    # 我第一版写成 `await _time.sleep(...)`，结果每次导航都抛
+    # "TypeError: object NoneType can't be used in 'await' expression"，
+    # 整条用例直接崩（实测连挂 10 条）。异步版本是 `asyncio.sleep`。
+    # 这个错只在真的等不到就绪、走到 sleep 那一行时才暴露 —— 页面秒开时测不出来。
+    import asyncio as _aio
     import json as _json
     import time as _time
 
@@ -802,7 +808,7 @@ async def _wait_until_ready(browser, timeout_s: float = _WAIT_READY_TIMEOUT_S) -
                 last = "loading" if d.get("loading") else "empty"
         except Exception:  # noqa: BLE001 — 中途失败就再试一轮，不放弃
             last = "err"
-        await _time.sleep(_WAIT_READY_INTERVAL_S)
+        await _aio.sleep(_WAIT_READY_INTERVAL_S)
     return f"timeout(last={last})"
 
 

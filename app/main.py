@@ -229,8 +229,18 @@ def create_app() -> FastAPI:
         async def spa(full_path: str) -> FileResponse:
             candidate = os.path.join(s.web_dist, full_path)
             if full_path and os.path.isfile(candidate):
-                return FileResponse(candidate)
-            return FileResponse(index)
+                if os.path.realpath(candidate) == os.path.realpath(index):
+                    # index.html 每次 rebuild 引用的 chunk 名都会变，必须 no-cache 让
+                    # 浏览器重新验证；否则它拿旧 index.html 去取已改名的 chunk →
+                    # "Failed to fetch dynamically imported module"（404）。
+                    return FileResponse(candidate, headers={"Cache-Control": "no-cache"})
+                # 带内容 hash 的产物（assets/*）不可变，长缓存省请求。
+                return FileResponse(
+                    candidate,
+                    headers={"Cache-Control": "public, max-age=31536000, immutable"},
+                )
+            # 客户端路由的未知路径一律回 index.html（no-cache，理由同上）。
+            return FileResponse(index, headers={"Cache-Control": "no-cache"})
 
     return app
 

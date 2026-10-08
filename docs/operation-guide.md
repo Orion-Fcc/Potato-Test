@@ -105,6 +105,40 @@ GET http://127.0.0.1:18081/api/projects/{pid}/case-changes?limit=100
 
 ---
 
+## 七、给 WorkBuddy agent 用的 MCP 接口（24 工具）
+
+想让 agent（WorkBuddy 里的助手）直接操作 Potato，不用人点界面，走这套 stdio MCP。
+它**不侵入 FastAPI 本体**，独立进程 `potato_mcp_server.py` 用 httpx 调本机 REST（默认 `127.0.0.1:18081`）。
+
+### 1. 怎么接
+
+- WorkBuddy 连接器用 stdio 拉起：`.venv/Scripts/python.exe potato_mcp_server.py`（项目 venv 里）。
+- 本机 `AUTH_ENABLED=false` 免 token；开了登录就设 `POTATO_COOKIE` 传 `tp_session`，`POTATO_BASE_URL` 可换地址。
+- 读工具零副作用；写工具（跑运行 / 改用例 / 改判 / 删 / 导入）在工具描述里标清，agent 看得到。
+
+### 2. 五组、24 个工具
+
+| 组 | 工具 | 说明 |
+| - | - | - |
+| 1 只读查询（10） | `list_projects` / `list_testcases` / `get_testcases_by_status` / `get_failure_digest` / `get_case_changes` / `list_runs` / `get_run` / `get_run_results` / `get_case_results` / `get_project_stats` | 全是 `GET`，零副作用 |
+| 2 运行控制（3） | `start_run` / `rerun_run` / `cancel_run` | 会真的起浏览器跑，耗时数分钟起；本机并发硬限 1 |
+| 3 用例编辑（3） | `create_case` / `update_case` / `delete_case` | 写改动自动带审计头进 `case_change`；删走双闸门（见 3） |
+| 4 人工改判（2） | `override_result` / `revert_result_override` | 覆盖 AI 结论并留 `original_status` 可撤销 |
+| 5 账号/配置/导入（6） | `list_credentials` / `create_credential` / `delete_credential` / `recheck_credential` / `set_project_roles` / `import_cases_from_xlsx` | 2026-10-08 补齐，见下 |
+
+### 3. 第 5 组要点（本轮新增）
+
+- **密码只进不回显**：`create_credential` 的 `password` 只在本次请求里传，服务端加密存储，`list_credentials` 回的是脱敏结构（含 `healthy`/`last_error`，**不含明文**）。传 `credential_id` + 新密码 = 密码轮换，不丢 role / 会话缓存。
+- **删账号有双闸门**（和 `delete_case` 同款）：
+  - `dry_run=True` 只看预览（该账号是谁、影响哪些角色），不动任何东西；
+  - 真删必须原样传 `confirm_delete="确认删除"`，缺了就被拒绝、退回预览。
+- **批量导入走 `import_cases_from_xlsx`**：Potato 唯一批量导入通道（模板 18 列，可从 `GET /api/projects/{pid}/testcases/template` 下载）。默认 `overwrite=False` 只追加；`overwrite=True` 会**先删与文件 case_key 冲突的既有用例**再导入，同样双闸门——真覆盖必须传 `confirm_overwrite="确认覆盖"`，缺了拒绝。
+- **`set_project_roles` 是整体替换**：用例 Role 列取值必须落在项目 roles 列表内，改完先 `list_credentials` 确认每个角色都有账号，否则执行报「角色没有可用账号」。
+
+> 危险操作（删用例 / 删账号 / 覆盖导入）都要先预览、再带确认词真删——比「直接调」保守，agent 不会顺手把数据删了。
+
+---
+
 ## 附：本轮"能做什么"一览
 
 | 能力 | 入口 | 一句话 |
@@ -115,3 +149,4 @@ GET http://127.0.0.1:18081/api/projects/{pid}/case-changes?limit=100
 | 改动审计 | `GET /api/projects/{pid}/case-changes` | 字段级 before/after |
 | 回放 1:1 | 结果页 | 1434×825，不拉伸 |
 | 判定更严 | 自动 | 编造数字/未落位/回显 → 翻案 |
+| MCP 接口 | `potato_mcp_server.py`（stdio） | 24 工具给 agent 用；删/覆盖有确认词闸门 |

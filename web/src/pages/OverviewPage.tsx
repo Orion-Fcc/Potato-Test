@@ -10,6 +10,7 @@ import { chartTooltip } from "../components/table";
 import { Empty, PageSkeleton } from "../components/feedback";
 import { SetupChecklist } from "../components/SetupChecklist";
 import { FailureDigestPanel } from "../components/FailureDigestPanel";
+import { CaseChangePanel } from "../components/CaseChangePanel";
 
 export function OverviewPage() {
   const { t } = useTranslation();
@@ -86,6 +87,10 @@ export function OverviewPage() {
           tone={stats.last_flaky > 0 ? "warn" : undefined}
         />
       </div>
+
+      {/* 用例改动审计：谁（人/助手）把哪条用例的哪个字段改成了什么。
+          放在 KPI 之后、趋势之前 —— 和上方的失败清单呼应（清单驱动改动，审计记录改动）。 */}
+      <CaseChangePanel />
 
       {stats.run_count === 0 ? (
         <Empty

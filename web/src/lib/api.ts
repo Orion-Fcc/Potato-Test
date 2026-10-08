@@ -346,6 +346,8 @@ export interface Run {
   name: string;
   status: "pending" | "running" | "completed" | "failed" | "cancelled";
   concurrency: number;
+  // null = 沿用全局 CASE_RETRIES（不是 0）。详见后端 engine.effective_retries。
+  retries?: number | null;
   case_ids: number[];
   total_count: number;
   processed_count: number;
@@ -358,7 +360,7 @@ export interface Run {
   suite_id?: number | null;
   ran_by_user_id?: number | null;
   ran_by_label?: string | null;
-  trigger?: "manual" | "suite";
+  trigger?: "manual" | "suite" | "schedule";
   environment_id?: number | null;
 }
 
@@ -419,6 +421,13 @@ export interface RunResult {
   root_cause?: string | null;
   root_cause_label?: string | null;
   is_real_defect?: boolean;
+  /** 2026-10-07 失败归因：这次失败是谁的锅。与 root_cause 分工不同 —— 那个回答
+   *  "用例为什么判失败"，这个回答"这次失败能不能算被测系统的缺陷"。
+   *  取值 system / setup / transient / agent / unknown；null 或缺失 = 历史数据未判定。
+   *  只有 attribution_is_real_defect 为 true 才允许提缺陷单。 */
+  attribution?: string | null;
+  attribution_label?: string | null;
+  attribution_is_real_defect?: boolean;
   verdict_evidence?: number[];
   final_answer: string | null;
   /** AI-written bug description, present only for failed/errored cases. */
@@ -718,7 +727,7 @@ export const api = {
     }>;
   },
 
-  createRun: (pid: number, b: { name?: string; case_ids?: number[]; tags?: string[]; concurrency?: number }) =>
+  createRun: (pid: number, b: { name?: string; case_ids?: number[]; tags?: string[]; concurrency?: number; retries?: number }) =>
     req<Run>(`/projects/${pid}/runs`, { method: "POST", body: JSON.stringify(b) }),
   listRuns: (pid: number, o?: Opts) => req<Run[]>(`/projects/${pid}/runs`, o),
   getRun: (rid: number, o?: Opts) => req<Run>(`/runs/${rid}`, o),

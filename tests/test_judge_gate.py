@@ -140,11 +140,20 @@ def test_known_false_passes_are_actually_blocked():
 
 
 def test_real_history_baseline_is_meaningful():
-    """基线本身要有效：样本里必须同时有 passed 和 failed，否则回归没有意义。"""
+    """基线本身要有效：样本里必须同时有 passed 和 failed，否则回归没有意义。
+
+    样本不足时 **skip 而不是 fail** —— 与本文件开头的边界一致：`potato.db` 是用户
+    的真库，一条都没跑过（新装、CI、别人的机器）属于环境差异，不是代码缺陷。
+    这个用例的价值是"有历史数据时确认基线可信"；没数据时它什么也证明不了，
+    报红只会训练人忽略红灯。真正缺样本的情况由上面的回归用例覆盖（它们同样 skip）。
+    """
     results = _load_real_results()
     statuses = {r["status"] for r in results}
-    assert "passed" in statuses, "真库里没有 passed 样本，误伤回归无从谈起"
-    assert len(results) >= 50, f"样本太少（{len(results)} 条），回归结论不可信"
+    if "passed" not in statuses or len(results) < 50:
+        pytest.skip(
+            f"真库历史样本不足（{len(results)} 条，statuses={sorted(statuses)}）——"
+            "无回归基线可比，非代码缺陷"
+        )
 
 
 # ══════════════════════════════════════════════════════════════════

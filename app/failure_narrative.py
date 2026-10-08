@@ -39,6 +39,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.config import get_settings
+from app.failure_attrib import prompt_hint
 from app.llm import llm_config, openai_client
 
 # The output contract. Kept as a dataclass so the executor can store it as JSON and the
@@ -50,6 +51,17 @@ class FailureNarrative:
     expected: str  # 预期结果
     title: str = ""  # one-line summary, useful as a bug-list headline
     severity: str = ""  # 阻塞 | 严重 | 一般 | 轻微  (best-effort)
+    # Who caused it — "system" / "setup" / "transient" / "agent" / "unknown".
+    #
+    # ★ This is what stops the tool from filing a failure the developer must triage.
+    # Measured twice on 2026-10-07, both non-defects:
+    #   * a list read mid-request showed 「共 0 条」 → the trainee "didn't exist";
+    #   * an import that was never submitted for approval → "data was not saved".
+    # Both read exactly like data-loss defects in the bug list. A tester who cannot
+    # tell them apart stops trusting the tool and starts re-checking everything, which
+    # is worse than having no report at all — and a real defect sitting beside two fake
+    # ones is the one that gets missed.
+    attribution: str = ""
 
     def as_dict(self) -> dict[str, str]:
         return {
@@ -58,10 +70,18 @@ class FailureNarrative:
             "expected": self.expected,
             "title": self.title,
             "severity": self.severity,
+            "attribution": self.attribution,
         }
 
     def is_empty(self) -> bool:
         return not (self.steps or self.actual or self.expected)
+
+    @property
+    def fileable_as_defect(self) -> bool:
+        """Only a ``system`` attribution may be filed as a product defect."""
+        from app.failure_attrib import VERDICT_INFO
+
+        return VERDICT_INFO.get(self.attribution, VERDICT_INFO["unknown"])[1]
 
 
 _SYSTEM = """你是一名资深测试工程师，负责为**失败的**自动化测试用例撰写缺陷描述，供开发同学直接阅读。
@@ -111,6 +131,16 @@ _SYSTEM = """你是一名资深测试工程师，负责为**失败的**自动化
 
 【重要】如果提供的证据不足以判断，就把不确定的地方写得保守、概括，
 **不要编造具体的报错文案或页面元素**。宁可写得笼统，也不要虚构细节。
+
+【★ 归因 —— 比措辞更重要的一条】
+用户消息里会带一行【归因】。它已经由代码判定好了这次失败**是谁造成的**：
+- 「系统行为」：可以按缺陷线索写，这是产品自己的表现。
+- 「流程未走完」「页面未就绪」「执行方问题」：**这不是产品缺陷**。开发没有东西可改。
+  你要如实描述现象，但绝不能把它写成产品应该怎样——那会让开发去改一个没坏的
+  地方，浪费一次排查，并且把真的缺陷挤下去。
+- 「待人工确认」：证据不足，描述保持保守，**不要断言是缺陷，也不要断言不是**。
+**无论哪种归因，都不要在输出里提「归因」「执行方」「自动化脚本」这些词**——
+写给开发看的是现象，分类是我们内部的事。
 """
 
 
@@ -122,23 +152,38 @@ def build_prompt(
     actions: list[str],
     evidence: list[str],
     judge_reason: str = "",
+    attribution: str = "",
+    shot_hint: str = "",
 ) -> str:
-    """The narrative writer's user message. Split out so wiring is testable without an LLM."""
-    return json.dumps(
-        {
-            "用例名称": case_name,
-            "用例任务": task,
-            "用例预期": expected,
-            "智能体最终回复": final_answer,
-            "判定理由": judge_reason,
-            # The raw material for 【操作步骤】. Capped: a 200-step log does not improve the
-            # narrative and does cost tokens on every failed case.
-            "动作日志": [a for a in actions if a][:100],
-            # The browser's own observations — the only trustworthy source of UI text.
-            "步骤观察": [e for e in evidence if e][:100],
-        },
-        ensure_ascii=False,
-    )
+    """The narrative writer's user message. Split out so wiring is testable without an LLM.
+
+    ``attribution`` is the pre-computed verdict from :mod:`app.failure_attrib`. It is
+    spliced in as a line of the payload rather than only used to shape the system
+    prompt, so the verdict travels with the evidence even if a future refactor stops
+    rewriting ``_SYSTEM``.
+
+    ``shot_hint`` is the caller-supplied observation about the final frame (see
+    :func:`app.shot_probe.screenshot_hint`). It rides in the payload for the same
+    reason: the writer gets the image, but an image it cannot trust, and a blank frame
+    that failed to load is indistinguishable from a loaded one by looking alone.
+    """
+    payload: dict[str, Any] = {
+        "用例名称": case_name,
+        "用例任务": task,
+        "用例预期": expected,
+        "智能体最终回复": final_answer,
+        "判定理由": judge_reason,
+        # The raw material for 【操作步骤】. Capped: a 200-step log does not improve the
+        # narrative and does cost tokens on every failed case.
+        "动作日志": [a for a in actions if a][:100],
+        # The browser's own observations — the only trustworthy source of UI text.
+        "步骤观察": [e for e in evidence if e][:100],
+    }
+    if attribution:
+        payload["【归因】"] = prompt_hint(attribution)
+    if shot_hint:
+        payload["【截图】"] = shot_hint
+    return json.dumps(payload, ensure_ascii=False)
 
 
 def _clip(s: str, n: int) -> str:
@@ -155,18 +200,46 @@ async def describe_failure(
     evidence: list[str],
     judge_reason: str = "",
     screenshot_b64: str | None = None,
+    attribution: str = "",
+    shot_hint: str = "",
 ) -> FailureNarrative:
     """Generate the 操作步骤/实际结果/预期结果 narrative for one failed case.
 
     Never raises: a narrative is a nice-to-have attached to a failure, and losing it must
     not turn one failed case into a crashed run. Returns an empty narrative on any error.
+
+    ``attribution`` — computed by the caller via :func:`app.failure_attrib.classify` —
+    rides along into the prompt so the writer does not polish a non-defect into a
+    confident fake bug. It is echoed back on the result so the report can label it.
+
+    ``shot_hint`` — one line from :func:`app.shot_probe.screenshot_hint`, e.g. that the
+    final frame is blank. Kept as text rather than left to the writer's reading of the
+    image: a vision-capable model looking at a white screenshot will happily describe a
+    working page in confident detail, and it has no way to know the frame failed to load.
     """
     if not get_settings().failure_narrative_enabled:
-        return FailureNarrative(steps="", actual="", expected="")
-    user = build_prompt(case_name, task, expected, final_answer, actions, evidence, judge_reason)
-    cfg = await llm_config()
-    client = await openai_client()
+        return FailureNarrative(steps="", actual="", expected="", attribution=attribution)
+    user = build_prompt(
+        case_name,
+        task,
+        expected,
+        final_answer,
+        actions,
+        evidence,
+        judge_reason,
+        attribution,
+        shot_hint,
+    )
+    # 从这里开始的任何失败（含建客户端本身）都不能抛出去。
+    #
+    # 这两行原来在 try 外面，于是网关连不上时——正是最需要叙述的那天——
+    # describe_failure 会带着 RuntimeError 直接抛出，docstring 里写的
+    # "Never raises" 变成一句空话，整个用例执行被叙述功能带崩。
+    # 失败叙事是挂在失败结果上的附加物，丢它不能反过来毁掉这次执行。
+    client: Any = None
     try:
+        cfg = await llm_config()
+        client = await openai_client()
         content: Any = user
         if screenshot_b64:
             # The screenshot is what makes 【实际结果】 concrete — it is where the error
@@ -197,6 +270,7 @@ async def describe_failure(
                 expected=_clip(str(data.get("expected", "")), 800),
                 title=_clip(str(data.get("title", "")), 200),
                 severity=_clip(str(data.get("severity", "")), 20),
+                attribution=attribution,
             )
 
         try:
@@ -212,6 +286,9 @@ async def describe_failure(
         logging.getLogger(__name__).warning(
             "failure narrative 生成失败（不影响用例结果）：%s: %s", type(exc).__name__, exc
         )
-        return FailureNarrative(steps="", actual="", expected="")
+        return FailureNarrative(steps="", actual="", expected="", attribution=attribution)
     finally:
-        await client.close()
+        # 建客户端就失败时 client 是 None —— 直接 client.close() 会 AttributeError，
+        # 把上面刚吞掉的异常重新抛出来，等于白救。
+        if client is not None:
+            await client.close()

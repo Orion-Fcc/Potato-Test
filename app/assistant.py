@@ -15,8 +15,11 @@ from __future__ import annotations
 import json
 import logging
 import os
+import pathlib
 import re
 import time
+from typing import Any
+from urllib.parse import quote
 
 import httpx
 
@@ -135,9 +138,22 @@ def _system_prompt(catalog: str, project_name: str = "Potato Test", pid: int = 0
         "2) **失败清单**：get_failure_digest（本项目当前未通过用例，按相同原因合并）/ "
         "update_case（改用例）/ list_case_changes（改动审计）；\n"
         "3) 文档工具：generate_document（把成果写成可下载的 Markdown 业务文档）、list_documents；\n"
-        "4) 通用工具 `potato-test_api`：可调用下面列出的任意平台接口——"
+        "4) 用例增删改：create_case（新建）/ update_case（改字段）/ "
+        "set_case_status（启用停用，可逆）/ delete_case（永久删，不可逆）/ "
+        "list_case_changes（改动审计）；\n"
+        "5) 通用工具 `potato-test_api`：可调用下面列出的任意平台接口——"
         "用例/套件/运行/缺陷/项目/成员/凭据/角色/环境/系统设置 的增删改查都能做；\n"
-        "5) 项目『需规/资料』：用 `search_knowledge(query)` 检索需求规格，再据此作答或写文档。\n"
+        "6) 项目『需规/资料』：用 `search_knowledge(query)` 检索需求规格，再据此作答或写文档；\n"
+        "7) **文件工具**：list_files（看目录/确认路径）/ import_file_to_knowledge"
+        "（把本机 md/txt/json/csv/docx/pdf/xlsx/html/rtf 导入知识库，之后可检索）/ "
+        "import_cases_from_file（把 Excel 用例表导入本项目）；\n"
+        f"8) **list_tools**：你能做的**不止上面这些**。不确定该调哪个工具、或要做的事"
+        f"没在清单里时，先调 list_tools 查当前真实可用的工具（含上面未列出的）。"
+        "它是活的工具表，比这份清单新——工具刚加进来时这里能查到，清单还没更新。\n"
+        "\n"
+        "★ **导入类操作默认是预检**：import_file_to_knowledge / import_cases_from_file 不带 save "
+        "时只解析并返回预览与问题清单，让你确认后再带 save=true 真正写入。"
+        "预检里报的问题行一定要如实告诉用户，不要因为「反正有一部分能用」就略过。\n"
         "\n"
         + _identity_block(project_name)
         + "\n"
@@ -152,24 +168,36 @@ def _system_prompt(catalog: str, project_name: str = "Potato Test", pid: int = 0
         "查不到就说「资料里没写」，不要臆造。\n"
         "3) potato-test_api 的 path 以 /api 开头（例：POST /api/projects/2/runs），body 传 JSON。\n"
         "4) 任何写操作执行前先说明；破坏性操作（DELETE、取消运行、覆盖设置等）须用户明确同意。\n"
-        "5) 写用例时：先查需规 → 提炼可判定的预期 → 用 create_case 逐条创建，并回报创建了哪些 case_key。\n"
-        "6) 用户要「文档 / 报告 / 计划 / 规格 / 矩阵 / 说明」这类**产物**时，"
+        # 2026-10-07：用户抱怨「我让AI 加用例加不了」。查下来不是模型笨，是工具表里
+        # 只有 update_case（改 6 个字段）而没有停用/删除，于是它看到重复用例只能
+        # 写一段「建议删掉 TC-018」交还给用户 —— 判断是对的，手是空的。
+        #
+        # 规则要写清「停用优先于删除」，因为 DELETE 会连带删掉 run_result：
+        # 用户之后再也无法回查这条用例跑过什么，而「暂时别跑它」根本不需要付这个代价。
+        "5) ★**停用优先于删除**：发现重复、暂时跑不通、待确认的用例 → 用 set_case_status "
+        "（status=\"deprecated\"）停用，可逆、历史结果保留。只有用户明确说了"
+        "「彻底删 / 删干净 / 永久删」才用 delete_case。\n"
+        "6) ★**发现重复不要只给建议**：你已能直接动手。看完 list_cases 判定两条重复后，"
+        "应直接 set_case_status 停用其中一条并回报 case_key，不要停下来问用户「要不要删」——"
+        "停用是可逆的，错了能启回来。用户抱怨「加不了 / 改不了」时，先查是不是你漏用了工具。\n"
+        "7) 写用例时：先查需规 → 提炼可判定的预期 → 用 create_case 逐条创建，并回报创建了哪些 case_key。\n"
+        "8) 用户要「文档 / 报告 / 计划 / 规格 / 矩阵 / 说明」这类**产物**时，"
         "不要只在对话里写一大段——用 generate_document 落成文件，"
         "然后把 download_url 原样给出，并说明这是一份可下载的 Markdown。\n"
-        "7) 文档要有实际内容：章节、表格、编号步骤都要写全，不要写「此处省略」「同上」这类占位。\n"
+        "9) 文档要有实际内容：章节、表格、编号步骤都要写全，不要写「此处省略」「同上」这类占位。\n"
         "\n"
         "怎么用失败清单（用户 2026-10-06 明确要求『按清单去修改相应用例』）：\n"
-        "8) 要诊断问题、或问『哪些用例有问题』，先 get_failure_digest，不要自己去翻 run 记录 —— "
+        "10) 要诊断问题、或问『哪些用例有问题』，先 get_failure_digest，不要自己去翻 run 记录 —— "
         "清单已按相同原因合并，直接看它更省事也更准。\n"
-        "9) 清单每条带一个 action 字段，它就是该做什么：\n"
+        "11) 清单每条带一个 action 字段，它就是该做什么：\n"
         "   改用例(fix_case) / 改测试数据(fix_data) / 改环境或凭据(fix_env) / "
         "提缺陷给开发(report_to_dev) / 重跑观察(rerun) / 需人工看一眼(inspect)。"
         "**先看 action 再动手**：action 不是 fix_case 的就别去改用例。\n"
-        "10) ★改 expected（预期）之前，必须先分清是**用例写错了**还是**系统真有缺陷**：\n"
+        "12) ★改 expected（预期）之前，必须先分清是**用例写错了**还是**系统真有缺陷**：\n"
         "   - action=report_to_dev 的条目，**不要改 expected** —— 那是真缺陷，改预期等于掩盖它。\n"
         "   - 只有当 expected 写成了页面 UI 串、量词、或与需规矛盾时，才属于『用例写错』，可以改。\n"
         "   - 拿不准就 search_knowledge 查需规，或者先问用户，不要自己拍板。\n"
-        "11) 改完之后如实说明：改了哪条用例的哪个字段、为什么这么改。"
+        "13) 改完之后如实说明：改了哪条用例的哪个字段、为什么这么改。"
         "所有改动都在审计里，用户会看得到；含糊其辞会让人不敢用这个功能。\n"
         "\n"
         "回答风格：\n"
@@ -351,6 +379,61 @@ def _tools() -> list[dict]:
         {
             "type": "function",
             "function": {
+                "name": "set_case_status",
+                "description": (
+                    "启用/停用当前项目里的一条用例（status: active / deprecated）。"
+                    "**这通常是「这条用例有问题」的第一选择** —— 停用是可逆的，"
+                    "不丢历史执行结果，随时能启回来；重复用例、暂时跑不通的用例、"
+                    "待确认的用例，先停用而不是删除。"
+                    "用户说「这条先别跑 / 别再跑它 / 暂时停一下」就用这个。"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "case_id": {"type": "integer", "description": "用例 id"},
+                        "status": {
+                            "type": "string",
+                            "enum": ["active", "deprecated"],
+                            "description": "active=启用；deprecated=停用（不再参与「跑全部」）",
+                        },
+                        "reason": {
+                            "type": "string",
+                            "description": "停用原因，会写进审计，便于日后回查为什么停",
+                        },
+                    },
+                    "required": ["case_id", "status"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "delete_case",
+                "description": (
+                    "**永久删除**当前项目里的一条用例，不可撤销，"
+                    "并且会连带删除它的全部历史执行结果（run_result）。\n"
+                    "★ 绝大多数情况你**不该用这个**，应该用 set_case_status 停用："
+                    "用户抱怨「删掉 / 加不了」多半只需要停用或修改，"
+                    "删除会让他之后无法回查这条用例跑过什么。\n"
+                    "只有用户明确说了「彻底删除 / 删干净 / 永久删」才用。"
+                    "用户只是说「这两条重复了」「这条不要了」→ 用 set_case_status。"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "case_id": {"type": "integer", "description": "用例 id"},
+                        "reason": {
+                            "type": "string",
+                            "description": "删除原因，会记入审计",
+                        },
+                    },
+                    "required": ["case_id"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "list_case_changes",
                 "description": "本项目用例的改动审计（谁在什么时候改了哪个字段）。",
                 "parameters": {
@@ -446,7 +529,229 @@ def _tools() -> list[dict]:
                 "parameters": {"type": "object", "properties": {}, "required": []},
             },
         },
+        {
+            "type": "function",
+            "function": {
+                "name": "list_tools",
+                "description": (
+                    "列出你能用的全部工具及用途（自发现）。当你需要做某件事但不确定该调哪个工具时，"
+                    "先调这个——比凭记忆猜工具名可靠。带 query 参数可只列出相关的。"
+                    "\n\n★ 这是你「自己找工具」的能力：工具新增后不用等提示词更新，"
+                    "调一次 list_tools 就能看到。"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "按用途关键词过滤，如「导入」「文件」「重试」「用例」。省略则列出全部。",
+                        }
+                    },
+                    "required": [],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "import_file_to_knowledge",
+                "description": (
+                    "把**本机文件**导入项目知识库，之后就能用 search_knowledge 检索它。"
+                    "支持 md/txt/json/csv/docx/pdf/xlsx/html/rtf。"
+                    "\n\n★ 典型场景：用户给你一个路径（需求文档、需规、测试清单 Excel），"
+                    "你直接导入并回答，不需要让用户手动去页面上传。"
+                    "\n默认只读取不入库（dry_run），确认内容后再用 save=true 真正入库——"
+                    "因为知识库会占用上下文且不易回滚。"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "本机文件的绝对路径，如 D:/规格/需规.docx"},
+                        "save": {
+                            "type": "boolean",
+                            "description": "true=真正写入知识库；false（默认）=只解析并返回前若干字符供预览。",
+                        },
+                        "max_chars": {
+                            "type": "integer",
+                            "description": "save 时入库的字符上限，默认 200000。",
+                        },
+                    },
+                    "required": ["path"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "import_cases_from_file",
+                "description": (
+                    "把 Excel（.xlsx）里的用例表导入当前项目。"
+                    "表头需含 Name / Agent Task (prompt) / Expected 等列，顺序无所谓、不认识的列忽略。"
+                    "\n\n★ 默认 dry_run：只返回「能识别出多少条、其中几条有问题、缺什么」，"
+                    "你检查后再用 save=true 真正导入。这能避免把一份格式错误的 Excel"
+                    "变成几十条半残用例。"
+                    "\n导入是新增，不会覆盖已有用例。"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": ".xlsx 文件的绝对路径"},
+                        "save": {"type": "boolean", "description": "true=真正导入；false（默认）=只预检"},
+                        "limit": {"type": "integer", "description": "dry_run 时最多列出多少条问题明细，默认 20"},
+                    },
+                    "required": ["path"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "list_files",
+                "description": (
+                    "列出某个目录下的文件（导入前先看看有什么、或确认文件名）。"
+                    "★ 只读目录，用于确认路径是否存在——用户给的路径常常差一个中文顿号。"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "目录绝对路径；省略则列项目根目录"},
+                    },
+                    "required": [],
+                },
+            },
+        },
     ]
+
+
+# Directories the assistant may read through ``list_files`` / ``import_file_to_knowledge``.
+#
+# ★ The assistant runs on the operator's own machine and is invoked by them, but it is driven by a
+# language model — so "it was asked to" is not an authorisation. The allowlist is the authorisation.
+#
+# Scoped to the places test work actually lives (the project directory, its data and output dirs,
+# plus the user's Desktop) rather than the whole disk: a spec on the Desktop is in scope, a
+# screenshot of someone's Desktop in ~/Pictures is not.
+_ASSISTANT_READ_ROOTS: tuple[pathlib.Path, ...] | None = None  # resolved lazily, see below
+
+
+def _read_roots() -> list[pathlib.Path]:
+    """Directories the assistant may read from. See ``_ASSISTANT_READ_ROOTS``.
+
+    Resolved on first use rather than at import: the project root depends on the CWD, and this
+    module is imported by the test suite from other directories.
+    """
+    global _ASSISTANT_READ_ROOTS
+    if _ASSISTANT_READ_ROOTS is not None:
+        return list(_ASSISTANT_READ_ROOTS)
+
+    roots = [pathlib.Path.cwd(), pathlib.Path(__file__).resolve().parents[1]]
+    for extra in ("profiles", "artifacts", "logs", "_build", "docs"):
+        roots.append(pathlib.Path(__file__).resolve().parents[1] / extra)
+    # 桌面上放着用户刚下载的需规/用例表，是导入最常见的来源。
+    try:
+        roots.append(pathlib.Path.home() / "Desktop")
+        roots.append(pathlib.Path.home() / "Downloads")
+        roots.append(pathlib.Path.home() / "Documents")
+    except Exception:  # noqa: BLE001 — a home directory we cannot resolve is just not a root
+        pass
+
+    seen: set[str] = set()
+    out: list[pathlib.Path] = []
+    for r in roots:
+        try:
+            rp = r.resolve()
+        except Exception:  # noqa: BLE001
+            continue
+        key = str(rp).lower()
+        if key in seen or not rp.exists():
+            continue
+        seen.add(key)
+        out.append(rp)
+    _ASSISTANT_READ_ROOTS = tuple(out)
+    return out
+
+
+def _resolve_readable(target: str) -> tuple[pathlib.Path | None, str]:
+    """Resolve ``target`` and confirm it sits inside an allowed root.
+
+    Returns ``(path, "")`` when allowed, or ``(None, reason)`` with a reason written for the model —
+    it has to be able to correct itself, so the message names the roots it may use.
+    """
+    raw = (target or "").strip().strip('"').strip("'")
+    if not raw:
+        return None, "路径为空"
+    # ★ 用户（和模型）习惯写 ~，但 pathlib 不会展开它 —— 不处理的话 "~/.ssh/id_rsa" 会被拼成
+    # 项目目录下一个字面叫 "~" 的子目录。那样"拒绝"只是因为文件碰巧不存在；项目里若真有个
+    # ~ 目录，私钥就进来了。展开必须发生在解析之前。
+    raw = os.path.expanduser(raw)
+    p = pathlib.Path(raw)
+    if not p.is_absolute():
+        # 相对路径按项目目录解释：用户说「docs/需规.docx」时，他要的是项目里那份。
+        p = pathlib.Path.cwd() / p
+    try:
+        rp = p.resolve()
+    except Exception as exc:  # noqa: BLE001
+        return None, f"路径无法解析：{exc}"
+
+    roots = _read_roots()
+    for root in roots:
+        try:
+            rp.relative_to(root)
+            if not rp.exists():
+                # 在允许目录内但不存在：说清楚是「没找到」而不是「不允许」——
+                # 这两件事给模型的行动方向完全不同（改路径 vs 换地方放文件）。
+                return None, f"文件不存在：{rp}"
+            return rp, ""
+        except ValueError:
+            continue
+
+    # 也接受「用户没给绝对路径、但文件名唯一落在某个允许根下」的情况 ——
+    # 直接报「不在允许目录」对用户没有帮助，因为他可能压根不知道绝对路径。
+    matches = []
+    for root in roots:
+        try:
+            for found in root.rglob(p.name):
+                if found.is_file():
+                    matches.append(found.resolve())
+                if len(matches) >= 5:
+                    break
+        except Exception:  # noqa: BLE001 — unreadable subtree, skip it
+            continue
+    if len(matches) == 1:
+        return matches[0], ""
+    if len(matches) > 1:
+        listed = "\n".join(f"  - {m}" for m in matches[:5])
+        return None, f"「{p.name}」在多个地方都存在，请指定完整路径：\n{listed}"
+
+    allowed = "\n".join(f"  - {r}" for r in roots)
+    return None, f"不在允许读取的目录下。可读目录：\n{allowed}\n（其他路径需先由用户复制进来）"
+
+
+def _header_safe(value: str) -> str:
+    """Make a header value safe for httpx, keeping it readable.
+
+    ★ Header values are ASCII by definition, and httpx encodes them with ``ascii`` — so a single
+    Chinese character raises ``UnicodeEncodeError`` **before the request is even sent**, and the
+    whole assistant turn dies with HTTP 500.
+
+    This was not theoretical. ``x-change-by`` carries the reason the assistant gives for a change,
+    which is Chinese by construction. ``update_case`` had shipped for days without hitting it only
+    because it happened to send an empty string when no digest signal was present; give the model a
+    real reason and the turn started failing.
+
+    The fix is percent-encoding rather than stripping: the audit trail is the whole reason the
+    header exists, and silently dropping the text would leave ``case_change`` rows that say who
+    changed something but not why. Non-ASCII characters are legal in a URL component, so encoding
+    keeps the information recoverable and the header still ASCII-only.
+
+    Applied in :func:`_api` rather than at each call site so a future caller cannot reintroduce it.
+    """
+    v = str(value or "")
+    try:
+        v.encode("ascii")
+        return v
+    except UnicodeEncodeError:
+        return quote(v, safe="")
 
 
 async def _api(
@@ -456,8 +761,9 @@ async def _api(
     headers: dict[str, str] | None = None,
 ):
     # Loopback: never route through a proxy (see _api_catalog for why).
+    safe = {k: _header_safe(v) for k, v in (headers or {}).items()}
     async with httpx.AsyncClient(timeout=60, trust_env=False) as c:
-        r = await c.request(method, _self_base() + path, json=body, headers=headers or {})
+        r = await c.request(method, _self_base() + path, json=body, headers=safe)
         if r.status_code >= 400:
             return {"error": f"HTTP {r.status_code}", "detail": r.text[:400]}
         try:
@@ -551,6 +857,24 @@ _GLOBAL_PATHS = ("/api/projects", "/api/admin", "/api/auth", "/api/settings", "/
 # A path that addresses a DIFFERENT project than the one the conversation belongs to.
 _OTHER_PROJECT_RE = re.compile(r"/api/projects/(\d+)(?:/|\b)")
 
+# ★ A path that addresses a case **by id**, where the project is not visible in the path.
+# `/api/testcases/2` says nothing about which project case 2 belongs to, so a regex over the path
+# cannot check it — and that is precisely the path a model reaches for when it wants to change a
+# case's status.
+#
+# Observed 2026-10-07, twice in a row: asked to re-enable TC-002 in a 百度 (pid=3) conversation,
+# the assistant enabled `case_id=2` — a case in 培训资源管理 (pid=1). The first time it went
+# through `set_case_status`, and guarding only that tool changed nothing, because the second time
+# the model took the generic `potato-test_api` route instead:
+#
+#     PATCH /api/testcases/2/status      → 404, model retried
+#     PUT   /api/testcases/2  {status}   → 200, cross-project write completed
+#
+# Guarding a tool instead of the *operation* is worthless when a second door reaches the same
+# room. So the guard below covers every id-addressed case path, and the per-tool checks stay only
+# because they give a better error message.
+_CASE_BY_ID_RE = re.compile(r"/api/testcases/(\d+)(?:/|\b)")
+
 
 def _scope_guard(method: str, path: str, pid: int) -> dict | None:
     """Refuse cross-project access, and refuse to list all projects.
@@ -583,6 +907,66 @@ def _scope_guard(method: str, path: str, pid: int) -> dict | None:
     return None
 
 
+def _case_id_in_path(path: str) -> int | None:
+    """The case id in an id-addressed path, or ``None`` if the path does not address a case.
+
+    Synchronous and DB-free by design: it recognises the *shape* ``/api/testcases/{id}...``, which
+    is all that is needed to know that the write needs an ownership check before it happens. The
+    ownership itself is resolved by :func:`_case_scope_error`.
+
+    Reads are left alone by the caller: knowing a case exists by id is harmless and the API already
+    enforces access control. What must not happen is a **write** aimed at another workspace —
+    including a permanent delete, which has no undo.
+    """
+    m = _CASE_BY_ID_RE.search(path)
+    return int(m.group(1)) if m else None
+
+
+async def _case_scope_error(case_id: Any, pid: int, verb: str) -> dict | None:
+    """Refuse a write aimed at a case that belongs to another project.
+
+    ★ ``_scope_guard`` cannot cover the case-editing tools. They address ``/api/testcases/{id}``,
+    which carries no project number — so there is nothing in the path to match the regex against,
+    and calling the guard there would return ``None`` and wave the write through.
+
+    That gap was not theoretical. Asked to re-enable ``TC-002`` in a 百度 conversation, the
+    assistant enabled ``case_id=2`` — a case in the *培训资源管理* project — because it had
+    guessed an id instead of resolving the key. The write was a no-op only by luck: the case was
+    already active. A guessed id plus a real state change is silent damage to another workspace.
+
+    So the check has to be on the id itself, resolved through the database, and it has to be a
+    refusal rather than a silent rewrite. Silently retargeting to the "probably intended" case is
+    worse than saying no: the operator would not know which case actually changed.
+    """
+    if not isinstance(case_id, int):
+        return {"error": "case_id 必须是整数"}
+    from app.db import db_session
+    from app.models import TestCase
+    from sqlalchemy import select
+
+    try:
+        async with db_session() as s:
+            row = await s.execute(
+                select(TestCase.project_id, TestCase.case_key).where(TestCase.id == case_id)
+            )
+            found = row.first()
+    except Exception as exc:  # noqa: BLE001
+        # A guard that cannot answer must not wave the write through.
+        log.warning("assistant: case scope check failed for %s: %s", case_id, exc)
+        return {"error": f"无法校验用例 {case_id} 的归属项目，已拒绝{verb}。请稍后重试。"}
+    if found is None:
+        return {"error": f"找不到用例 id={case_id}"}
+    owner, case_key = found
+    if owner != pid:
+        return {
+            "error": (
+                f"跨项目{verb}被拒绝：用例 id={case_id}（{case_key}）属于项目 {owner}，"
+                f"本次对话属于项目 {pid}。请先用 list_cases 查到当前项目里这条用例的 id。"
+            )
+        }
+    return None
+
+
 async def _run_tool(name: str, args: dict, pid: int) -> dict:
     """Execute one tool call against Potato Test's own REST API."""
     if name == "potato-test_api":
@@ -595,6 +979,15 @@ async def _run_tool(name: str, args: dict, pid: int) -> dict:
         scope_err = _scope_guard(method, path, pid)
         if scope_err is not None:
             return scope_err
+        # ★ The generic tool is a second door to the same room. Guarding set_case_status alone
+        # changed nothing in practice: the model took this route instead and wrote cross-project.
+        # Any *write* addressed by case id needs the same ownership check, resolved from the DB.
+        if method in ("PUT", "POST", "PATCH", "DELETE"):
+            case_id = _case_id_in_path(path)
+            if case_id is not None:
+                owned = await _case_scope_error(case_id, pid, f"{method} 修改")
+                if owned is not None:
+                    return owned
         return await _api(method, path, args.get("body") or None)
     if name == "get_failure_digest":
         # backfill 默认开：历史失败的 root_cause 是空的（分类功能晚于那批数据上线），
@@ -608,6 +1001,9 @@ async def _run_tool(name: str, args: dict, pid: int) -> dict:
         case_id = args.get("case_id")
         if not isinstance(case_id, int):
             return {"error": "case_id 必须是整数"}
+        scope_err = await _case_scope_error(case_id, pid, "修改")
+        if scope_err is not None:
+            return scope_err
         payload: dict = {}
         for f in ("name", "prompt", "expected", "preconditions", "role"):
             v = args.get(f)
@@ -637,6 +1033,67 @@ async def _run_tool(name: str, args: dict, pid: int) -> dict:
                 "等于掩盖真缺陷。"
             ),
             "case": res if isinstance(res, dict) else {},
+        }
+
+    if name == "set_case_status":
+        case_id = args.get("case_id")
+        if not isinstance(case_id, int):
+            return {"error": "case_id 必须是整数"}
+        scope_err = await _case_scope_error(case_id, pid, "停用/启用")
+        if scope_err is not None:
+            return scope_err
+        status = str(args.get("status") or "").strip().lower()
+        if status not in ("active", "deprecated"):
+            return {"error": "status 只能是 active 或 deprecated"}
+        res = await _api(
+            "PUT",
+            f"/api/testcases/{case_id}",
+            {"status": status},
+            {
+                "x-change-source": "assistant",
+                "x-change-by": (str(args.get("reason") or "") or "助手停用/启用")[:200],
+            },
+        )
+        if isinstance(res, dict) and res.get("error"):
+            return res
+        return {
+            "case_id": case_id,
+            "status": status,
+            "note": (
+                "已停用（可逆，历史执行结果保留，随时可启回来）。"
+                if status == "deprecated"
+                else "已启用。"
+            ),
+            "case": res if isinstance(res, dict) else {},
+        }
+
+    if name == "delete_case":
+        case_id = args.get("case_id")
+        if not isinstance(case_id, int):
+            return {"error": "case_id 必须是整数"}
+        # Permanent, and it takes the case's run history with it — so the project check comes
+        # before anything else. A cross-project guard that runs after the first field write is
+        # not a guard.
+        scope_err = await _case_scope_error(case_id, pid, "删除")
+        if scope_err is not None:
+            return scope_err
+        res = await _api(
+            "DELETE",
+            f"/api/testcases/{case_id}",
+            None,
+            {
+                "x-change-source": "assistant",
+                "x-change-by": (str(args.get("reason") or "") or "助手删除")[:200],
+            },
+        )
+        if isinstance(res, dict) and res.get("error"):
+            return res
+        return {
+            "deleted_case_id": case_id,
+            "note": (
+                "已永久删除，**它的历史执行结果也一并没了**。如果用户只是想让它别再跑，"
+                "下次请改用 set_case_status（可逆）。"
+            ),
         }
 
     if name == "list_case_changes":
@@ -758,7 +1215,295 @@ async def _run_tool(name: str, args: dict, pid: int) -> dict:
         )
     if name == "list_documents":
         return await _list_documents(pid)
+    if name == "list_tools":
+        return _describe_tools(args.get("query"))
+    if name == "list_files":
+        return _list_files(args.get("path"))
+    if name == "import_file_to_knowledge":
+        return await _import_file_to_knowledge(pid, args)
+    if name == "import_cases_from_file":
+        return await _import_cases_from_file(pid, args)
     return {"error": f"unknown tool {name}"}
+
+
+# ---- self-discovery ----------------------------------------------------------
+# ★ The model picks tools the way a person picks a button: from what is offered and described,
+# not from what it remembers. Listing them in the system prompt is a snapshot that goes stale the
+# moment a tool is added; this reads the live table instead. The dedicated tools stay directly
+# available so the common case costs no extra round trip — discovery is for the cases where the
+# model does not know a tool exists, which is exactly when a stale prompt hurts most.
+
+
+def _describe_tools(query: str | None = None) -> dict:
+    """List the live tool table, optionally filtered by a purpose keyword."""
+    q = str(query or "").strip().lower()
+    out: list[dict] = []
+    for t in _tools():
+        f = t.get("function") or t
+        name = str(f.get("name") or "")
+        desc = str(f.get("description") or "").strip().split("\n")[0]
+        params = list(((f.get("parameters") or {}).get("properties") or {}).keys())
+        row = {"name": name, "summary": desc, "params": params}
+        # 匹配工具名与描述，参数名也算线索：搜「文件」应该命中 list_files，
+        # 搜「path」也应该。
+        hay = f"{name} {desc} {' '.join(params)}".lower()
+        if not q or q in hay:
+            out.append(row)
+    return {
+        "total_tools": len(_tools()),
+        "matched": len(out),
+        "query": q or None,
+        "tools": out,
+    }
+
+
+def _list_files(raw_path: str | None) -> dict:
+    """List a directory the assistant is allowed to read.
+
+    Exists because user-supplied paths are wrong in small ways — a full-width slash, a missing
+    extension, a file that was moved. Confirming the path first is cheaper than failing an import.
+    """
+    target = str(raw_path or "").strip()
+    if not target:
+        base = pathlib.Path.cwd()
+        # 空路径 = 项目根目录，直接列出内容对「用户说『那个 Excel』」这类最有用。
+        try:
+            entries = sorted(
+                p.name + ("/" if p.is_dir() else "")
+                for p in base.iterdir()
+                if not p.name.startswith(".")
+            )
+        except Exception as exc:  # noqa: BLE001
+            return {"error": f"读取目录失败：{exc}"}
+        return {"path": str(base), "entries": entries[:120], "truncated": len(entries) > 120}
+
+    path, err = _resolve_readable(target)
+    if path is None:
+        return {"error": err}
+    if path.is_file():
+        return {"path": str(path), "type": "file", "size_bytes": path.stat().st_size}
+    try:
+        entries = sorted(
+            p.name + ("/" if p.is_dir() else "") for p in path.iterdir() if not p.name.startswith(".")
+        )
+    except Exception as exc:  # noqa: BLE001
+        return {"error": f"读取目录失败：{exc}"}
+    return {"path": str(path), "type": "directory", "entries": entries[:120], "truncated": len(entries) > 120}
+
+
+async def _import_file_to_knowledge(pid: int, args: dict) -> dict:
+    """Parse a local file and (optionally) add it to the project's knowledge.
+
+    Defaults to a dry run. That default is the whole point: knowledge is context the assistant
+    carries for the rest of the project and there is no per-chunk undo, so the operator should see
+    what a file actually contains before it becomes something the assistant quotes from.
+    """
+    path, err = _resolve_readable(str(args.get("path") or ""))
+    if path is None:
+        return {"error": err}
+    if not path.is_file():
+        return {"error": f"不是一个文件：{path}"}
+
+    size = path.stat().st_size
+    from app import docparse
+
+    if size > docparse.MAX_UPLOAD_BYTES:
+        return {
+            "error": (
+                f"文件太大（{size // 1048576}MB），上限 "
+                f"{docparse.MAX_UPLOAD_BYTES // 1048576}MB。"
+            )
+        }
+
+    try:
+        data = path.read_bytes()
+    except Exception as exc:  # noqa: BLE001
+        return {"error": f"读取文件失败：{exc}"}
+    try:
+        res = docparse.extract(path.name, data)
+    except docparse.UnsupportedDocument as exc:
+        return {"error": str(exc)}
+    except Exception as exc:  # noqa: BLE001 — a corrupt file is one message, not a 500
+        return {"error": f"解析失败「{path.name}」：{exc}"}
+
+    out: dict = {
+        "path": str(path),
+        "filename": res.fmt,
+        "format": res.fmt,
+        "chars": res.chars,
+        "truncated": res.truncated,
+        "warnings": res.warnings,
+    }
+
+    if not args.get("save"):
+        # Dry run: enough head to recognise the document, not enough to fill the context.
+        preview = res.text[:3000]
+        out["mode"] = "dry_run"
+        out["preview"] = preview
+        out["hint"] = (
+            "这是预览，尚未入库。确认内容正确后用 save=true 真正导入。"
+            if res.text.strip()
+            else "★ 解析结果为空（可能是图片版/扫描件），入库也没有用。"
+        )
+        return out
+
+    cap = max(1000, min(int(args.get("max_chars") or 200000), 2_000_000))
+    text = res.text[:cap]
+    saved = await _api(
+        "POST", f"/api/projects/{pid}/knowledge/append", {"text": text}
+    )
+    if isinstance(saved, dict) and saved.get("error"):
+        return {**out, "error": saved["error"]}
+    out["mode"] = "saved"
+    out["saved_chars"] = len(text)
+    out["hit_cap"] = res.chars > cap
+    return out
+
+
+async def _import_cases_from_file(pid: int, args: dict) -> dict:
+    """Import an .xlsx case sheet into the project, dry run by default.
+
+    Same reasoning as the knowledge import: a malformed workbook otherwise turns into dozens of
+    half-formed cases that then have to be found and removed one by one. The dry run reports how
+    many rows parsed and what is wrong with the rest, so the operator can fix the file first.
+    """
+    path, err = _resolve_readable(str(args.get("path") or ""))
+    if path is None:
+        return {"error": err}
+    if not path.is_file():
+        return {"error": f"不是一个文件：{path}"}
+    if path.suffix.lower() not in (".xlsx", ".xlsm", ".xltx"):
+        return {
+            "error": (
+                f"用例表只支持 .xlsx（当前是 {path.suffix or '无扩展名'}）。"
+                "若是 .xls 旧格式，请先用 Excel 另存为 .xlsx。"
+            )
+        }
+
+    from app import excel
+
+    try:
+        data = path.read_bytes()
+    except Exception as exc:  # noqa: BLE001
+        return {"error": f"读取文件失败：{exc}"}
+
+    try:
+        usable = excel.parse_workbook(data)
+    except Exception as exc:  # noqa: BLE001 — a broken workbook is one message, not a 500
+        return {"error": f"读取 Excel 失败：{exc}"}
+
+    # ★ ``parse_workbook`` drops rows missing Name or prompt (``# skip blank/incomplete rows``),
+    # which is right for the import path and fatal for a dry run: a sheet where 40 of 43 rows
+    # lack a prompt reports "43 rows, 3 usable" and never mentions the 40. That is precisely the
+    # case the operator needs to be told about before importing, so the row count is measured
+    # here, on the raw sheet, rather than inferred from what survived.
+    raw_rows, header_problem = _count_data_rows(data)
+    if header_problem:
+        return {
+            "error": header_problem,
+            "hint": "表头需包含 Name 与 Agent Task (prompt)；可先用平台导出的用例模板对照。",
+        }
+
+    skipped = max(0, raw_rows - len(usable))
+    out: dict = {
+        "path": str(path),
+        "rows_total": raw_rows,
+        "rows_usable": len(usable),
+        "rows_missing_required": skipped,
+        "sample": [
+            {"case_key": r.get("case_key") or "", "name": r.get("name")} for r in usable[:5]
+        ],
+    }
+    if skipped:
+        # 不去逐行定位是哪一行缺什么 —— parse_workbook 已经把它们丢了，再解析一遍
+        # 是把同一套表头映射逻辑写两遍，迟早漂移。只报数量与占比，够用户判断是修表还是接受。
+        out["warning"] = (
+            f"★ 有 {skipped} 行缺少 Name 或 Agent Task (prompt)，会被跳过。"
+            "常见原因：表头拼写不同（如Agent Task）、或整行为空。"
+            "建议先用平台模板核对表头。"
+        )
+
+    if not args.get("save"):
+        out["mode"] = "dry_run"
+        out["hint"] = (
+            "这是预检，尚未导入。确认后用 save=true 真正导入。"
+            if usable
+            else "★ 一条都没解析出来，请检查表头是否含 Name 与 Agent Task (prompt)。"
+        )
+        return out
+
+    if not usable:
+        out["mode"] = "failed"
+        return out
+
+    created = 0
+    failed: list[dict] = []
+    for r in usable:
+        body = {k: v for k, v in r.items() if v not in (None, "", [], {})}
+        res = await _api("POST", f"/api/projects/{pid}/testcases", body)
+        if isinstance(res, dict) and res.get("error"):
+            failed.append(
+                {
+                    "case_key": body.get("case_key") or str(body.get("name", ""))[:30],
+                    "error": res["error"],
+                }
+            )
+        else:
+            created += 1
+    out.update({"mode": "saved", "created": created, "failed": failed[:10]})
+    return out
+
+
+def _count_data_rows(data: bytes) -> tuple[int, str]:
+    """Data-row count on the raw sheet, plus a complaint if the headers are unusable.
+
+    Counts rows the same way a person counting a spreadsheet would: everything below the header
+    that has any content at all, including the rows ``parse_workbook`` will later reject. Comparing
+    that against what survives parsing is what makes the skip count honest.
+
+    Returns ``(0, msg)`` when the header itself is the problem — importing then would silently
+    produce nothing, which is the worst possible outcome for a tool the user trusted.
+    """
+    import io
+
+    from openpyxl import load_workbook
+
+    try:
+        ws = load_workbook(io.BytesIO(data), read_only=True, data_only=True).active
+        rows = list(ws.iter_rows(values_only=True))
+    except Exception as exc:  # noqa: BLE001
+        return 0, f"无法读取工作表：{exc}"
+
+    if not rows:
+        return 0, "工作表是空的"
+
+    headers = [str(h).strip() if h is not None else "" for h in rows[0]]
+    from app.excel import COLUMNS
+
+    # ★ COLUMNS holds ``(header, key)`` pairs. The first version compared the header against
+    # ``{k for _, k in COLUMNS}`` — the *keys* — so nothing ever matched and a perfectly good
+    # sheet was reported as "表头一列都没对上". Off-by-one-level: header -> key, not key -> key.
+    header_to_key = {h: k for h, k in COLUMNS}
+    mapped = {i: header_to_key[h] for i, h in enumerate(headers) if h in header_to_key}
+    if not mapped:
+        return 0, (
+            "表头一列都没对上。本表头："
+            + " | ".join(h for h in headers if h)
+            + f"。可识别列：{' | '.join(h for h, _ in COLUMNS)}"
+        )
+    if "name" not in mapped.values() or "prompt" not in mapped.values():
+        missing = []
+        if "name" not in mapped.values():
+            missing.append("Name")
+        if "prompt" not in mapped.values():
+            missing.append("Agent Task (prompt)")
+        return 0, f"表头缺少必需列：{'、'.join(missing)}"
+
+    body = 0
+    for raw in rows[1:]:
+        if any(v is not None and str(v).strip() for v in raw):
+            body += 1
+    return body, ""
 
 
 # ---- generated documents --------------------------------------------------

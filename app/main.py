@@ -147,6 +147,42 @@ async def _stop_feishu_worker(task) -> None:
     logging.getLogger("potato-test.boot").info("飞书机器人已随服务停止")
 
 
+async def _start_suite_scheduler():
+    """套件到期自动执行的进程内扫描器（返回 task，或 None 表示没启动）。
+
+    为什么放在服务进程里：本地单机模式没有 Celery beat，"每周跑一次"的套件就永远
+    不会自己跑 —— 而记下 cadence 的全部意义就是让它自己跑。装 Redis 的部署里
+    `sweep_forever` 会自己让位给 beat，不会两边同时扫。
+
+    和机器人一样，启动失败绝不能拖垮 API：排期是附加能力，API 才是主体。
+    """
+    import logging
+
+    log = logging.getLogger("potato-test.boot")
+    s = get_settings()
+    if not getattr(s, "suite_autostart", True):
+        log.info("suite_autostart=false，套件排期扫描不启动")
+        return None
+    try:
+        from app.suite_schedule import sweep_forever
+
+        return asyncio.create_task(sweep_forever())
+    except Exception as exc:  # noqa: BLE001
+        log.warning("套件排期扫描启动失败：%s", exc)
+        return None
+
+
+async def _stop_suite_scheduler(task) -> None:
+    """取消扫描器，否则 uvicorn 会等这个 while True 协程，表现为"关服务关不掉"。"""
+    if task is None:
+        return
+    task.cancel()
+    try:
+        await task
+    except (asyncio.CancelledError, Exception):  # noqa: BLE001
+        pass
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
@@ -154,9 +190,11 @@ async def lifespan(app: FastAPI):
     await _fail_orphaned_runs()
     await _backfill_knowledge_chunks()
     feishu_task = await _start_feishu_worker()
+    suite_task = await _start_suite_scheduler()
     try:
         yield
     finally:
+        await _stop_suite_scheduler(suite_task)
         await _stop_feishu_worker(feishu_task)
 
 

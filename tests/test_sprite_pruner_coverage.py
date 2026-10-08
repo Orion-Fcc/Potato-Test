@@ -57,7 +57,7 @@ def test_install_falls_back_to_cdp_session():
     Browser 是懒加载的 —— capture_session 预装时必然命中这个分支。
     只靠页面列表的话，那条路径永远装不上。
     """
-    from app import executor as ex
+    from app import browser_hygiene as ex
 
     src = inspect.getsource(ex._install_sprite_pruner)
     assert "get_page_targets" in src
@@ -66,7 +66,7 @@ def test_install_falls_back_to_cdp_session():
 
 def test_prune_on_session_helper_exists():
     """两条路共用同一个安装实现，避免只修好一条。"""
-    from app import executor as ex
+    from app import browser_hygiene as ex
 
     assert hasattr(ex, "_install_prune_on_session")
     sig = inspect.signature(ex._install_prune_on_session)
@@ -75,7 +75,7 @@ def test_prune_on_session_helper_exists():
 
 def test_prune_disabled_switch_still_respected():
     """开关关掉时必须彻底不动 —— 这是 A/B 对比的唯一手段。"""
-    from app import executor as ex
+    from app import browser_hygiene as ex
 
     src = inspect.getsource(ex._install_sprite_pruner)
     assert "_sprite_prune_enabled()" in src
@@ -87,7 +87,7 @@ def test_pruner_targets_only_unused_symbols():
 
     这是"不牺牲质量"的依据：交互元素与 prompt 不变，只是不再遍历纯图形节点。
     """
-    from app import executor as ex
+    from app import browser_hygiene as ex
 
     js = ex._sprite_prune_js()
     assert "__svg__icons__dom__" in js, "精灵容器 id 变了？先确认被测系统的实际 id"

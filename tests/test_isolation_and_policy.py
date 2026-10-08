@@ -76,7 +76,6 @@ def test_next_case_key_ignores_free_text_keys():
 
     int('REQ-12') 会抛 ValueError，整批导入会因此中断。
     """
-    import asyncio
     import re as _re
 
     # 直接验证正则本身：只认 TC-<数字>
@@ -482,7 +481,7 @@ def test_adapt_rule_is_shown_after_the_efficiency_rules():
 
     倒过来会被读成"可以随便逛菜单"，把提速的成果推翻。
     """
-    from app.executor import _ADAPT_RULE, _EFFICIENCY_RULE, execute_case
+    from app.executor import execute_case
     import inspect
 
     src = inspect.getsource(execute_case)

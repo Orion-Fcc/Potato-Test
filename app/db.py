@@ -43,6 +43,20 @@ async def init_db() -> None:
 _ADDITIVE_COLUMNS: tuple[tuple[str, str, str], ...] = (
     # AI-written bug description for failed cases (see app/failure_narrative.py).
     ("run_result", "failure_narrative", "JSON"),
+    # 2026-10-07 失败归因：这次失败是谁的锅（取值见 app/failure_attrib.py 的
+    # VERDICT_INFO）。与 root_cause 分工不同 —— 那个是"用例为什么判失败"，这个是
+    # "能不能算被测系统的缺陷"。今天实测抓到的两条假缺陷 root_cause 都长得像正常的
+    # "功能不符"，只有归因能认出它们其实是页面没加载完 / 流程没走完。
+    # 存量行为 NULL = 归因功能上线前的结果，报告侧要显示"未判定"而不是"系统行为"。
+    ("run_result", "attribution", "VARCHAR(30)"),
+    # 2026-10-07 需规漂移信号（见 app/spec_drift.py）。落在 run 上而不是 run_result 上，
+    # 因为它**不是**某条用例的属性，而是一次执行的结论：这批用例 collectively 断言了
+    # 互相矛盾的行为。挂到用例上会让「哪条用例漂移了」看起来像能逐条修，而实际要么是
+    # 需规改了、要么是实现回退了 —— 是同一个决定。
+    #
+    # 落库而不是只打日志：漂移的处置动作是「停下来改文档」，发生在跑完之后几小时，
+    # 那时能重看的只有库。NULL = 该次执行没跑漂移检查（功能上线前的历史 run）。
+    ("run", "drift_signals", "JSON"),
     # 2026-10-04 多角色执行：test_case.roles 是一个 JSON 数组，声明这条用例
     # 流程中会依次用到哪些角色（例：["applicant", "approver"]）。`role` 单值列
     # **保留不动** —— 378 条存量用例都带着它，删掉等于逼所有人重录一遍。
@@ -68,6 +82,12 @@ _ADDITIVE_COLUMNS: tuple[tuple[str, str, str], ...] = (
     # 改判前的 AI 原判。**必须单独存一列**：改判是直接写 status 的（这样报表/筛选
     # 自动生效），原值就被覆盖了；没有它，"撤销改判"就只能瞎猜回去。
     ("run_result", "original_status", "VARCHAR(20)"),
+    # 2026-10-08 耗时分解（执行器 5 段墙钟 + 步数）。埋点本来就在，缺的是落库：
+    # 只有日志的话，"这轮为什么慢"没法在报告页按阶段汇总，只能翻日志。
+    ("run_result", "timing", "JSON"),
+    # 2026-10-08 per-run 重试次数。空值语义 = 0（不重试），与模型默认一致，
+    # 所以历史 run 不需要回填。
+    ("run", "retries", "INTEGER"),
 )
 
 

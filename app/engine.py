@@ -299,6 +299,25 @@ def should_retry(result, retries: int, attempts: int) -> bool:
     return bool(getattr(result, "evidence_gap", False)) and result.status == "failed"
 
 
+def effective_retries(run, s=None) -> int:
+    """这一轮该重试几次：per-run 显式值优先，NULL 才回落到全局 CASE_RETRIES。
+
+    为什么不能用 `run.retries or global`：0 是合法且有意义的值（"这一轮就是不重试"），
+    用 `or` 会让显式的 0 被全局值顶掉 —— 用户在界面上明明选了"不重试"，结果系统默默
+    按全局重跑，这种"设置没用"最难查。
+
+    为什么用 None 而不是 0 当"未设置"：新建 run 如果不显式指定，应当沿用运维在 .env 里
+    定的全局值。若默认成 0，那全局配置就永远不生效了。
+    """
+    from app.config import get_settings as _gs
+
+    s = s or _gs()
+    per_run = getattr(run, "retries", None)
+    if per_run is not None:
+        return max(0, int(per_run))
+    return max(0, int(getattr(s, "case_retries", 0) or 0))
+
+
 class DefaultLogin(NamedTuple):
     """What a role-less case logs in with. `pw_cred_id` is the password account's row —
     needed to capture a session bundle from it once and cache it there, the same way a
@@ -926,7 +945,10 @@ async def execute_one_case(run_id: int, case_id: int) -> str:
 
         from dataclasses import replace
 
-        retries = get_settings().case_retries
+        # per-run 覆盖全局：run.retries 显式设了就用它；NULL 表示"沿用全局"
+        # （历史 run 与没在界面上动过的 run 都是 NULL）。解析逻辑抽在
+        # effective_retries 里，好在不带数据库的情况下单测这条语义。
+        retries = effective_retries(run)
         attempt_statuses: list[str] = []
         r = None
         healed = False
@@ -988,6 +1010,9 @@ async def execute_one_case(run_id: int, case_id: int) -> str:
                 # （例如被取消），不能把上一轮已经得到的分类擦掉。
                 row.root_cause = r.root_cause or row.root_cause
                 row.verdict_evidence = r.verdict_evidence or row.verdict_evidence
+                # 归因同理用 `or`：一次重试若没产出归因（例如被取消），
+                # 不能把上一轮已经算好的擦掉。
+                row.attribution = r.attribution or row.attribution
                 row.final_answer = r.final_answer
                 # AI bug description for failed/errored cases (NULL for passed).
                 # `or row.failure_narrative` keeps the last non-empty value: the live
@@ -996,6 +1021,9 @@ async def execute_one_case(run_id: int, case_id: int) -> str:
                 row.failure_narrative = r.failure_narrative or row.failure_narrative
                 row.account_label = account_label
                 row.latency_ms = r.latency_ms
+                # 耗时分解：和上面 `or` 的理由一致 —— 一次被取消的重试没产出 timing 时，
+                # 不能把上一轮已经算好的擦掉。
+                row.timing = r.timing or row.timing
                 row.error = r.error
             run_row = await s.get(Run, run_id)
             if run_row is not None:
@@ -1043,6 +1071,69 @@ async def execute_one_case(run_id: int, case_id: int) -> str:
         await leasing.run_slot_release(run_slot)
 
 
+async def _detect_spec_drift(session, run, res_rows) -> list[dict]:
+    """Run the spec-drift check for this run and persist what it found.
+
+    ★ It never raises and never changes ``run.status``. The check reads case text and
+    result text; it is commentary on a finished run, not part of the run. If it throws and
+    takes the run down with it, the cost is inverted — a broken detector would then block
+    the 501 cases it was supposed to be explaining. Same reasoning as
+    ``fsWriteNow``'s snapshot: the observer must not be able to destroy what it observes.
+
+    The whole project's cases are loaded, not just the ones this run covered. The
+    self-contradiction signal compares cases against **each other**, so a 5-case run out of
+    501 structurally cannot see it — both halves of the disagreement have to be in hand.
+    The results, by contrast, are only this run's: "the run hit an approval step" is a
+    statement about what happened now.
+    """
+    from sqlalchemy import select
+
+    from app import spec_drift
+    from app.models import TestCase
+
+    try:
+        suite_rows = (
+            (
+                await session.execute(
+                    select(TestCase).where(TestCase.project_id == run.project_id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        by_id = {c.id: c for c in suite_rows}
+        covered = [by_id[x.case_id] for x in res_rows if x.case_id in by_id]
+        results = [
+            {
+                "case_key": by_id[x.case_id].case_key or "",
+                "project_id": run.project_id,
+                "status": x.status,
+                "judge_reason": x.judge_reason,
+                "final_answer": x.final_answer,
+                "error": x.error,
+            }
+            for x in res_rows
+            if x.case_id in by_id
+        ]
+        signals = spec_drift.find_all(covered, results, suite_cases=suite_rows)
+        if signals:
+            log.warning("engine: run %s %s", run.id, spec_drift.describe(signals))
+            for s in signals:
+                log.warning(
+                    "engine: drift [%s/%s] %s | %s",
+                    s.severity,
+                    s.kind,
+                    s.detail,
+                    "、".join(s.case_ids[:12]),
+                )
+        else:
+            log.info("engine: run %s %s", run.id, spec_drift.describe(signals))
+        return [s.as_dict() for s in signals]
+    except Exception:
+        log.exception("engine: spec drift check failed for run %s", run.id)
+        return []
+
+
 async def finalize_run(run_id: int) -> dict:
     """Aggregate the persisted results into the run summary and mark it completed.
     Idempotent: safe as a Celery chord callback and as the in-process tail."""
@@ -1072,6 +1163,7 @@ async def finalize_run(run_id: int) -> dict:
         run.passed_count = summary["passed"]
         run.status = "completed" if run.status != "cancelled" else "cancelled"
         run.finished_at = datetime.now(UTC)
+        run.drift_signals = await _detect_spec_drift(session, run, res_rows)
         if run.suite_id is not None:
             await _finalize_suite(session, run, summary)
         await session.commit()

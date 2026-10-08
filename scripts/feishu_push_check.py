@@ -62,7 +62,7 @@ async def main() -> int:
 
     st = get_settings()
 
-    print(f"\n[1/6] 配置")
+    print("\n[1/6] 配置")
     print(f"      ENABLE_FEISHU     = {st.enable_feishu}")
     print(f"      app_id            = {cfg['app_id'] or '(空)'}")
     print(f"      app_secret        = {'已设置' if cfg['app_secret'] else '(空)'}")
@@ -84,7 +84,7 @@ async def main() -> int:
     print("      ✓ 配置齐了")
 
     # ---- 2. 取 token ------------------------------------------------------
-    print(f"\n[2/6] 用 app_id / app_secret 换 tenant_access_token")
+    print("\n[2/6] 用 app_id / app_secret 换 tenant_access_token")
     client = FeishuClient(cfg["app_id"], cfg["app_secret"], cfg["api_base"])
     try:
         token = await client._tenant_token()
@@ -109,7 +109,7 @@ async def main() -> int:
     print(f"      ✓ 拿到 token（{token[:10]}…）")
 
     # ---- 3. 发测试卡片 ----------------------------------------------------
-    print(f"\n[3/6] 往群里发一张测试卡片")
+    print("\n[3/6] 往群里发一张测试卡片")
     target = override_chat or (projects[0].feishu_chat_id if projects else None)
     if not target:
         print("\n  ✗ 卡住了：没有目标群 chat_id。")
@@ -154,7 +154,7 @@ async def main() -> int:
     print("      ✓ 已发出 —— 去看手机飞书，应该有一条绿色卡片")
 
     # ---- 4. 项目绑定状态 --------------------------------------------------
-    print(f"\n[4/6] 项目绑定状态")
+    print("\n[4/6] 项目绑定状态")
     for p in projects:
         mark = "✓" if p.feishu_chat_id else "✗"
         print(f"      [{mark}] #{p.id} {p.name}  chat_id={p.feishu_chat_id or '(未绑定)'}")
@@ -166,7 +166,7 @@ async def main() -> int:
     # 只做推送时这一步无关紧要；要在群里问「状态」，机器人必须能读到群消息。
     # 缺权限时飞书会把"需要哪个 scope"写在响应里，直接把它打印出来，
     # 免得去猜该勾哪个。
-    print(f"\n[5/6] 读取群消息的权限（主动查「状态」需要）")
+    print("\n[5/6] 读取群消息的权限（主动查「状态」需要）")
     from app.feishu import feishu_http
 
     can_read_group = False
@@ -221,7 +221,7 @@ async def main() -> int:
     # ---- 6. 群机器人进程 --------------------------------------------------
     # 主动查「状态」依赖这个进程常驻；它不跑不影响上面的自动推送，
     # 所以这里只提示、不返回失败码。
-    print(f"\n[6/6] 群机器人进程（主动查「状态」靠它）")
+    print("\n[6/6] 群机器人进程（主动查「状态」靠它）")
     pid_file = ROOT / ".feishu_ws.pid"
     pid = pid_file.read_text(encoding="utf-8").strip() if pid_file.exists() else ""
     alive = False

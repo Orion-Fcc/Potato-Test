@@ -11,7 +11,6 @@ browser-use 提供了 17 个动作，我们排除了 4 个（wait/search_page/ev
 """
 import re
 
-import pytest
 
 from app.executor import _ANTI_WASTE_RULE, _POPUP_RULE, _SCOPE_RULE, _TOOLKIT_RULE
 

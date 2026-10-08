@@ -230,7 +230,9 @@ async def push_run_started(run_id: int) -> None:
             run = await s.get(Run, run_id)
             if run is None:
                 return
-            proj = await s.get(Project, run.project_id)
+            # 2026-10-08 删掉一行 `proj = await s.get(Project, run.project_id)`：
+            # 取出来从没被用过（项目名由 _client_and_chat 一并返回），
+            # 等于每次推送白做一次查询。ruff 的 F841 把它翻了出来。
             client, chat_id, project_name = await _client_and_chat(s, run.project_id)
             if client is None:
                 return

@@ -165,7 +165,7 @@ async def main() -> int:
 
     name = next((i.get("name") for i in items if i["chat_id"] == chat_id), None)
     if items and name is None:
-        print(f"\n  ⚠ 这个 chat_id 不在机器人所在的群里，机器人进去之前发不了消息。")
+        print("\n  ⚠ 这个 chat_id 不在机器人所在的群里，机器人进去之前发不了消息。")
 
     async with db_session() as s:
         proj = await s.get(Project, target.id)

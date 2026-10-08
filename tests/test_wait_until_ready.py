@@ -16,12 +16,10 @@
 
 from __future__ import annotations
 
-import asyncio
 import inspect
 
-import pytest
 
-from app import executor
+from app import browser_hygiene, page_gate
 
 
 class _FakeCdpClient:
@@ -83,7 +81,7 @@ def _js(interactive: int, loading: bool) -> str:
 async def test_returns_ready_when_interactive_appears():
     """页面有可交互元素 → 立刻返回 ready，不睡。"""
     b = _FakeBrowser(_js(interactive=12, loading=False))
-    out = await executor._wait_until_ready(b, timeout_s=2.0)
+    out = await browser_hygiene._wait_until_ready(b, timeout_s=2.0)
     assert out == "ready(12)"
     assert b.eval_calls == 1, "就绪时不该反复轮询"
 
@@ -98,7 +96,7 @@ async def test_sleeps_then_times_out_without_awaiting_sync_sleep():
     我第一版给 0.7s，实测只跑 1 轮就到期 —— **是测试预期写错了，不是代码错**。
     """
     b = _FakeBrowser(_js(interactive=0, loading=True))
-    out = await executor._wait_until_ready(b, timeout_s=1.5)
+    out = await browser_hygiene._wait_until_ready(b, timeout_s=1.5)
     # 不抛异常就是修好了；返回值说明它等到了超时而不是崩了
     assert out.startswith("timeout("), f"应超时返回，实际 {out!r}"
     assert "loading" in out, "超时描述要带上最后一次看到的状态"
@@ -118,7 +116,7 @@ async def test_mixed_ready_after_a_few_polls():
         return v
 
     b = _FakeBrowser(_next)
-    out = await executor._wait_until_ready(b, timeout_s=3.0)
+    out = await browser_hygiene._wait_until_ready(b, timeout_s=3.0)
     assert out == "ready(5)", f"应等到就绪，实际 {out!r}"
     assert state["i"] >= 3, "应至少轮询 3 次"
 
@@ -130,7 +128,7 @@ async def test_never_raises_on_cdp_failure():
         async def get_or_create_cdp_session(self):  # noqa: ANN003
             raise RuntimeError("no cdp")
 
-    out = await executor._wait_until_ready(_Broken(), timeout_s=1.0)
+    out = await browser_hygiene._wait_until_ready(_Broken(), timeout_s=1.0)
     assert out.startswith("skip(")
 
 
@@ -145,7 +143,7 @@ async def test_survives_eval_failure_then_recovers():
         return v
 
     b = _FakeBrowser(_next)
-    out = await executor._wait_until_ready(b, timeout_s=3.0)
+    out = await browser_hygiene._wait_until_ready(b, timeout_s=3.0)
     assert out == "ready(3)", f"应跳过坏数据继续轮询，实际 {out!r}"
 
 
@@ -156,7 +154,7 @@ def test_uses_async_sleep_not_sync():
     上一条 `test_sleeps_then_times_out` 才是行为保证，这一条是快速护栏。
     """
     body = "\n".join(
-        line for line in inspect.getsource(executor._wait_until_ready).splitlines()
+        line for line in inspect.getsource(browser_hygiene._wait_until_ready).splitlines()
         if not line.strip().startswith("#")
     )
     assert "await _time.sleep" not in body, "又用了同步的 time.sleep —— 不能 await"
@@ -164,11 +162,35 @@ def test_uses_async_sleep_not_sync():
 
 
 def test_ready_js_is_raw_string():
-    """★_WAIT_READY_JS 必须是 raw string。
+    """★_WAIT_READY_JS 必须是 raw string，而且已经**不含任何正则**。
 
-    否则 `\\.` 先被 Python 当无效转义（SyntaxWarning），
-    送到浏览器时正则从"字面三个点"变成"任意字符"。
+    2026-10-07 改版：判定搬到了 Python 侧（app/page_gate.py），JS 只负责回原始文本
+    和交互元素数量 —— 于是 "loading\\\\.\\\\." 这类需要 raw string 保护的正则彻底离开
+    了这份 JS。
+
+    这条断言的**意图没变**（"判定文案不能靠字面量在两处各写一遍"），只是搬了家：
+    现在的对应物是 page_gate 里的归一化逻辑，以及本文件下面新增的那条
+    「JS 里不应再出现正则」。
     """
-    js = executor._WAIT_READY_JS
-    assert "loading\\.\\.\\." in js, r"正则里的 \. 被吃掉了 —— 字符串没按原样送到浏览器"
-    assert "正在加载" in js, "中文加载字样丢了"
+    js = browser_hygiene._WAIT_READY_JS
+    # JS 现在只回数据，不做判断 —— 有正则就说明判定又漏回前端了。
+    assert "loading\\.\\.\\." not in js, "JS 里不该再有加载文案正则（已移到 page_gate）"
+    assert "text: txt" in js, "JS 应把页面文本原样带回给 Python 侧判定"
+    assert "interactive" in js, "JS 应回交互元素数量"
+
+
+def test_loading_texts_are_decided_in_python_not_in_js():
+    """文案判定必须来自设置，不能在 JS 里写死。
+
+    现场问题：加载文案写死在前端 JS 里，换 UI 框架（Element Plus → antd）后
+    静默失配，而一个"永远通过"的门控比没有门控更糟 —— 它看起来像保护。
+    """
+    from app.config import get_settings
+
+    texts = page_gate.parse_texts(
+        get_settings().page_loading_texts, page_gate.DEFAULT_LOADING_TEXTS
+    )
+    assert texts, "文案列表不该为空 —— 空列表会让门控永远通过"
+    # 设置里能表达出来的每一条，page_gate 都得真的认
+    for t in texts:
+        assert page_gate.is_loading(f"{t}……", texts), f"配置了 {t!r} 但 page_gate 匹配不到"

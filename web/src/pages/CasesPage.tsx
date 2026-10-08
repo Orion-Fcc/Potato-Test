@@ -150,7 +150,7 @@ export function CasesPage() {
   const [renameVal, setRenameVal] = useState("");
   const [moduleEdit, setModuleEdit] = useState<{ module: string; list: TestCase[]; value: string } | null>(null);
   const [moduleSaving, setModuleSaving] = useState(false);
-  const [pending, setPending] = useState<{ caseIds?: number[]; name: string; count: number } | null>(null);
+  const [pending, setPending] = useState<{ caseIds?: number[]; name: string; count: number; retries: number | null } | null>(null);
   const [starting, setStarting] = useState(false);
 
   /** Flip one group; mark it as user-touched so auto-collapse backs off. */
@@ -238,7 +238,7 @@ export function CasesPage() {
       hour: "2-digit",
       minute: "2-digit",
     });
-    setPending({ caseIds, name: `${scope} · ${when}`, count: caseIds?.length ?? cov.enabled });
+    setPending({ caseIds, name: `${scope} · ${when}`, count: caseIds?.length ?? cov.enabled, retries: null });
   };
 
   const startRun = async (close: () => void) => {
@@ -248,6 +248,8 @@ export function CasesPage() {
       const run = await api.createRun(pid, {
         name: pending.name.trim() || `run ${new Date().toLocaleString()}`,
         concurrency: 2,
+        // null（下拉停在"跟随全局"）就不传，让后端按 NULL 处理 = 沿用全局 CASE_RETRIES。
+        retries: pending.retries === null ? undefined : pending.retries,
         case_ids: pending.caseIds,
       });
       close();
@@ -689,6 +691,29 @@ export function CasesPage() {
                   }}
                 />
               </Field>
+              <Field label={t("Retries on failure")}>
+                <Select
+                  value={pending.retries === null ? "" : String(pending.retries)}
+                  onChange={(e) =>
+                    setPending((p) =>
+                      p
+                        ? { ...p, retries: e.target.value === "" ? null : Number(e.target.value) }
+                        : p,
+                    )
+                  }
+                >
+                  <option value="">{t("Follow the global setting")}</option>
+                  <option value="0">{t("No retry")}</option>
+                  <option value="1">{t("Retry once")}</option>
+                  <option value="2">{t("Retry twice")}</option>
+                  <option value="3">{t("Retry three times")}</option>
+                </Select>
+              </Field>
+              <p className="text-xs text-ink-500">
+                {t(
+                  "A retry only reruns failures a retry can actually fix (infra errors, steps that never ran). A real defect is never re-run, so it cannot be laundered into a flaky pass.",
+                )}
+              </p>
               <div className="flex justify-end gap-2">
                 <Button variant="outline" onClick={close}>
                   {t("Cancel")}

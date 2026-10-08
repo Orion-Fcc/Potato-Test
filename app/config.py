@@ -206,9 +206,81 @@ class Settings(BaseSettings):
     browser_executable: str = ""
     # 自动探测的候选顺序，逗号分隔（**不用 tuple**：pydantic-settings 对 .env 里的
     # 复杂类型要按 JSON 解析，写成 `a,b` 会直接校验失败；逗号串是用户能一眼看懂、
-    # 一眼就能改的写法）。Edge 排第一：Windows 自带、装机率最高、实测启动最快。
-    # 想改成"永远用 Chrome"就写 BROWSER_CANDIDATES=chrome,edge。
-    browser_candidates: str = "edge,chrome"
+    # 一眼就能改的写法）。
+    #
+    # ★ 默认值 2026-10-07 从 "edge,chrome" 改成 "chromium"（= Playwright 已下载的独立
+    # Chromium，路径由 app/browser_binary.py 问 Playwright 要，不写死版本号）；
+    # 当天晚些时候又改成 "chrome"（见下）。
+    #
+    # 换候选的理由 —— 不是因为 Chromium 更好，是因为**撞车**：
+    #   - 用 Edge/Chrome 的**默认** profile 时，Potato 拉起的浏览器和你自己开着的那个
+    #     共用同一个用户目录。两边同时跑，登录态互相覆盖、缓存互相清，症状是"我这边
+    #     登录了，同一个电脑里面另一边就会出现故障" —— 根因是两个进程在抢同一个目录。
+    #   - 独立 Chromium 是**另一个程序**，且这里传的user_data_dir 是项目自己的
+    #     ./profiles/<project>，与系统 User Data 完全无关，所以可以同时跑。
+    #
+    # ★ 为什么最后选chrome 而不是 chromium（同为"另一个程序+ 独立 profile"，都安全）：
+    #   内网首屏实测（3 次取中位数，headless，走 launch_persistent_context）：
+    #     Chrome 正式版0.41s 启动 / **5.74s** 内网首屏
+    #     Edge 正式版     0.42s / 5.76s
+    #     Playwright自带 0.49s / **8.35s**
+    #   启动三者基本无差别，但内网首屏自带 Chromium 慢 45% —— 而首屏时间出现在**每条
+    #   用例的每一步**上，501 条乘下来是几小时级别。所以选最快渲染内网的正式版。
+    #
+    # 安全性复核（换之前确认过的）：`user_data_dir` 传的是 executor 里的 lease.path
+    # （项目自己的 profiles/<project>/<role>），**不是** %LOCALAPPDATA%\Google\Chrome\
+    # User Data，所以和你日常开着的 Chrome 不共用目录，不存在上面那个撞车问题。
+    #
+    # 想改回系统浏览器：BROWSER_CANDIDATES=edge（但会重新引入撞车，且慢）。
+    browser_candidates: str = "chrome"
+    # ★ 接管一个**已经开着**的浏览器（CDP over CDP），而不是自己拉一个。
+    #
+    # 背景（2026-10-07）：跑内网系统时发现「多角色切换」这条路径的固定成本极高——
+    # 每条用例都要重新走登录（租户→用户名→密码→等 SPA 加载完），内网一慢就是 30s+，
+    # 而 13 个账号 × 501 条用例里大量用例都要换角色，这部分时间占比远超执行本身。
+    #
+    # 为什么以前没做：Potato 自己的 profile（lease.path）已经把登录态持久化了，但那是
+    # **它自己的** profile——要让 agent 接着"你已经登录好的那个窗口"跑，就得接 CDP。
+    #
+    # 开了这个开关后：
+    #   - 浏览器由**你**手工启动并开好远程调试端口（msedge.exe --remote-debugging-port=9222）
+    #   - Potato 只 attach，不负责启动/关闭，**绝不 kill 你的浏览器**
+    #   - 登录态、localStorage、已下载文件全部沿用
+    #     （内网系统 ACCESS_TOKEN 存在 localStorage，attach 后直接可用，省掉整套登录）
+    #
+    # 候选值：
+    #   ""     = 自己拉浏览器（默认，行为与之前完全一致）
+    #   "9222" = attach 到 localhost:9222
+    #   "http://127.0.0.1:9222" = 同上，写全端点也行
+    #
+    # 安全约束：这个开关只影响"连哪台浏览器"，不改变任何登录逻辑——账号密码仍来自
+    # 用例的 role 配置。attach 模式下一个 tab 同一时刻只能被一个 run 占用，
+    # 所以并发仍受 global_slot 限制，不会互相踩页面。
+    browser_cdp_endpoint: str = ""
+    # attach 模式下，attach 失败时是**回退到自己拉浏览器**（True）还是直接报错（False）。
+    #
+    # 默认 True：调试端口没开是最常见的误配置（用户忘了加 --remote-debugging-port），
+    # 这时静默回退比整批用例全军覆没好。日志里会打 WARNING 说明发生了回退。
+    browser_cdp_fallback: bool = True
+    # ★ 动作前的「页面就绪门控」超时秒数。
+    #
+    # 背景（2026-10-07 实测踩坑）：内网 SPA 慢的时候，agent 会在**渲染中间态**继续操作。
+    # 实测两个具体现象：
+    #   1. 列表页 vxe-table 还没拿到数据，页面显示「共 0 条 / 暂无数据」——agent 据此
+    #      断言"查不到该学员"，差点报成缺陷；实际只是数据还没回来，点重置后是 36 条。
+    #   2. 弹窗关闭动画未结束时，DOM 快照里还留着已关掉的弹窗内容，agent 会对着
+    #      一个已经消失的元素继续点。
+    # 两者都不是系统的错，是"读得太早"。
+    #
+    # 行为：每个动作前检查骨架屏文案（"正在加载中"等）与目标元素是否已挂上，
+    # 未就绪则**继续等**而不是报错；超过这个秒数才判定为真卡死。
+    # 设 0 = 关闭门控（恢复旧行为）。
+    page_ready_gate_seconds: int = 20
+    # 门控判定"正在加载中"用的文案片段，逗号分隔。
+    #
+    # 为什么要可配：各家 SPA 的骨架屏文案不同（Element Plus 是"正在加载中请稍后......"，
+    # antd 是"Loading..."），而写死一套会在换框架时静默失效——门控默默通过等于没开。
+    page_loading_texts: str = "正在加载中,加载中,Loading,loading...,请稍后"
     # ★ 页面视口（CSS 像素）—— 让 agent 看到的页面大小和你自己手动测时**一致**。
     #
     # 背景（本机 2026-10-06 实测）：
@@ -470,6 +542,16 @@ class Settings(BaseSettings):
     # Docker 部署请设成 false —— docker-compose.yml 里已经有单独的 feishu_ws
     # 服务（WebSocket 长连接），两边同时在线会让一条消息被回两次。
     feishu_worker_in_process: bool = True
+
+    # --- 套件到期自动执行（2026-10-08）---
+    # TestSuite 一直有 cadence/due_at，但此前只有一个"发提醒邮件"的任务，
+    # 注释里写得很清楚：Does NOT auto-run。于是"每周跑一次"这件事仍然要人手动点。
+    # 这里开关的是**进程内**扫描器（本地单机模式没有 Celery beat，只有它能让
+    # 到期套件真的跑起来）。配了 Redis 时它会自动让位给 Celery beat，不会双跑。
+    suite_autostart: bool = True
+    # 扫描间隔（秒）。cadence 是天粒度，这个值只决定"到期后最多晚多久开跑"，
+    # 不决定跑几次 —— 重复触发由 suite_schedule 里的 due_at CAS 挡住。
+    suite_sweep_interval_s: float = 300.0
 
     # --- system SMTP (invite emails / notifications) ---
     email_from: str = "noreply@example.com"

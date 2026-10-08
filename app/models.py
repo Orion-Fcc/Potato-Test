@@ -174,10 +174,20 @@ class Run(Base):
         String(20), default="pending"
     )  # pending|running|completed|failed|cancelled
     concurrency: Mapped[int] = mapped_column(Integer, default=2)
+    # 2026-10-08 per-run 重试次数。此前只有全局 `.env` 的 CASE_RETRIES=0 一刀切：
+    # 想给某一轮开重试就得改配置并重启，而且一开就是全部轮次一起开。
+    # **NULL = 沿用全局 case_retries**（不是 0）—— 否则一条没显式指定的新 run 会带着
+    # 默认 0 把用户设的全局值顶掉，"我明明开了重试怎么没生效"就查不出来了。
+    # 显式填 0 才表示"这一轮就是不重试"。取值语义见 engine.should_retry。
+    retries: Mapped[int | None] = mapped_column(Integer, nullable=True)
     total_count: Mapped[int] = mapped_column(Integer, default=0)
     processed_count: Mapped[int] = mapped_column(Integer, default=0)
     passed_count: Mapped[int] = mapped_column(Integer, default=0)
     summary: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # 2026-10-07 需规漂移信号（app/spec_drift.py 的 DriftSignal.as_dict 列表）。
+    # 为什么挂在 run 上：它是**这次执行**的结论，不是某条用例的属性。
+    # NULL = 没跑过漂移检查（功能上线前），报告侧要显示「未检查」而不是「无漂移」。
+    drift_signals: Mapped[list | None] = mapped_column(JSON, nullable=True)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # suite this run belongs to (nullable — ad-hoc runs have none), who actually ran it,
@@ -392,6 +402,17 @@ class RunResult(Base):
     # 判定器引用了第几步作为依据（1-based）。落库是为了让"这条理由是否可核对"
     # 这件事在报告里可见 —— 空列表意味着判定器没说明依据，理由的可信度要打折。
     verdict_evidence: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    # ★ 失败归因：谁造成了这次失败。取值见 app/failure_attrib.py 的 classify()
+    #   （system / setup / transient / agent / unknown）。
+    #
+    # 与上面 root_cause 的分工，混淆了就等于白加：
+    #   root_cause  —— 判定器给的，"用例为什么判失败"；
+    #   attribution —— 文本证据算的，"这次失败是谁的锅"。
+    # 两条实测假缺陷（列表读到渲染中间态、导入未提交审批）的 root_cause 都长得像
+    # 正常的"功能不符"，因为判定器只能看到 agent 的说法，而说错的是 agent。
+    # 归因看的是步骤证据本身。报告要用它把"可上报缺陷"和"我们的执行问题"分开。
+    # NULL = 未计算（历史行 / 关闭了叙述功能）。
+    attribution: Mapped[str | None] = mapped_column(String(30), nullable=True)
     final_answer: Mapped[str | None] = mapped_column(Text, nullable=True)
     # AI-written bug description for FAILED cases:
     # {steps, actual, expected, title, severity} — see app/failure_narrative.py.
@@ -400,6 +421,15 @@ class RunResult(Base):
     # which account/role this case actually ran as (multi-account audit), e.g. "approver · 主管A"
     account_label: Mapped[str | None] = mapped_column(String(200), nullable=True)
     latency_ms: Mapped[int] = mapped_column(Integer, default=0)
+    # 2026-10-08 耗时分解。executor 早就在每条用例结束时算好 5 段墙钟并打成一条
+    # WARNING（见 executor.execute_case 末尾），但**只进日志不进库** —— 结果是
+    # "这轮为什么慢"只能在日志里翻，报告页看不到、也没法按阶段汇总。
+    # 形状：{"browser_up_ms","agent_ms","wrap_up_ms","video_ms","judge_ms",
+    #        "total_ms","steps","per_step_ms"}。NULL = 埋点上线前的历史行。
+    # 为什么是 JSON 而不是 5 个 int 列：这套分段以后还会调（比如把 agent 拆成
+    # 登录/首屏/步骤），加列要动 _ADDITIVE_COLUMNS 且每个消费点都要改；
+    # 一个 JSON 里加 key 不用迁移。
+    timing: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     error: Mapped[str | None] = mapped_column(String(500), nullable=True)
     # ---- 2026-10-06 人工改判 ----
     # AI 判定会不准（用户实测反馈），所以人必须能改。这里存的是"改判这件事本身"，

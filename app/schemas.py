@@ -322,6 +322,10 @@ class RunIn(BaseModel):
     case_ids: list[int] | None = None  # None => all enabled cases in the project
     tags: list[str] | None = None  # optional filter when case_ids omitted
     concurrency: int = Field(default=2, ge=1, le=16)
+    # 2026-10-08 per-run 重试。None（不传）= 沿用全局 CASE_RETRIES；
+    # 显式 0 = 这一轮不重试；N = 每条用例最多再跑 N 次（只重跑"重试有救"的失败）。
+    # 上限 3：再往上就是在一条卡死的用例上反复烧满预算，收益为负。
+    retries: int | None = Field(default=None, ge=0, le=3)
     environment_id: int | None = None  # target environment (null => project default base_url)
 
 

@@ -17,8 +17,30 @@ jobs:
         run: pip install -e ".[dev]"
       - name: Lint
         run: ruff check .
-      - name: Unit tests
-        run: python -m pytest tests/ -q
+      # 严格类型子集：这几个模块是纯函数 + 标注已经写满，能做到零错误，就用它们当门禁。
+      # 不加参数会把整个 app/ 拉进来，而存量还有约 90 条（executor/engine 占大头），
+      # 一上来就拿存量当门禁，结果只会是"人人都学会忽略 mypy"。
+      #
+      # --follow-imports=silent 不能省：显式列出文件时 mypy 默认会顺着 import 继续检查
+      # 被依赖的模块，于是 app/executor.py 等存量错误会一起报出来，这个门禁就永远红。
+      # 该参数的含义正是"这几个文件报错，被它们 import 的模块只取类型不报错"。
+      - name: Type check (strict subset, blocking)
+        run: >
+          python -m mypy --follow-imports=silent
+          app/page_gate.py
+          app/spec_drift.py
+          app/failure_attrib.py
+          app/suite_schedule.py
+          app/cdp_endpoint.py
+      # 全量检查保留为**可见但不阻塞**：清单要一直在 CI 日志里，才会有人顺手收。
+      # 等存量清到零，把这一步的 continue-on-error 去掉即可。
+      - name: Type check (whole app, informational)
+        continue-on-error: true
+        run: python -m mypy
+      # 覆盖率门槛由 pyproject 的 [tool.coverage.report] fail_under 控制。
+      # 它的作用是"只能往上不能往下"——首次实测 53%，计入 omit 后约 55%。
+      - name: Unit tests + coverage
+        run: python -m pytest tests/ -q --cov=app
 
   web:
     runs-on: ubuntu-latest

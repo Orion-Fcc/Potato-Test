@@ -9,7 +9,8 @@ import io
 import re
 import time
 from datetime import UTC, datetime, timedelta
-from typing import Any, NamedTuple
+from typing import Any
+from urllib.parse import unquote
 
 from fastapi import APIRouter, Depends, File, HTTPException, Request, Response, UploadFile
 from fastapi.responses import RedirectResponse, StreamingResponse
@@ -23,7 +24,8 @@ from app.gitlab_client import GitLabClient
 from app.gitlab_sync import resolve_token
 # 根因分类表（分类标识 / 中文标签 / 是否算真缺陷）。放在 judge 里作为唯一来源，
 # 这里只引用 —— 前端再抄一份必然会出现"新增分类忘了同步"的空白分组。
-from app.judge import ROOT_CAUSE_IS_REAL_DEFECT, ROOT_CAUSE_LABELS_ZH
+# 失败归因表（谁造成了这次失败 / 中文标签 / 是否可上报缺陷）。同样只引用 judge 之外的
+# 唯一来源 failure_attrib，理由见上。
 from app.db import db_session
 from app.engine import run_suite
 from app.models import (
@@ -42,6 +44,28 @@ from app.models import (
     TestCase,
     TestSuite,
     User,
+)
+
+# 2026-10-08 拆出：ORM 行 → dict 的 21 个序列化函数（315 行）搬去了 app/serialize.py。
+# 它们只读行、不碰库与请求，是纯粹的对外契约。
+from app.serialize import (  # noqa: F401
+    LastResult,
+    _case,
+    _case_change,
+    _comment,
+    _cred,
+    _env,
+    _feedback,
+    _feishu_status,
+    _iso,
+    _issue,
+    _llm_status,
+    _notif,
+    _project,
+    _result,
+    _run,
+    _user,
+    _verdict_info,
 )
 from app.schemas import (
     AssistantIn,
@@ -188,23 +212,6 @@ async def _read_upload_capped(file: UploadFile, max_bytes: int) -> bytes:
 
 
 # ---- auth ----
-def _iso(dt: datetime | None) -> str | None:
-    """ISO-8601 with an explicit UTC offset, so browsers parse it as UTC.
-
-    SQLite (via SQLAlchemy's DateTime(timezone=True)) does NOT preserve tzinfo: the column
-    stores a UTC wall-clock value and hands back a NAIVE datetime. `.isoformat()` on a naive
-    datetime emits '2026-10-02T02:37:08.681319' — no offset. A browser reads an offset-less
-    string as LOCAL time, so on a GMT+8 machine every timestamp silently shifted back 8
-    hours: the running-run tile showed '8h17m' elapsed for a run 19 minutes old.
-
-    Everything the API emits goes through here (see `_expired` just below — the same trap,
-    already handled there for comparisons). Do NOT go back to bare `.isoformat()`.
-    """
-    if not dt:
-        return None
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=UTC)
-    return dt.isoformat()
 
 
 def _expired(dt: datetime | None) -> bool:
@@ -216,14 +223,6 @@ def _expired(dt: datetime | None) -> bool:
     return dt < datetime.now(UTC)
 
 
-def _user(u: User) -> dict:
-    return {
-        "id": u.id,
-        "email": u.email,
-        "name": u.name,
-        "is_admin": u.is_admin,
-        "onboarded_at": _iso(u.onboarded_at),
-    }
 
 
 @public.get("/config")
@@ -455,25 +454,8 @@ async def update_user(uid: int, body: UserPatch) -> dict:
 
 
 # ---- admin: system settings ----
-def _feishu_status(cfg: dict) -> dict:
-    """Public-safe view of the Feishu config (secrets shown only as *_set booleans)."""
-    return {
-        "app_id": cfg["app_id"],
-        "app_secret_set": bool(cfg["app_secret"]),
-        "verification_token_set": bool(cfg["verification_token"]),
-        "api_base": cfg["api_base"],
-        "auto_answer_detected": cfg["auto_answer_detected"],
-    }
 
 
-def _llm_status(cfg) -> dict:
-    """Public-safe view of the effective LLM config (key shown only as a boolean)."""
-    return {
-        "base_url": cfg.base_url,
-        "model": cfg.model,
-        "agent_model": cfg.agent_model,
-        "api_key_set": bool(cfg.api_key),
-    }
 
 
 @router.get("/admin/settings", dependencies=[Depends(auth.require_admin)])
@@ -754,199 +736,26 @@ async def remove_member(pid: int, uid: int, request: Request) -> dict:
     return {"removed": uid}
 
 
-def _project(p: Project) -> dict:
-    return {
-        "id": p.id,
-        "name": p.name,
-        "base_url": p.base_url,
-        "has_login_state": bool(p.login_state),
-        "gitlab_project": p.gitlab_project,
-        "case_timeout_s": p.case_timeout_s,
-        "case_max_steps": p.case_max_steps,
-        "run_concurrency": p.run_concurrency,
-        # 证据采集开关（用户自己选）。None 表示该字段从未设过，跟随服务器全局默认。
-        "case_record_video": p.case_record_video,
-        "live_shot_every": p.live_shot_every,
-        "roles": p.roles or [],
-        "feishu_chat_id": p.feishu_chat_id,
-        "feishu_bitable_bound": bool(p.feishu_bitable_app_token and p.feishu_bitable_table_id),
-    }
 
 
-def _gitlab_web_url(project_ref: str | None, iid: int | None) -> str | None:
-    """Best-effort browser URL for a synced GitLab issue (derives web host from the API base)."""
-    if not project_ref or not iid:
-        return None
-    host = get_settings().gitlab_base_url.split("/api/v4", 1)[0].rstrip("/")
-    return f"{host}/{project_ref}/-/issues/{iid}"
 
 
-class LastResult(NamedTuple):
-    """A case's most recent verdict — status, the run it came from, when it ran."""
-
-    status: str
-    run_id: int
-    at: datetime | None
 
 
-def _case(c: TestCase, last: LastResult | None = None) -> dict:
-    return {
-        "id": c.id,
-        "project_id": c.project_id,
-        # How this case last did. The cases table shows 通过/失败 + when + a link to that
-        # report, so "is this case OK?" is answerable without opening every run.
-        "last_status": last.status if last else None,  # passed|failed|error, None = never run
-        "last_run_id": last.run_id if last else None,
-        "last_run_at": _iso(last.at) if last else None,
-        "case_key": c.case_key,
-        "name": c.name,
-        "module": c.module,
-        "priority": c.priority,
-        "type": c.type,
-        "status": c.status,
-        "owner": c.owner,
-        "role": c.role,
-        # 2026-10-04 multi-role: the ordered list the agent switches through.
-        # Always at least [role] when a role is set, so the UI can bind to this one
-        # field and render old single-role cases without a special case.
-        "roles": _roles_of(c.role, c.roles),
-        "references": c.references or "",
-        "preconditions": c.preconditions or "",
-        "prompt": c.prompt,
-        "steps": c.steps or [],
-        "test_data": c.test_data or "",
-        # 2026-10-06 测试数据文件声明（供用例编辑页渲染）。
-        # 永远序列化，哪怕解析失败也要把原文带回去 —— 否则用户在界面上看到空白，
-        # 无从判断是自己没填还是后端把它吞了。
-        "data_files": c.data_files,
-        "data_files_error": _data_files_error(c.data_files),
-        "data_hygiene": c.data_hygiene or "",
-        "expected": c.expected,
-        "start_url": c.start_url,
-        "tags": c.tags or [],
-        "enabled": c.enabled,
-        "updated_at": _iso(c.updated_at),
-        # 操作经验记忆（见 app/case_memory.py）。前端要能看到"它到底学到了什么"，
-        # 否则用户没法判断这份记忆可不可信。
-        # `memory_stale` 表示记忆还在、但用例已被改过导致指纹对不上 —— 运行时会被忽略，
-        # 这里显式告诉用户，免得他看到一份"看起来很新其实已经作废"的笔记。
-        "memory": c.memory,
-        "memory_updated_at": _iso(c.memory_updated_at),
-        "memory_stale": bool(
-            c.memory and c.memory_fingerprint and c.memory_fingerprint != _case_fingerprint(c)
-        ),
-    }
 
 
-def _data_files_error(decl: object) -> str | None:
-    """声明不合法时给出原因，合法或为空时返回 None。
-
-    为什么把校验放在"读"路径上也做一遍：写路径已经拦过一次，但库里可能躺着
-    改 schema 之前写入的、或手工改过的数据。界面上直接显示这句话，比让用户
-    跑到执行期才发现"文件没准备好"要早得多。
-    """
-    if decl in (None, "", {}):
-        return None
-    from app import testdata
-
-    try:
-        testdata.parse(decl)
-    except testdata.SpecError as exc:
-        return str(exc)
-    return None
 
 
-def _case_fingerprint(c: TestCase) -> str:
-    """与 app/case_memory.fingerprint 同一套算法；放在这里只为了让 _case() 能判断是否过期。"""
-    try:
-        from app.case_memory import fingerprint
-
-        return fingerprint(c)
-    except Exception:  # noqa: BLE001
-        return ""
 
 
-def _run(r: Run) -> dict:
-    return {
-        "id": r.id,
-        "project_id": r.project_id,
-        "name": r.name,
-        "status": r.status,
-        "case_ids": r.case_ids or [],
-        "concurrency": r.concurrency,
-        "total_count": r.total_count,
-        "processed_count": r.processed_count,
-        "passed_count": r.passed_count,
-        "summary": r.summary,
-        "started_at": _iso(r.started_at),
-        "finished_at": _iso(r.finished_at),
-        "created_at": _iso(r.created_at),
-        "created_by": r.created_by,
-        "suite_id": r.suite_id,
-        "ran_by_user_id": r.ran_by_user_id,
-        "trigger": r.trigger,
-        "environment_id": r.environment_id,
-    }
 
 
-def _result(x: RunResult) -> dict:
-    return {
-        "id": x.id,
-        "run_id": x.run_id,
-        "case_id": x.case_id,
-        "status": x.status,
-        "attempts": x.attempts,
-        "flaky": x.flaky,
-        "video_url": x.video_url,
-        "trace_url": x.trace_url,
-        "steps": x.steps or [],
-        "diagnostics": x.diagnostics or [],
-        "judge_reason": x.judge_reason,
-        # 2026-10-04 失败根因分类与判定依据。
-        # root_cause="" 表示通过（无根因）；None 表示分类功能上线前的历史结果 ——
-        # 前端要区分这两种，别把历史数据一律显示成"未分类"而误导。
-        "root_cause": x.root_cause,
-        # 该分类是否代表被测系统的真实缺陷。前端/统计直接用它分流，
-        # 不必在前端再维护一份分类表（两边各存一份迟早会不一致）。
-        "is_real_defect": (x.root_cause in ROOT_CAUSE_IS_REAL_DEFECT) if x.root_cause else False,
-        "root_cause_label": ROOT_CAUSE_LABELS_ZH.get(x.root_cause or "", ""),
-        "verdict_evidence": x.verdict_evidence or [],
-        "final_answer": x.final_answer,
-        "failure_narrative": x.failure_narrative or None,
-        "account_label": x.account_label,
-        "latency_ms": x.latency_ms,
-        "error": x.error,
-        # 2026-10-06 人工改判痕迹。前端据此把"人改的"和"AI 判的"区分开 ——
-        # 混在一起的话，通过率/真缺陷率这些数字就没有可信度了。
-        "verdict_override": x.verdict_override,
-        "override_reason": x.override_reason,
-        "override_by": x.override_by,
-        "override_at": x.override_at,
-        "original_status": x.original_status,
-    }
 
 
-def _case_change(x: CaseChange) -> dict:
-    """一条用例改动审计记录。
 
-    刻意只回字段级前后值、不回完整用例：审计的目的是回答
-    "这条用例被改过吗、哪一格被动了" ，不是重建历史快照。
-    """
-    return {
-        "id": x.id,
-        "project_id": x.project_id,
-        "case_id": x.case_id,
-        "field": x.field,
-        "before": x.before,
-        "after": x.after,
-        # assistant = 助手自动改的。前端要把这类单独标出来 ——
-        # 助手改用例是用户明确要求的，但"AI 改的断言"天然可疑，
-        # 必须能一眼区分，否则通过率会被悄悄污染。
-        "source": x.source,
-        "digest_signal": x.digest_signal,
-        "by_label": x.by_label,
-        "created_at": x.created_at.isoformat() if x.created_at else "",
-    }
+
+
+
 
 
 # ---- projects ----
@@ -1090,14 +899,6 @@ async def set_roles(pid: int, body: RolesIn, request: Request) -> dict:
         return {"roles": seen}
 
 
-def _env(e: Environment) -> dict:
-    return {
-        "id": e.id,
-        "project_id": e.project_id,
-        "name": e.name,
-        "base_url": e.base_url,
-        "is_default": e.is_default,
-    }
 
 
 async def _default_env_id(s, pid: int) -> int | None:
@@ -1680,7 +1481,17 @@ async def update_case(cid: int, body: TestCasePatch, request: Request) -> dict:
         for k, v in data.items():
             setattr(c, k, v)
         await s.flush()
-        _audit_case_change(s, c, body, data, request)
+        # ★ Must be awaited. `_audit_case_change` is async (it awaits the session to add the
+        # row), and calling it without `await` produces a bare coroutine that never runs —
+        # the case change persists and `case_change` stays empty forever. Found on
+        # 2026-10-07 by an end-to-end check after wiring the assistant's case tools: the
+        # change was visible in the DB while the audit table had zero rows in it, and the
+        # only warning was a RuntimeWarning at GC time, far from the call site.
+        #
+        # The tell is worth remembering: **an audit that is silently always empty is the
+        # signature of a coroutine nobody awaited.** An audit log that works is boring; one
+        # that is uniformly empty is not "unused feature", it is broken plumbing.
+        await _audit_case_change(s, c, body, data, request)
         return _case(c)
 
 
@@ -1689,6 +1500,33 @@ async def update_case(cid: int, body: TestCasePatch, request: Request) -> dict:
 _AUDIT_BEFORE: dict[tuple[int, str], str] = {}
 # 助手改用例时带上"这是为了清单第几条"，便于从清单反查改动。
 _AUDIT_SIGNAL: dict[tuple[int, str], str] = {}
+
+
+def _decode_header_label(value: str) -> str:
+    """Restore a percent-encoded ``x-change-by`` to the text the sender meant.
+
+    ★ Header values are ASCII, so a Chinese audit reason has to be percent-encoded to survive
+    the trip — see ``assistant._header_safe``, which does the encoding. This is the other half.
+
+    Without this the audit table stores ``%E4%B8%8E%20TC-001%20...`` and the UI shows the operator
+    a wall of escapes instead of "与 TC-001 重复". Encoding without decoding keeps the request
+    legal but loses the only thing the column is for.
+
+    ``unquote`` is applied on a copy of the original only when it actually looks encoded:
+    ``%`` is a legal character in a plain label, and a human header like ``50% done`` must not be
+    mangled into ``50%E2%80%8Bdone``. ``unquote`` leaves invalid escapes alone, so a false positive
+    here degrades to "unchanged" rather than to corrupted text.
+    """
+    v = value or ""
+    if "%" not in v:
+        return v
+    try:
+        decoded = unquote(v, errors="strict")
+    except (UnicodeDecodeError, ValueError):
+        return v
+    # A decode is only believed if it introduced characters that needed encoding in the first
+    # place. Decoding "50%20off" is legitimate too, so this is a sanity check, not a filter.
+    return decoded or v
 
 
 async def _audit_case_change(
@@ -1715,7 +1553,7 @@ async def _audit_case_change(
     by_label = ""
     if request is not None:
         source = request.headers.get("x-change-source") or "human"
-        by_label = request.headers.get("x-change-by") or ""
+        by_label = _decode_header_label(request.headers.get("x-change-by") or "")
     if source not in ("human", "assistant", "import"):
         source = "human"
 
@@ -1796,23 +1634,6 @@ async def delete_case(cid: int, request: Request) -> dict:
         return {"deleted": cid}
 
 
-def _cred(c: Credential) -> dict:
-    # NOTE: never include `secret` — ciphertext must not leave the server.
-    return {
-        "id": c.id,
-        "project_id": c.project_id,
-        "type": c.type,
-        "role": c.role,
-        "environment_id": c.environment_id,
-        "label": c.label,
-        "username": c.username,
-        "is_active": c.is_active,
-        "healthy": c.healthy,
-        "last_error": c.last_error,
-        "last_checked_at": _iso(c.last_checked_at),
-        "expires_at": _iso(c.expires_at),
-        "created_at": _iso(c.created_at),
-    }
 
 
 @router.get("/projects/{pid}/credentials")
@@ -2211,6 +2032,8 @@ async def create_run(pid: int, body: RunIn, request: Request) -> dict:
             name=body.name,
             case_ids=[c.id for c in cases],
             concurrency=concurrency,
+            # None（不传）保持 NULL = 沿用全局 case_retries；显式传 0 表示这一轮不重试。
+            retries=body.retries,
             total_count=len(cases),
             environment_id=body.environment_id or await _default_env_id(s, pid),
         )
@@ -2241,7 +2064,12 @@ async def get_run(rid: int, request: Request) -> dict:
         if r is None:
             raise HTTPException(404, "run not found")
         await _project_access(request, r.project_id, "viewer")
-        return {**_run(r), "ran_by_label": await _user_label(s, r.ran_by_user_id)}
+        return {
+            **_run(r),
+            "ran_by_label": await _user_label(s, r.ran_by_user_id),
+            # 明细只在详情给：这是「停下来改文档」的入口，列表页不展开。
+            "drift_signals": r.drift_signals,
+        }
 
 
 @router.get("/runs/{rid}/results")
@@ -2593,6 +2421,16 @@ async def export_run(rid: int, request: Request) -> Response:
             .all()
         )
     by_case = {c.id: c for c in cases}
+    # Cases the drift check named, as "pid:case_key" — the same qualified form it reports.
+    #
+    # ★ Per-row, not a run-level banner. A run-level conclusion does not survive CSV: the
+    # file is filtered and sorted in a spreadsheet, and a banner in row0 is the row somebody
+    # deletes. Putting the flag on the row makes it travel with the case, so the reader can
+    # filter to exactly the cases whose *expectation itself* is in question — which is the
+    # set that must not be filed as bugs.
+    drift_cases: set[str] = set()
+    for sig in run.drift_signals or ():
+        drift_cases.update(sig.get("case_ids") or ())
     buf = io.StringIO()
     writer = csv.writer(buf)
     writer.writerow(
@@ -2606,6 +2444,15 @@ async def export_run(rid: int, request: Request) -> Response:
             "flaky",
             "latency_ms",
             "judge_reason",
+            # 需规漂移（2026-10-07）。这一列为「是」的用例，其**预期本身**存疑 ——
+            # 不是功能不符，是用例断言的行为与需规/其它用例矛盾。排它在前面的缺陷列
+            # 之前是因为它一票否决：预期存疑时，后面三段叙述再完整也不能提单。
+            "需规漂移存疑",
+            # 失败归因（2026-10-07）。放在缺陷描述前面，因为这一列决定后面三列
+            # 到底该不该被采纳 —— "流程未走完""页面未就绪"的用例即使写了三段
+            # 叙述也不该提单，混在一起导出等于把假缺陷一起递上去了。
+            "失败归因",
+            "可上报缺陷",
             # The AI bug description for failed cases, split into the three sections the
             # tester actually pastes into a bug tracker. Empty for passed cases.
             "缺陷标题",
@@ -2618,6 +2465,14 @@ async def export_run(rid: int, request: Request) -> Response:
     for x in results:
         c = by_case.get(x.case_id)
         nar = x.failure_narrative or {}
+        # Qualified to match what spec_drift reports. The first column stays bare for
+        # readability, so the join cannot reuse it — and reusing a bare key would mark the
+        # wrong project's rows whenever two systems share a case_key.
+        qkey = (
+            f"{run.project_id}:{c.case_key}"
+            if c is not None and c.case_key
+            else ""
+        )
         writer.writerow(
             [
                 (c.case_key if c else "") or f"#{x.case_id}",
@@ -2629,6 +2484,9 @@ async def export_run(rid: int, request: Request) -> Response:
                 "yes" if x.flaky else "",
                 x.latency_ms,
                 (x.judge_reason or x.error or "").replace("\n", " "),
+                "是" if qkey in drift_cases else "",
+                _verdict_info(x.attribution)[0],
+                "是" if _verdict_info(x.attribution)[1] else "",
                 nar.get("title", ""),
                 nar.get("severity", ""),
                 (nar.get("steps", "") or "").replace("\n", " "),
@@ -2851,32 +2709,28 @@ async def delete_suite(sid: int, request: Request) -> dict:
 
 @router.post("/suites/{sid}/run")
 async def run_suite_now(sid: int, request: Request) -> dict:
-    """Any project member may run a suite; the Run records who actually ran it."""
+    """Any project member may run a suite; the Run records who actually ran it.
+
+    建 run 的部分与定时自动执行共用 `suite_schedule.create_run_for_suite` —— 两条路径
+    必须选出同一批用例、同一个环境，否则"手动跑和定时跑结果不一样"会变成很难查的问题。
+    """
+    from app.suite_schedule import create_run_for_suite
+
     async with db_session() as s:
         x = await s.get(TestSuite, sid)
         if x is None:
             raise HTTPException(404, "suite not found")
         await _project_access(request, x.project_id, "viewer")
         user = await auth.current_user(request)
-        project = await s.get(Project, x.project_id)
-        case_ids = await _resolve_suite_case_ids(s, x)
-        if not case_ids:
-            raise HTTPException(400, "suite has no runnable cases")
-        run = Run(
-            project_id=x.project_id,
-            name=x.name,
-            case_ids=case_ids,
-            concurrency=(project.run_concurrency if project else None)
-            or get_settings().run_concurrency,
-            total_count=len(case_ids),
-            suite_id=x.id,
-            ran_by_user_id=user.id if user else None,
+        run = await create_run_for_suite(
+            s,
+            x,
             trigger="suite",
-            environment_id=x.environment_id or await _default_env_id(s, x.project_id),
+            ran_by_user_id=user.id if user else None,
             created_by=user.email if user else None,
         )
-        s.add(run)
-        await s.flush()
+        if run is None:
+            raise HTTPException(400, "suite has no runnable cases")
         run_id = run.id
         payload = _run(run)
     await _launch(run_id)
@@ -2884,19 +2738,6 @@ async def run_suite_now(sid: int, request: Request) -> dict:
 
 
 # ---- notifications (per current user) ----
-def _notif(n: Notification) -> dict:
-    return {
-        "id": n.id,
-        "type": n.type,
-        "title": n.title,
-        "body": n.body,
-        "link": n.link,
-        "suite_id": n.suite_id,
-        "run_id": n.run_id,
-        "issue_id": n.issue_id,
-        "read": n.read_at is not None,
-        "created_at": _iso(n.created_at),
-    }
 
 
 @router.get("/notifications")
@@ -2971,35 +2812,8 @@ async def read_all_notifications(request: Request) -> dict:
         return {"ok": True, "marked": len(rows)}
 
 
-def _issue(i: Issue) -> dict:
-    return {
-        "id": i.id,
-        "project_id": i.project_id,
-        "title": i.title,
-        "description": i.description,
-        "status": i.status,
-        "severity": i.severity,
-        "assignee": i.assignee,
-        "assignee_user_id": i.assignee_user_id,
-        "labels": i.labels or [],
-        "case_id": i.case_id,
-        "run_id": i.run_id,
-        "result_id": i.result_id,
-        "gitlab_iid": i.gitlab_iid,
-        "gitlab_url": _gitlab_web_url(i.gitlab_project, i.gitlab_iid),
-        "created_at": _iso(i.created_at),
-        "updated_at": _iso(i.updated_at),
-    }
 
 
-def _comment(c: IssueComment) -> dict:
-    return {
-        "id": c.id,
-        "issue_id": c.issue_id,
-        "body": c.body,
-        "author": c.author,
-        "created_at": _iso(c.created_at),
-    }
 
 
 @router.get("/projects/{pid}/issues")
@@ -3117,25 +2931,6 @@ async def add_comment(iid: int, body: IssueCommentIn, request: Request) -> dict:
 
 
 # ---- feishu feedback bot ----
-def _feedback(f: FeedbackItem) -> dict:
-    return {
-        "id": f.id,
-        "source": f.source,
-        "chat_id": f.chat_id,
-        "chat_type": f.chat_type,
-        "sender_id": f.sender_id,
-        "sender_name": f.sender_name,
-        "content": f.content,
-        "title": f.title,
-        "category": f.category,
-        "severity": f.severity,
-        "answer": f.answer,
-        "answered": f.answered,
-        "status": f.status,
-        "project_id": f.project_id,
-        "issue_id": f.issue_id,
-        "created_at": _iso(f.created_at),
-    }
 
 
 @public.post("/feishu/events")

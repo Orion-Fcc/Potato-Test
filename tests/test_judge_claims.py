@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import inspect
 
-import pytest
 
 from app.judge_claims import (
     PrematureDone,
@@ -276,7 +275,6 @@ def test_evidence_carries_action_prefix():
 # ══════════════════════════════════════════════════════════════════
 
 from app.judge_claims import (  # noqa: E402
-    echo_only_note,
     find_contradiction,
     looks_like_echo_only,
     override_gate,

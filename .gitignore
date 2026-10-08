@@ -80,6 +80,13 @@ _*.tmp
 # 归档的过时备份（.env / potato.db / BAT 快照）——留作后悔药，不入库
 scripts/desktop/_superseded/
 
+# 覆盖率产物（2026-10-08 引入 pytest-cov 后开始生成）。
+# 它是每次跑测试重新生成的中间物，入库只会造成无意义的 diff 噪音。
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
 # 本项目在 WorkBuddy 里工作时留下的数据目录（项目备份、临时文件）。
 # 里面有导出的用例 JSON，含被测系统的内网地址，而本仓库是**公开**的 —— 不入库。
 .workbuddy/

@@ -19,18 +19,28 @@ import tempfile
 import time
 from dataclasses import dataclass, field
 
-from app import browser_binary
+from app import browser_binary, cdp_endpoint, failure_attrib, shot_probe
 from app.config import get_settings
 from app.failure_narrative import describe_failure
 from app.judge import judge
 from app.judge_gate import check_gates
 
+# 2026-10-08 拆出：浏览器卫生 + 就绪判定（beacon 拦截 / 精灵裁剪 / 截图开关 /
+# 动作截断 / 页面就绪判定 / login-URL 识别）。此前 600 多行挤在本文件里，
+# 与"跑一条用例"的主线只有 log 与 get_settings 两个接触点。
+from app.browser_hygiene import (  # noqa: F401
+    _SPRITE_PRUNE_JS,
+    _block_third_party_beacons,
+    _ensure_sprite_pruner,
+    _install_safe_batching,
+    _install_sprite_pruner,
+    _last_url_is_login,
+    _warn_prune_once,
+    safe,
+)
+
 log = logging.getLogger("potato-test.executor")
 
-# a page whose URL looks like a login/auth screen — used to detect a dead restored
-# session (P3) and a capture that didn't actually log in (P2.5). Apps typically redirect an
-# unauthenticated visit to /login, so the URL trail is a reliable signal.
-_LOGIN_URL_RE = re.compile(r"login|sign-?in|/auth\b", re.I)
 
 # Every element index in a step comes from the snapshot taken BEFORE the step's actions.
 # A dropdown/popover's options don't exist in that snapshot, so an index planned for them
@@ -299,28 +309,6 @@ and say which part you could not confirm. An unverified case is a useful result;
 you cannot point at is a defect in the test suite.
 """.strip()
 
-# The app under test is on a private network. When its URL failed to load the agent kept
-# "looking for the site" on Google/Baidu, which cannot reach it either — that burned whole
-# runs (VRS runs 28/29 timed out searching, run 39 searched for a localhost URL).
-# Analytics / ad endpoints that the app under test loads but the private-network
-# container cannot reach. The browser then blocks on the request and the SPA sits on its
-# "loading..." splash forever: VRS's login page rendered 33k DOM nodes and 14 characters
-# of text for 90+ s because hm.baidu.com never resolved. These hosts contribute nothing
-# to a test, so they are refused at the network layer.
-_BLOCKED_HOSTS = (
-    "hm.baidu.com",
-    "google-analytics.com",
-    "googletagmanager.com",
-    "doubleclick.net",
-    "sentry.io",
-    "umeng.com",
-    "umengcloud.com",
-    "cnzz.com",
-    "51.la",
-    "clarity.ms",
-    "hotjar.com",
-    "baidu.com/hm.js",
-)
 
 _SCOPE_RULE = """
 You are testing ONE web application, reachable only at the URL you were started on. Never
@@ -363,594 +351,6 @@ Deliberately NOT taught here, and why:
   * `read_file` / `write_file` — for working with local files, not for driving a web UI.
   * `save_as_pdf` — nothing in a test verdict needs a PDF; it would add time and file churn.
 """.strip()
-
-
-def _last_url_is_login(history) -> bool:
-    """True if the agent's final page looked like a login screen (read from history —
-    robust, unlike probing the live browser after the run)."""
-    urls = _safe(lambda: history.urls()) or []
-    last = next((u for u in reversed(urls) if u), None)
-    return bool(last and _LOGIN_URL_RE.search(last))
-
-
-def _is_blocked_url(url: str) -> bool:
-    """True for third-party analytics/ad beacons we refuse to let the page wait on."""
-    u = (url or "").lower()
-    return any(host in u for host in _BLOCKED_HOSTS)
-
-
-async def _block_third_party_beacons(browser) -> None:
-    """Fail analytics/ad requests fast via CDP instead of letting them hang.
-
-    The app under test is on a private network; its page also embeds third-party
-    beacons (hm.baidu.com etc.). Those never resolve from the container, the browser
-    blocks on them, and a SPA that awaits its analytics bootstrap sits on its
-    "loading..." splash forever — VRS's login page rendered 33k DOM nodes with 14
-    characters of text for 90+ s, which is why every case hit its timeout.
-
-    Failing the request at the network layer lets the page's own error path run so it
-    renders. Best-effort: if interception can't be installed we lose speed, not the run.
-    """
-    try:
-        await browser.start()
-        cdp = await browser.get_or_create_cdp_session()
-        lib = cdp.cdp_client
-
-        def _handler(*args):
-            evt = next((a for a in args if isinstance(a, dict)), None)
-            if not evt:
-                return
-            req = evt.get("request") or {}
-            url = req.get("url", "")
-            rid = evt.get("requestId")
-            if not rid:
-                return
-            if not _is_blocked_url(url):
-                asyncio.create_task(
-                    lib.send.Fetch.continueRequest(params={"requestId": rid}, session_id=cdp.session_id)
-                )
-                return
-            log.debug("executor: blocking beacon %s", url[:120])
-            asyncio.create_task(
-                lib.send.Fetch.failRequest(
-                    params={"requestId": rid, "errorReason": "Aborted"},
-                    session_id=cdp.session_id,
-                )
-            )
-
-        lib.register.Fetch.requestPaused(_handler)
-        await lib.send.Fetch.enable(
-            params={"patterns": [{"urlPattern": "*"}], "handleAuthRequests": False},
-            session_id=cdp.session_id,
-        )
-        log.info("executor: third-party beacon blocking enabled")
-    except Exception as exc:  # noqa: BLE001 — never fail a case over a speed tweak
-        log.warning("executor: beacon blocking unavailable: %s", exc)
-
-
-# ---------------------------------------------------------------------------
-# Prune the app's inline SVG icon sprite. This is THE per-step speed fix.
-#
-# Measured 2026-10-02 against 192.0.2.10:8600 (a Vue + Element-Plus admin):
-#   - the page injects <svg id="__svg__icons__dom__" aria-hidden="true">, a hidden
-#     icon REGISTRY (position:absolute;width:0;height:0 — it is not painted at all)
-#   - it holds 79 <symbol>s / 32,979 <path>s, and ONE symbol
-#     (`icon-building-floor-plan`, a floor-plan glyph) is 32,609 of them
-#   - on the LOGIN page that symbol is referenced 0 times by any <use>
-#   - `get_browser_state_summary()` took 20.7–27.3 s with the sprite present, and
-#     0.80–0.93 s with the node removed — while the model-visible state was byte-for-byte
-#     identical (29 interactive elements, 853 chars of prompt text, both times).
-#   A/B for the same page:
-#     sprite present         20.7 / 27.3 s
-#     sprite display:none    16.4 s   ← hiding is NOT enough, CDP still walks the node
-#     sprite removed          0.80 s
-#   21 s of every single step was spent walking 33k decorative <path> elements. At the
-#   observed 28–43 s/step that was ~96% of the DOM cost and the bulk of each step.
-#
-# Why prune SYMBOLS rather than delete the whole sprite: different pages use different
-# icons (`icon-login-box-bg` etc. ARE used on the login page), so nuking the container
-# would break real icons and change what the test sees. Only symbols that no <use>
-# references are dropped, which is by construction invisible.
-#
-# Why a MutationObserver and not a one-shot pass: it is a SPA. Vue mounts, routes change,
-# and the icon set can grow after our injection runs. Pruning on every mutation keeps the
-# node count down for the whole case, not just at t=0. The pass is idempotent and cheap
-# once there is nothing to drop (one querySelectorAll over <use>).
-#
-# Best-effort by design: if this fails we lose speed, never a run.
-# ---------------------------------------------------------------------------
-
-_SPRITE_PRUNE_JS = r"""
-(() => {
-  if (window.__tpSpritePrune) return 'already-installed';
-  const SPRITE_IDS = ['__svg__icons__dom__'];
-
-  const prune = () => {
-    let dropped = 0;
-    for (const id of SPRITE_IDS) {
-      const svg = document.getElementById(id);
-      if (!svg) continue;
-      // Every symbol still referenced anywhere in the document.
-      const used = new Set();
-      for (const u of document.querySelectorAll('use')) {
-        const href = u.getAttribute('href') || u.getAttribute('xlink:href') || '';
-        if (href.startsWith('#')) used.add(href.slice(1));
-      }
-      // Symbols already kept in a previous pass are kept again: cheaper than
-      // re-deciding, and a symbol can be referenced later by a newly-mounted view.
-      for (const sym of Array.from(svg.querySelectorAll('symbol'))) {
-        if (used.has(sym.id) || sym.dataset.tpKept === '1') continue;
-        const n = sym.querySelectorAll('*').length;
-        sym.remove();
-        dropped += n + 1;
-      }
-    }
-    return dropped;
-  };
-
-  // Mark the symbols that are in use right now so we never drop them later.
-  const markUsed = () => {
-    for (const id of SPRITE_IDS) {
-      const svg = document.getElementById(id);
-      if (!svg) continue;
-      for (const u of document.querySelectorAll('use')) {
-        const href = u.getAttribute('href') || u.getAttribute('xlink:href') || '';
-        if (!href.startsWith('#')) continue;
-        const sym = svg.querySelector('symbol[id="' + CSS.escape(href.slice(1)) + '"]');
-        if (sym) sym.dataset.tpKept = '1';
-      }
-    }
-  };
-
-  const run = () => { try { markUsed(); return prune(); } catch (e) { return -1; } };
-
-  window.__tpSpritePrune = { run };
-  const first = run();
-
-  // 观察目标必须是**任何时刻都存在**的节点。
-  //
-  // 这里此前写的是 document.documentElement，而本脚本是在**新文档创建时**执行的
-  // （Page.addScriptToEvaluateOnNewDocument）—— 那一刻 documentElement 还不存在，
-  // obs.observe(null) 直接抛异常并被 catch 吞掉。后果极其隐蔽：marker 装上了、
-  // 一次性 pass 也跑了（但那时精灵还没被页面 JS 创建，什么也没删到），
-  // **观察器却从未生效**，于是页面随后创建的精灵一直留着。
-  // 实测（2026-10-02）：导航后 window.__tpSpritePrune 存在、而 path 数始终是 32979；
-  // 紧接着 browser-use 在导航那一刻构建 DOM 树，CDP 报
-  // "TimeoutError: CDP requests failed or timed out: dom_tree, device_pixel_ratio"
-  // ——单步因此白等 31 秒。document 本身始终存在，是可靠的观察根。
-  let scheduled = false;
-  const schedule = () => {
-    if (scheduled) return;
-    scheduled = true;
-    // debounce：重 SPA 的 DOM 变更极频繁，逐次跑全量 prune 会拖慢页面本身。
-    setTimeout(() => { scheduled = false; run(); }, 50);
-  };
-
-  try {
-    const obs = new MutationObserver(schedule);
-    obs.observe(document, { childList: true, subtree: true });
-    window.__tpSpritePrune.observerAttached = true;
-  } catch (e) {
-    window.__tpSpritePrune.observerAttached = false;
-    window.__tpSpritePrune.observerError = String(e);
-  }
-
-  // 兜底：DOM 解析完成后再跑一次（有些 SPA 在 DOMContentLoaded 之后才注入精灵）。
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', () => { run(); }, { once: true });
-  }
-
-  return 'installed, dropped ' + first + ', observer=' + !!window.__tpSpritePrune.observerAttached;
-})()
-"""
-
-
-# ---------------------------------------------------------------------------
-# 批处理的硬保证：**一批里永远不点两次**
-#
-# 背景：用户想要快一点，但明确说"如果有点偏的概率，我不建议这样做"。
-# browser-use 的 `multi_act` 本身有两层防点偏保护：
-#   1. 静态标记：navigate / search / go_back / switch 会中止后续队列
-#   2. 运行时检测：每个动作后比较 URL 与焦点，变了就中止剩余队列
-# 但**缺口**是它只查 URL 和焦点 —— 点击弹出一个弹窗时两者都不变，检测不到，
-# 后续动作仍会落在已经挪位的元素上（"想点『下一步』却触发『取消』"就是这么来的）。
-#
-# 所以这里不靠 prompt 自律，而是在代码层做确定性保证：把一批动作截断到
-# "至多一个会改变页面的动作"。规则是从头保留，遇到第一个非安全动作就把它包进来然后停止：
-#     [input, input, click, click] -> [input, input, click]   两个输入照批，只留第一个点击
-#     [click, click]               -> [click]
-#     [input, input]               -> [input, input]          全是安全动作，原样保留
-# 安全动作定义为**不改变页面结构**的那些：input / send_keys / scroll / extract。
-# 它们同批执行不会让后续索引失效，而且真人填表时也确实会连着填几个框。
-# ---------------------------------------------------------------------------
-_SAFE_TO_BATCH = frozenset({"input", "send_keys", "scroll", "extract"})
-
-
-def _action_name(action) -> str:  # noqa: ANN001
-    """取出动作名（ActionModel 是 {动作名: 参数} 的单键结构）。"""
-    try:
-        data = action.model_dump(exclude_unset=True)
-    except Exception:  # noqa: BLE001
-        return ""
-    return next(iter(data.keys()), "") if data else ""
-
-
-def _truncate_for_safety(actions: list) -> tuple[list, bool]:
-    """把一批动作截到"至多一个会改页面的动作"。返回 (新列表, 是否截断)。"""
-    if len(actions) <= 1:
-        return actions, False
-    kept: list = []
-    for a in actions:
-        kept.append(a)
-        if _action_name(a) not in _SAFE_TO_BATCH:
-            break  # 第一个"可能改变页面"的动作：执行它，后面全部丢掉
-    return kept, len(kept) < len(actions)
-
-
-def _install_safe_batching() -> bool:
-    """给 Agent.multi_act 打上截断补丁。成功返回 True。"""
-    try:
-        from browser_use.agent.service import Agent
-
-        original = Agent.multi_act
-        if getattr(original, "_tp_safe_batch", False):
-            return True  # 已打过，别叠加包裹
-
-        async def safe_multi_act(self, actions):  # noqa: ANN001
-            kept, truncated = _truncate_for_safety(list(actions))
-            if truncated:
-                log.info(
-                    "executor: 批处理含『会改变页面』的动作，已截断为 %d 个（原 %d 个）"
-                    "—— 防止后续动作落在挪位后的元素上",
-                    len(kept), len(actions),
-                )
-            out = await original(self, kept)
-            # ★ 导航后自动等页面就绪（2026-10-06）。
-            # 现场：result 3/4 只走 1 步就放弃 —— navigate 之后页面还在
-            # 「正在加载中请稍后......」，agent 看到的就是占位，于是宣布无法访问。
-            # 它不是想放弃，是**从来没机会看到第二眼**。
-            #
-            # 放在这一步之后而不是步回调里：只有这里知道"这批动作里有没有导航"，
-            # 而 SPA 内部的路由切换（点菜单）不经过 navigate，那种情况由
-            # 下一轮模型自己看到新页面解决。
-            if any(_action_name(a) in ("navigate", "go_back") for a in kept):
-                _st = await _wait_until_ready(self.browser_session)
-                if not _st.startswith("ready"):
-                    log.info("executor: 导航后页面未就绪（%s），已等待", _st)
-            return out
-
-        safe_multi_act._tp_safe_batch = True
-        Agent.multi_act = safe_multi_act
-        return True
-    except Exception as exc:  # noqa: BLE001 — 加固项绝不能反过来搞死用例
-        log.warning("executor: 批处理安全补丁安装失败（%s），将保守回退", exc)
-        return False
-
-
-_SAFE_BATCHING_INSTALLED = _install_safe_batching()
-
-
-def _sprite_prune_js() -> str:
-    """Kept as a function so tests can assert on the emitted script's shape."""
-    return _SPRITE_PRUNE_JS
-
-
-# ---------------------------------------------------------------------------
-# 掐掉 browser-use 每步强制的截图
-#
-# agent/service.py 里这一步是**写死**的：
-#     browser_state_summary = await self.browser_session.get_browser_state_summary(
-#         include_screenshot=True,   # always capture even if use_vision=False ...
-#     )
-# 注释说"反正很快"，但实测在真实视口下并不快：profiler 抓到每步热点就是
-# `screenshot_watchdog.on_ScreenshotEvent → Page.captureScreenshot → await future`，
-# 而每步 11.3s 里 DOM(0.3s)+LLM(0.5s) 只占 0.8s，其余基本都耗在这条链上。
-#
-# 我们**不需要 browser-use 自己那张图**：逐步证据由 `live_shot_every` 控制，
-# 走的是 `_grab_shot` 的独立 CDP 调用（`browser.take_screenshot()`），
-# 用例结束时那张「最终截图」也是独立的调用。
-# 掐掉这一处是为了**避免同一步在 CDP 通道上截两次**（browser-use 一次 + 我们一次），
-# 而不是为了取消截图 —— 用户已要求默认每步都截，截图照常存在。
-# 想让 browser-use 自己那张也回来的话，删掉 `_disable_per_step_screenshots()` 的调用即可。
-#
-# 失败必须静默跳过：这是提速项，绝不能影响用例执行。
-# ---------------------------------------------------------------------------
-def _disable_per_step_screenshots() -> bool:
-    """让所有 get_browser_state_summary 都不带截图。成功返回 True。"""
-    try:
-        from browser_use.browser.session import BrowserSession
-
-        original = BrowserSession.get_browser_state_summary
-        if getattr(original, "_tp_no_screenshot", False):
-            return True  # 已经打过，别叠加包裹
-
-        async def without_screenshot(
-            self, include_screenshot: bool = True, cached: bool = False,
-            include_recent_events: bool = False,
-        ):
-            # 参数原样收下再丢掉 include_screenshot，这样调用方（含关键字与位置传参）
-            # 都不会因为签名变化而报错。
-            return await original(
-                self,
-                include_screenshot=False,
-                cached=cached,
-                include_recent_events=include_recent_events,
-            )
-
-        without_screenshot._tp_no_screenshot = True
-        BrowserSession.get_browser_state_summary = without_screenshot
-        return True
-    except Exception:  # noqa: BLE001
-        return False
-
-
-_NO_PER_STEP_SHOTS = _disable_per_step_screenshots()
-
-
-# ---------------------------------------------------------------------------
-# 【已实测否决，勿重开】把导航等待从 'load' 降级为 'domcontentloaded'
-#
-# 动机看起来成立：browser-use 的 NavigateToUrlEvent.wait_until 默认 'load'，等不到时的
-# 超时是硬编码的（session.py: `timeout = 3.0 if same_domain else 8.0`），而被测前端是
-# 6.5MB 的 SPA，日志里 "⚠️ Page readiness timeout" 累计出现 418 次 —— 很像是白等。
-#
-# 但**实测否决**（2026-10-03，同一批 URL 各导航一次）：
-#     load            10.35s / 4.48s / 6.11s   合计 20.94s
-#     domcontentloaded 11.21s / 9.08s / 10.54s  合计 30.84s   ← 反而更慢 9.9s
-# 三次逐项都更慢，不是噪声。所以这个"优化"被回退了，只留下这段记录，
-# 避免以后有人（包括我自己）再按同样的推理重做一遍。
-#
-# 结论：那 8 秒超时虽然看着浪费，但它是**和页面的真实加载行为绑在一起**的；
-# 换档不会让页面更快就绪，只是换了等待方式。要动这个得先有更强的证据。
-# ---------------------------------------------------------------------------
-
-
-def _sprite_prune_enabled() -> bool:
-    try:
-        return bool(get_settings().browser_prune_icon_sprite)
-    except Exception:  # noqa: BLE001 — a settings hiccup must not break execution
-        return True
-
-
-# Failure signatures already reported. The pruner is best-effort and runs every step, so
-# a persistent failure would otherwise emit one warning per step; the FIRST one is the
-# actionable one and must not be swallowed (it was `log.debug`, which meant a totally
-# broken pruner looked identical to a working one in the log — that is how a 30 s/step
-# DOM timeout went unnoticed).
-_PRUNE_WARNED: set[str] = set()
-
-# 注：这里曾有一个"_PRUNE_TARGET_WAIT_S 有界等待"，2026-10-05 已删除。
-# 原因是方向错了：`get_page_targets()` 在 session_manager 未初始化时恒返回空，
-# 等多久都没用。正确的做法是回落到 `get_or_create_cdp_session()`，
-# 见 _install_prune_on_session 的说明。
-
-
-def _warn_prune_once(key: str, msg: str, *args) -> None:
-    if key in _PRUNE_WARNED:
-        return
-    _PRUNE_WARNED.add(key)
-    log.warning(msg, *args)
-
-
-# ---------------------------------------------------------------------------
-# 导航后自动等页面就绪（2026-10-06）
-#
-# 现场（21:19-21:23 那批）：result 3 / 4 **只走 1 步**就放弃 ——
-# navigate 之后页面还在「正在加载中请稍后......」，agent 看到的就是一个加载占位，
-# 于是宣布"无法访问目标页面"。它不是想放弃，是**从来没机会看到第二眼**：
-# 下一步要等模型返回，而模型看到的就是占位。
-#
-# 为什么不能靠提示词：agent 的判断没错——它看到的东西确实是个加载占位。
-# 要求它"多试几次"没有意义，它手里没有别的信息。**要给它时间**。
-#
-# 为什么不做成"让 agent 自己 wait"：那要消耗一个步数配额，而步数是硬预算
-# （120 步）。这里走代码层：导航后自动轮询 DOM，等到可交互元素出现为止，
-# 不消耗任何步数 —— 这也正好对应用户说的"多花点时间没关系，但是不要无效操作"。
-# ---------------------------------------------------------------------------
-
-# 页面级"还在加载"的判据。刻意只看**整页无交互元素 + 出现加载字样**：
-# 只匹配文案会误伤（有页面在正文里写"加载中"这种说明），
-# 只匹配 0 交互元素会误伤（空态页也是 0 交互）。
-# 必须是 raw string：这段 JS 要原样送进浏览器，\. 在 Python 里若不r 开头
-# 会先被当成无效转义序列（SyntaxWarning），送到浏览器时就成了裸的 "."，
-# 正则含义从"字面三个点"变成"任意字符"。
-_WAIT_READY_JS = r"""
-() => {
-  const txt = (document.body?.innerText || '').slice(0, 400);
-  const loading = /正在加载|加载中|loading\.\.\.|please wait/i.test(txt);
-  const interactive = document.querySelectorAll(
-    'a[href], button:not([disabled]), input:not([disabled]), select, textarea, ' +
-    '[role="button"], [role="tab"], [role="combobox"], [role="menuitem"], [contenteditable="true"]'
-  ).length;
-  return JSON.stringify({ loading, interactive });
-}
-"""
-
-# 轮询参数。首屏 SPA（Vue）实测 1-3 秒渲染完；给到 12 秒是给慢网络留余量，
-# 而单步上限是 45s（见上面的慢步骤告警），所以这个等待不会成为新的瓶颈。
-_WAIT_READY_TIMEOUT_S = 12.0
-_WAIT_READY_INTERVAL_S = 0.6
-
-
-async def _wait_until_ready(browser, timeout_s: float = _WAIT_READY_TIMEOUT_S) -> str:
-    """轮询直到页面出现可交互元素（或超时）。返回就绪状态描述，供日志核对。
-
-    刻意**不抛异常**：等不到就返回描述，让调用方继续走 —— agent 随后会自己看到
-    那个占位并给出结论，而那份结论此时是合法的（页面确实没加载出来）。
-    """
-    # ★`time.sleep()` 是**同步**的，返回 None，不能 await ——
-    # 我第一版写成 `await _time.sleep(...)`，结果每次导航都抛
-    # "TypeError: object NoneType can't be used in 'await' expression"，
-    # 整条用例直接崩（实测连挂 10 条）。异步版本是 `asyncio.sleep`。
-    # 这个错只在真的等不到就绪、走到 sleep 那一行时才暴露 —— 页面秒开时测不出来。
-    import asyncio as _aio
-    import json as _json
-    import time as _time
-
-    try:
-        cdp = await browser.get_or_create_cdp_session()
-    except Exception as exc:  # noqa: BLE001 — 拿不到 CDP 就别拖住用例
-        return f"skip(cdp:{type(exc).__name__})"
-
-    deadline = _time.monotonic() + timeout_s
-    last = "?"
-    while _time.monotonic() < deadline:
-        try:
-            res = await cdp.cdp_client.send.Runtime.evaluate(
-                params={"expression": _WAIT_READY_JS, "returnByValue": True},
-                session_id=cdp.session_id,
-            )
-            raw = (res or {}).get("result", {}).get("value")
-            if isinstance(raw, str):
-                d = _json.loads(raw)
-                if d.get("interactive", 0) > 0:
-                    return f"ready({d['interactive']})"
-                last = "loading" if d.get("loading") else "empty"
-        except Exception:  # noqa: BLE001 — 中途失败就再试一轮，不放弃
-            last = "err"
-        await _aio.sleep(_WAIT_READY_INTERVAL_S)
-    return f"timeout(last={last})"
-
-
-async def _install_sprite_pruner(browser) -> None:
-    """Install the icon-sprite pruner on every live page target.
-
-    Why this is re-run rather than registered once: browser-use 0.13.10 does not expose
-    a Playwright page here (`get_current_page()` returns its own CDP-backed `Page`, which
-    has no `add_init_script`), and a browser-level
-    `Page.addScriptToEvaluateOnNewDocument` is rejected with -32601 because `Page.*` is
-    not routable at the browser target. A session-scoped registration is dropped as soon
-    as the session is torn down — which happens on navigation. So the pruner is
-    (re)installed per target, and `_ensure_sprite_pruner` re-checks it every agent step.
-    """
-    if not _sprite_prune_enabled():
-        log.info("executor: 图标精灵裁剪已关闭（browser_prune_icon_sprite=false）")
-        return
-    # 2026-10-05：拿 target 的方式换了。
-    # `get_page_targets()` 在 `session_manager` 还没初始化时**永远返回 []**（见其源码
-    # 第一行 `if not self.session_manager: return []`）。browser-use 0.13 的 Browser 是
-    # 懒加载的，capture_session 这条路径上预装时必然命中这个分支 —— 实测等满 12s 仍然
-    # 报"找不到页面目标"，裁剪器整轮没装上。
-    #
-    # `get_or_create_cdp_session()` 不依赖 session_manager：它会自己建一个会话出来。
-    # 所以两条路都试：先拿页面列表（能拿到就按 target 逐个装，语义更清楚），
-    # 拿不到就直接用当前会话装 —— 后者才是让这条路径真正装上的那条路。
-    targets: list = []
-    try:
-        targets = browser.get_page_targets() or []
-    except Exception as exc:  # noqa: BLE001
-        log.warning("executor: ★ 取页面目标失败（改用当前会话安装）：%s", exc)
-    if not targets:
-        try:
-            cdp = await browser.get_or_create_cdp_session()
-        except Exception as exc:  # noqa: BLE001
-            _warn_prune_once(
-                "nosession",
-                "executor: ★ 拿不到 CDP 会话，图标精灵裁剪未安装 —— 本轮每步的 DOM 采集会慢 20s 以上：%s",
-                exc,
-            )
-            return
-        installed = await _install_prune_on_session(cdp)
-        if installed:
-            log.info("executor: 图标精灵裁剪已在当前 CDP 会话安装")
-        return
-
-    installed = 0
-    for tgt in targets:
-        tid = getattr(tgt, "target_id", None)
-        if not tid:
-            continue
-        try:
-            cdp = await browser.get_or_create_cdp_session(target_id=tid, focus=False)
-            if await _install_prune_on_session(cdp):
-                installed += 1
-                log.info("executor: 图标精灵裁剪已装到 target=%s", str(tid)[:12])
-        except Exception as exc:  # noqa: BLE001 — per-target, but must be loud
-            log.warning(
-                "executor: ★ 图标精灵裁剪装到 target=%s 失败：%s —— 本轮该页面每步可能慢 20s+",
-                str(tid)[:12], exc,
-            )
-    if installed:
-        log.info("executor: 图标精灵裁剪已在 %s 个页面上安装", installed)
-
-
-async def _install_prune_on_session(cdp) -> bool:
-    """在一个已经拿到的 CDP 会话上装裁剪器。成功返回 True，永不抛。
-
-    抽成独立函数的原因：浏览器刚建好时 `session_manager` 还没初始化，
-    `get_page_targets()` 恒返回空 —— 那时唯一能用的入口就是
-    `get_or_create_cdp_session()` 直接给的这个会话。两条路都要能装。
-    """
-    try:
-        # (a) 注册到该 target 的**未来每一个**文档。
-        #     这一步才是让裁剪器熬过导航的关键：agent 随后的跳转会重建文档，
-        #     只在当前文档里注入的话，一跳就没了。
-        try:
-            await cdp.cdp_client.send.Page.addScriptToEvaluateOnNewDocument(
-                params={"source": _sprite_prune_js()},
-                session_id=cdp.session_id,
-            )
-        except Exception as exc:  # noqa: BLE001 — 下面的即时执行仍然有用
-            _warn_prune_once(
-                "addscript", "executor: 图标精灵裁剪无法注册到新文档（导航后会失效）：%s", exc
-            )
-        # (b) 对**已经存在**的文档立刻跑一遍。
-        res = await cdp.cdp_client.send.Runtime.evaluate(
-            params={"expression": _sprite_prune_js(), "returnByValue": True},
-            session_id=cdp.session_id,
-        )
-        got = (res or {}).get("result", {}).get("value")
-        if isinstance(got, int) and got > 0:
-            log.info("executor: 图标精灵裁剪即时清掉 %s 个节点", got)
-        return True
-    except Exception as exc:  # noqa: BLE001
-        _warn_prune_once("onsession", "executor: ★ 图标精灵裁剪装到当前会话失败：%s", exc)
-        return False
-
-
-async def _ensure_sprite_pruner(browser) -> None:
-    """Per-step re-arm: run the prune pass on the active page, re-inject if it was lost.
-
-    Called from the agent's step callback. Two things can wipe the pruner between steps:
-    a navigation (new document → `window.__tpSpritePrune` gone) and a rebuilt sprite. The
-    expression below therefore re-injects the full script when the marker is missing and
-    otherwise just re-runs the pass (idempotent).
-
-    Never raises — but a failure is reported once at WARNING, because an unnoticed broken
-    pruner is indistinguishable from a slow page except by the 30 s DOM timeout it causes.
-    """
-    if not _sprite_prune_enabled():
-        return
-    try:
-        cdp = await browser.get_or_create_cdp_session()
-        res = await cdp.cdp_client.send.Runtime.evaluate(
-            params={
-                "expression": (
-                    # 返回带前缀的字符串，好区分"这次才补上"和"本来就在"。
-                    # 只有 dropped>0 才打日志的话，一次成功但当时页面里还没有精灵的
-                    # 补装会完全静默 —— 那就又回到"装没装上只能靠猜"的老问题。
-                    "(() => { const fresh = !window.__tpSpritePrune; "
-                    "if (fresh) { " + _sprite_prune_js() + " } "
-                    "try { return (fresh ? 'fresh:' : 're:') + window.__tpSpritePrune.run(); } "
-                    "catch (e) { return 'err:' + e; } })()"
-                ),
-                "returnByValue": True,
-            },
-            session_id=cdp.session_id,
-        )
-        got = (res or {}).get("result", {}).get("value")
-        if isinstance(got, str) and got.startswith("fresh:"):
-            # 补上了：这一步之前是裸的，说明上一步的 DOM 采集是慢的
-            log.info("executor: 图标精灵裁剪本步才补上（此前失效），清掉 %s", got[6:])
-        elif isinstance(got, str) and got.startswith("err:"):
-            _warn_prune_once("ensure_err", "executor: ★ 图标精灵裁剪每步执行报错：%s", got)
-        elif isinstance(got, str) and got.startswith("re:") and got != "re:0":
-            log.debug("executor: 图标精灵裁剪例行清理 %s 个节点", got[3:])
-    except Exception as exc:  # noqa: BLE001
-        _warn_prune_once(
-            "ensure", "executor: ★ 图标精灵裁剪每步补装失败：%s —— 后续每步可能慢 20s+", exc
-        )
-
 
 
 # ---------------------------------------------------------------------------
@@ -1313,7 +713,7 @@ async def _wait_for_profile_free(path: str, *, timeout_s: float = 30.0) -> list[
         await asyncio.sleep(0.25)
 
 
-async def _shutdown_browser(browser) -> None:
+async def _shutdown_browser(browser, *, close_process: bool = True) -> None:
     """Close Chromium so it FLUSHES the profile to disk, then drop the session.
 
     browser-use's own stop()/close() tear the CDP session down and terminate the process
@@ -1326,8 +726,22 @@ async def _shutdown_browser(browser) -> None:
     Verified end-to-end: a cookie set in process A is present in fresh process B on the
     same user_data_dir. Falls back to the plain stop() when there is no live session
     (e.g. the browser already died, which is also the case where there is nothing to flush).
+
+    ★`close_process=False` 是 attach 模式的**唯一正确取值**，别的地方不许传。
+    CDP 的 `Browser.close` 是"请这个浏览器退出进程"，跟"关掉这一个标签页"完全是两回事：
+    attach 上来的是**用户自己开着、已经登好内网系统**的那个窗口，一句 Browser.close
+    就把人家的窗口连同登录态一起端了。所以 attach 模式只做 `stop()` —— 它拆的是我们
+    自己的 CDP 连接（session.py 里 `keep_alive and not force` 直接 return），
+    浏览器进程和它的所有标签页都不受影响。
+    真正要收拾的东西只剩"agent 开的那个标签页"，由调用方按 tab 粒度关，见
+    `_close_agent_tab`。
     """
     if browser is None:
+        return
+    if not close_process:
+        # Detach only. No Browser.close, no kill, no process teardown of any kind.
+        log.info("executor: attach 模式 —— 只断开 CDP 连接，不关闭用户浏览器")
+        await _safe_async(lambda: browser.stop())
         return
     try:
         cdp = await asyncio.wait_for(browser.get_or_create_cdp_session(), timeout=10)
@@ -1432,6 +846,124 @@ async def _revive_pooled_browser(browser) -> bool:
     except Exception as exc:  # noqa: BLE001
         log.warning("executor: 复用浏览器复活失败：%s", exc)
         return False
+
+
+# ---------------------------------------------------------------------------
+# attach 模式：接管用户已经开好的浏览器（2026-10-07）
+#
+# 要解决的问题：内网 SPA 首屏挂「正在加载中请稍后......」30秒+ 是常态，
+# 13 个角色账号意味着大部分用例都要重新走一遍登录仪式（租户→用户名→密码→等SPA 起完），
+# 实测登录这一段就吃掉了整轮的大头 —— 而登录本身并不是这个被测系统有意思的地方。
+#
+# 有意思的是**浏览器已经知道的东西**：access token 在 localStorage、租户 id 也在
+# localStorage，都不用再输。一个**已经登录好**的浏览器自带全部这些。
+#
+# 所以：用户用 --remote-debugging-port=9222 起一次浏览器、自己登一次，整轮用例
+# attach 上去继承这个会话。纯函数侧的校验（只允许回环、不猜端口、配错就降级）在
+# app/cdp_endpoint.py；这里只负责"怎么建对象、怎么收手"。
+#
+# ★ 三条不可越界的线：
+#   1. 绝不启动浏览器（那是用户自己的窗口，不是我们的）；
+#   2. 绝不关闭浏览器进程 —— 只有 _shutdown_browser(close_process=False)；
+#   3. 只关**我们自己开的那一个**标签页，绝不碰用户已有的标签页。
+#      混进用户标签页去操作，等于替用户在人家的工作窗口里乱翻。
+# ---------------------------------------------------------------------------
+
+
+async def _make_attached_browser(endpoint: str, **overrides):
+    """建一个 attach 到既有浏览器的 Browser 对象（**不 start**，由调用方决定）。
+
+    browser-use 0.13.10 的 `Browser(cdp_url=...)` 走 `connect()` 而不是启动路径，
+    所以这里刻意**不传** executable_path / user_data_dir / headless / args ——
+    那些是"怎么启动"的参数，attach 模式下既无效又误导（读日志的人会以为我们在指定
+    用哪个浏览器，其实那个窗口早就在跑了）。
+
+    overrides 用于复用与用例会话无关、且不涉及进程/目录的调优项（DOM 高亮等）。
+    """
+    from browser_use import Browser
+
+    cdp_ws = await _resolve_cdp_ws(endpoint)
+    log.info(
+        "executor: attach %s（ws=%s）—— 沿用用户已登录的会话，不启动、不关闭浏览器",
+        endpoint,
+        _redact_ws(cdp_ws),
+    )
+    return Browser(cdp_url=cdp_ws, **overrides)
+
+
+async def _resolve_cdp_ws(endpoint: str, timeout_s: float = 8.0) -> str:
+    """把 host:port 换成真正的 ws:// 地址。
+
+    为什么要多这一步：Playwright 的 `connect_over_cdp` 和 browser-use 的 `connect()`
+    都接受 http://host:port —— 但 `connect()` 内部会再去 GET /json/version 解析出
+    webSocketDebuggerUrl（session.py:1860-1886），多一次往返且失败时报错信息很难读。
+    我们自己先解析，好处是**能在 attach 之前就判掉"端口上根本没有浏览器"**，
+    从而干净地走 browser_cdp_fallback，而不是在 browser-use 内部炸一个难懂的异常。
+
+    只读 /json/version，不写任何东西。
+    """
+    import json as _json
+
+    import httpx
+
+    url = f"http://{endpoint}/json/version"
+    # 关键：trust_env=False。不给的话宿主机注入的透明代理（本机实测
+    # HTTP_PROXY=http://127.0.0.1:<随机>）会把**回环**请求也劫走，
+    # 然后 attach 卡在一个跟浏览器毫无关系的代理错误上 —— 这正是我们跑内网时
+    # 反复踩的那类坑（见 make_browser 里 --no-proxy-server 的注释）。
+    async with httpx.AsyncClient(timeout=timeout_s, trust_env=False) as client:
+        r = await client.get(url)
+        r.raise_for_status()
+        data = _json.loads(r.text)
+    ws = data.get("webSocketDebuggerUrl")
+    if not ws or not str(ws).startswith("ws"):
+        raise RuntimeError(f"{endpoint} 的 /json/version 没有返回 webSocketDebuggerUrl")
+    return str(ws)
+
+
+def _redact_ws(ws: str) -> str:
+    """日志里的 ws 地址去掉随机段（不含任何凭据，但读起来更干净）。"""
+    parts = str(ws).split("/")
+    return "/".join(parts[:3] + ["…"]) if len(parts) > 3 else ws
+
+
+async def _open_agent_tab(browser) -> str | None:
+    """在 attach 的浏览器里新开一个标签页，返回它的 target id（关的时候要用）。
+
+    为什么要开新标签页而不是用当前页：用户自己的标签页可能是他正在看的东西
+    （内网系统的某个单据页、或者一个没提交的表单）。在上面直接跑用例 =
+    替用户改页面状态，万一用例中途崩了，他的东西就脏了。
+
+    所以规则很硬：**我们只碰自己开的那个标签页**。
+    """
+    try:
+        page = await browser.new_page("about:blank")
+        return getattr(page, "_target_id", None) or getattr(page, "target_id", None)
+    except Exception as exc:  # noqa: BLE001 — 开不了新页就退而用当前页，并说明
+        log.warning(
+            "executor: attach 模式下新建标签页失败（%s），将复用当前标签页 —— "
+            "该页可能会被本次用例导航走",
+            exc,
+        )
+        try:
+            cur = await browser.get_current_page()
+            return getattr(cur, "_target_id", None) or getattr(cur, "target_id", None)
+        except Exception as exc2:  # noqa: BLE001
+            log.warning("executor: 连当前标签页都取不到（%s）", exc2)
+            return None
+
+
+async def _close_agent_tab(browser, target_id: str | None) -> None:
+    """关掉我们自己开的那一个标签页。仅 attach 模式使用；关不掉就算了，不报错。"""
+    if not target_id:
+        return
+    try:
+        await browser._cdp_client_root.send.Target.closeTarget(  # noqa: SLF001
+            params={"targetId": target_id}
+        )
+        log.info("executor: 已关闭本次用例自己的标签页（%s），用户原有标签页未动", target_id)
+    except Exception as exc:  # noqa: BLE001
+        log.debug("executor: 关闭用例标签页失败（%s）：%s", target_id, exc)
 
 
 async def _acquire_browser(pool_key: str | None, factory, *, reuse: bool):
@@ -1589,6 +1121,49 @@ def effective_case_timeout(configured_s: int, max_steps: int, s=None) -> int:
     return base + extra
 
 
+def _timing_payload(stage: dict, t0: float, total: float, steps: int) -> dict:
+    """把执行器的阶段时间戳折成落库用的一份耗时分解（机器键，单位 ms）。
+
+    为什么抽成函数：这段算法以前只活在一行 WARNING 日志里，改它只能靠"跑一条真用例
+    然后读日志"。抽出来之后不带浏览器就能单测，也才有条件把同一份数字同时喂给日志和
+    数据库 —— 两边各算一遍迟早会漂移。
+
+    段与语义（顺序即时间顺序，互不重叠）：
+      browser_up  租约 + 拉起浏览器 + beacon 拦截 + 精灵裁剪 + 会话注入
+      agent       执行用例（agent.run 的墙钟，含全部步）
+      wrap_up     最终截图 + 优雅关浏览器（要落盘 profile，不能硬杀）
+      video       等 Playwright 异步 finalize 录像
+      judge       判定 + 失败叙述
+
+    缺段的兜底是"该段记 0"，不是"把它算到相邻段头上"：中间某段没打点时它记 0，
+    而所有没被任何阶段认领的时间都会落到最后一段（judge）里 —— 因为 judge 的定义就是
+    "video 之后到函数返回"，时间轴到这里已经走到头，没有下一段可以接。所以五段之和
+    恒等于 total_ms；要判断"有没有哪段没测到"，看该段是不是 0，而不是看总和对不对得上。
+    """
+    up = stage.get("browser_up", t0)
+    ag = stage.get("agent", up)
+    cl = stage.get("close", ag)
+    vi = stage.get("video", cl)
+    seg = {
+        "browser_up": up - t0,
+        "agent": ag - up,
+        "wrap_up": cl - ag,
+        "video": vi - cl,
+        "judge": total - (vi - t0),
+    }
+    steps_n = max(0, int(steps or 0))
+    return {
+        "browser_up_ms": int(seg["browser_up"] * 1000),
+        "agent_ms": int(seg["agent"] * 1000),
+        "wrap_up_ms": int(seg["wrap_up"] * 1000),
+        "video_ms": int(seg["video"] * 1000),
+        "judge_ms": int(seg["judge"] * 1000),
+        "total_ms": int(total * 1000),
+        "steps": steps_n,
+        "per_step_ms": int(seg["agent"] * 1000 / steps_n) if steps_n else 0,
+    }
+
+
 @dataclass(frozen=True)
 class CaseSpec:
     case_id: int
@@ -1651,6 +1226,15 @@ class ResultSpec:
     # AI-written bug description for failed cases: {steps, actual, expected, title, severity}
     failure_narrative: dict | None = None
     latency_ms: int = 0
+    # 2026-10-08 耗时分解，落库用（见 models.RunResult.timing）。
+    # 段名与顺序和日志里那条 case-timing 一致，只是换成机器键：
+    #   browser_up_ms 拉起浏览器（租约+启动+beacon拦截+精灵裁剪+会话注入）
+    #   agent_ms      执行用例（agent.run 的墙钟，含全部步）
+    #   wrap_up_ms    收尾（最终截图 + 优雅关浏览器以落盘 profile）
+    #   video_ms      等 Playwright 异步 finalize 录像
+    #   judge_ms      判定 + 失败叙述
+    # 另附 total_ms / steps / per_step_ms，让"慢在哪"一眼可见。
+    timing: dict = field(default_factory=dict)
     error: str | None = None
     auth_failed: bool = False  # restored session was dead (ended on a login page) → self-heal
     timed_out: bool = False  # hit the wall-clock cap → a re-attempt cannot change the outcome
@@ -1662,6 +1246,15 @@ class ResultSpec:
     root_cause: str = ""
     # 判定器引用了第几步作为依据（1-based）。空 = 它没说明依据，理由可信度要打折。
     verdict_evidence: list = field(default_factory=list)
+    # ★ 谁造成了这次失败（取值见 app/failure_attrib.py 的 classify）。
+    #
+    # 与上面 root_cause 的区别必须说清，否则会被当成重复字段删掉一个：
+    #   root_cause  是**判定器**给的分类，描述"用例为什么判失败"；
+    #   attribution 是**文本证据**算出的归因，描述"这次失败是谁的锅"。
+    # 实测两条假缺陷（列表读到渲染中间态、导入未提交审批）都能被 attribution 拦下，
+    # 而它们的 root_cause 看起来都像正常的"功能不符" —— 判定器看不到自己读早了。
+    # 空串 = 通过、或没跑归因（设置关掉了叙述时也会一起跳过）。
+    attribution: str = ""
 
 
 def _read_b64(path: str | None) -> str | None:
@@ -1729,7 +1322,7 @@ def _build_diagnostics(history) -> list[dict]:
     the action it took, the result/error, and the local screenshot path (uploaded later).
     Reads history.history directly so it works even when a run is cut short by timeout."""
     items = list(getattr(history, "history", None) or [])
-    paths = _safe(lambda: history.screenshot_paths()) or []
+    paths = safe(lambda: history.screenshot_paths()) or []
     steps: list[dict] = []
     for i, h in enumerate(items):
         mo = getattr(h, "model_output", None)
@@ -2214,9 +1807,23 @@ async def execute_case(spec: CaseSpec, on_step=None, should_abort=None) -> Resul
         _closed = [False]
         timeout_s = effective_case_timeout(spec.timeout_s or s.case_timeout_s, spec.max_steps or s.case_max_steps, s)
         max_steps = spec.max_steps or s.case_max_steps
-        # Workspace-scoped persistent profile: one shard per concurrency slot, leased for
-        # the whole case. Kept outside the try so the lease is released even on setup error.
-        use_profile = bool(spec.persistent_profile and s.persistent_profile and spec.project_id)
+        # ── attach 模式判定（2026-10-07）────────────────────────────────
+        # 配置里写了可用的调试端口 → 接管用户那个已登录的浏览器；否则走原来的
+        # "自启动 + 持久 profile"老路。normalize_endpoint 对配错的值返回 None
+        # 而不是抛异常，所以这一行永远不会因为一个 .env 笔误把整轮跑挂掉。
+        _attach_ep = cdp_endpoint.normalize_endpoint(safe(lambda: s.browser_cdp_endpoint))
+        if _attach_ep:
+            log.info("executor: %s", cdp_endpoint.describe(_attach_ep))
+        # attach 模式下 persistent profile / 复用池都不适用：
+        #  - profile 是"启动参数"，attach 的浏览器不归我们管，写了也无效；
+        #  - 复用池的 reset 步骤会关多余标签页 + 把当前页导航到 about:blank，
+        #    在用户自己的窗口上做这两件事是不可接受的（见 _reset_browser_for_reuse）。
+        use_profile = bool(
+            not _attach_ep
+            and spec.persistent_profile
+            and s.persistent_profile
+            and spec.project_id
+        )
         lease = (
             ProfileLease(spec.project_id, pick_profile_slot(spec.project_id, spec.concurrency))
             if use_profile
@@ -2335,43 +1942,107 @@ async def execute_case(spec: CaseSpec, on_step=None, should_abort=None) -> Resul
             _pool_key = lease.path if (lease is not None and s.browser_reuse) else None
             # 先给默认值：_acquire_browser 抛异常时下面的 finally 路径也要能安全引用它。
             reused = False
+            # attach 模式下我们自己开的那个标签页，用完要按 target 粒度关掉。
+            _agent_tab: str | None = None
 
-            try:
-                browser, reused = await _acquire_browser(
-                    _pool_key, make_browser, reuse=bool(_pool_key)
-                )
-                if reused:
-                    log.info("executor: 复用已有浏览器（%s），省掉一次冷启动", _pool_key)
-            except Exception as exc:
-                # The classic cause is another Chromium still holding the profile — which
-                # the lease check should have caught, but a browser can also be spawned by
-                # a session-capture path that does not take a lease. Clean up and try once
-                # more rather than burning the case: this used to be an instant 100%
-                # failure of the whole run with a message nobody could act on.
-                if lease is None:
-                    raise
-                log.warning("executor: 浏览器启动失败（%s），清理占用后重试一次", exc)
-                owners = await _wait_for_profile_free(lease.path, timeout_s=0.1)
-                if owners:
-                    await asyncio.to_thread(_kill_orphans, owners, lease.path)
-                    await _wait_for_profile_free(lease.path, timeout_s=10.0)
-                _clear_stale_singleton(lease.path)
-                # 重试时先确保池里没有半死的实例，否则会拿到上一次那个坏掉的浏览器。
-                if _pool_key:
-                    _BROWSER_POOL.pop(_pool_key, None)
+            if _attach_ep:
+                # ── attach 分支：接管用户已开好的浏览器 ────────────────
+                # 刻意不走 _acquire_browser：那条路会 start() 一次、再在结束时调
+                # _shutdown_browser —— 后者的 CDP Browser.close 会把**用户的整个窗口**
+                # 关掉。attach 分支自己接管生命周期，每一步都比复用池那条路更小心。
+                try:
+                    browser = await _make_attached_browser(
+                        _attach_ep,
+                        enable_default_extensions=False,
+                        highlight_elements=s.browser_highlight_elements,
+                    )
+                    await browser.start()
+                    _agent_tab = await _open_agent_tab(browser)
+                except Exception as exc:  # noqa: BLE001
+                    if not s.browser_cdp_fallback:
+                        res.error = (
+                            f"attach 到 { _attach_ep } 失败：{type(exc).__name__}: {exc}"[:400]
+                            + " —— 浏览器_cdp_fallback=false，不会自动回退。"
+                            "请确认该浏览器是用 --remote-debugging-port=启动的，"
+                            "且端口与设置一致。"
+                        )
+                        raise
+                    # 回退是默认行为：端口没开是最常见的误配置，
+                    # 静默降级到"自己拉一个"远好过整批用例全军覆没。
+                    log.warning(
+                        "executor: attach %s 失败（%s），已回退为自启动浏览器。"
+                        "若想用 attach，请确认浏览器是带 --remote-debugging-port= 启动的。",
+                        _attach_ep,
+                        exc,
+                    )
+                    _attach_ep = None
+                    browser = None
+                if browser is None:
+                    # 回退后 lease/pool_key 的取值必须重算 —— attach 时它们被刻意置空了
+                    # （见上面 use_profile 的判定），这里要回到正常的自启动路径。
+                    use_profile = bool(
+                        spec.persistent_profile and s.persistent_profile and spec.project_id
+                    )
+                    if use_profile and lease is None:
+                        lease = ProfileLease(
+                            spec.project_id, pick_profile_slot(spec.project_id, spec.concurrency)
+                        )
+                        await lease.__aenter__()
+                        warmed = any(
+                            os.path.exists(os.path.join(lease.path, *parts))
+                            for parts in (
+                                ("Default", "Cookies"),
+                                ("Default", "Network", "Cookies"),
+                            )
+                        )
+                    _pool_key = lease.path if (lease is not None and s.browser_reuse) else None
+                    browser, reused = await _acquire_browser(
+                        _pool_key, make_browser, reuse=bool(_pool_key)
+                    )
+
+            else:
                 try:
                     browser, reused = await _acquire_browser(
                         _pool_key, make_browser, reuse=bool(_pool_key)
                     )
-                except Exception as exc2:
-                    res.error = (
-                        f"浏览器启动失败：{type(exc2).__name__}: {exc2}"[:400]
-                        + " —— 通常是上一次运行异常结束后残留的浏览器进程仍占用配置目录。"
-                        "已在启动时自动清理；若持续出现，请在项目设置里执行一次"
-                        "『重置浏览器状态』，或确认没有手动打开的浏览器在用同一配置。"
-                    )
-                    raise
-            await _block_third_party_beacons(browser)
+                    if reused:
+                        log.info("executor: 复用已有浏览器（%s），省掉一次冷启动", _pool_key)
+                except Exception as exc:
+                    # The classic cause is another Chromium still holding the profile —
+                    # which the lease check should have caught, but a browser can also be
+                    # spawned by a session-capture path that does not take a lease. Clean up
+                    # and try once more rather than burning the case: this used to be an
+                    # instant 100% failure of the whole run with a message nobody could act on.
+                    if lease is None:
+                        raise
+                    log.warning("executor: 浏览器启动失败（%s），清理占用后重试一次", exc)
+                    owners = await _wait_for_profile_free(lease.path, timeout_s=0.1)
+                    if owners:
+                        await asyncio.to_thread(_kill_orphans, owners, lease.path)
+                        await _wait_for_profile_free(lease.path, timeout_s=10.0)
+                    _clear_stale_singleton(lease.path)
+                    # 重试时先确保池里没有半死的实例，否则会拿到上一次那个坏掉的浏览器。
+                    if _pool_key:
+                        _BROWSER_POOL.pop(_pool_key, None)
+                    try:
+                        browser, reused = await _acquire_browser(
+                            _pool_key, make_browser, reuse=bool(_pool_key)
+                        )
+                    except Exception as exc2:
+                        res.error = (
+                            f"浏览器启动失败：{type(exc2).__name__}: {exc2}"[:400]
+                            + " —— 通常是上一次运行异常结束后残留的浏览器进程仍占用配置目录。"
+                            "已在启动时自动清理；若持续出现，请在项目设置里执行一次"
+                            "『重置浏览器状态』，或确认没有手动打开的浏览器在用同一配置。"
+                        )
+                        raise
+            # 第三方 beacon 拦截：只对**自己拉起**的浏览器装。
+            #
+            # 这是 Fetch 域的网络拦截，是**浏览器级**设置 —— 装到用户自己的窗口上，
+            # 会连带把他正在正常浏览的页面也拦一遍。所以 attach 模式跳过它，
+            # 代价只是慢一点（内网 SPA 本身不埋百度统计，不存在被 beacon 卡住的问题）。
+            if not _attach_ep:
+                await _block_third_party_beacons(browser)
             # 2026-10-04 多角色：把活着的浏览器交给 switch_account 工具，
             # 让它在运行中能换身份。放在这里（agent 启动前）而不是注册时，
             # 因为注册发生在 _build_tools，那时还没有 browser。
@@ -2379,7 +2050,11 @@ async def execute_case(spec: CaseSpec, on_step=None, should_abort=None) -> Resul
             # The single biggest per-step speed lever (measured 20.7s → 0.8s of DOM
             # serialisation per step, see _SPRITE_PRUNE_JS). Installed before the agent
             # starts so even step 1 pays the low price.
-            await _install_sprite_pruner(browser)
+            #
+            # attach 模式跳过：裁剪器是往页面注入 JS 改DOM 的，等于在用户窗口里
+            # 改别人的页面。要开就在**自己拉起**的浏览器里开 —— 那才是它的作用域。
+            if not _attach_ep:
+                await _install_sprite_pruner(browser)
             # Seed the captured session bundle ONLY into a cold shard. A warm shard
             # already holds a live session and a newer app state; re-injecting the old
             # bundle would overwrite tokens the app itself has since rotated.
@@ -2515,7 +2190,7 @@ async def execute_case(spec: CaseSpec, on_step=None, should_abort=None) -> Resul
                         await on_step(list(live_steps))
                     if should_abort is not None and await should_abort():
                         res.error = "cancelled"
-                        _safe(lambda: agent.stop())
+                        safe(lambda: agent.stop())
                 except Exception as exc:  # noqa: BLE001
                     log.debug("executor: 第 %s 步回调上报失败：%s", step_no, exc)
 
@@ -2625,13 +2300,13 @@ async def execute_case(spec: CaseSpec, on_step=None, should_abort=None) -> Resul
         # history adds each step's result/error, which we merge in by index.
         history = getattr(agent, "history", None) if agent is not None else None
         if history is not None:
-            res.final_answer = _safe(lambda: history.final_result()) or ""
-            res.steps = _safe(lambda: history.action_names()) or []
+            res.final_answer = safe(lambda: history.final_result()) or ""
+            res.steps = safe(lambda: history.action_names()) or []
             # P3: we restored a session but the agent ended on a login page → session dead.
             # Signal the engine to invalidate + re-capture + retry once.
             if spec.login_state:
                 res.auth_failed = _last_url_is_login(history)
-            hist = _safe(lambda: _build_diagnostics(history)) or []
+            hist = safe(lambda: _build_diagnostics(history)) or []
             # Merge the browser's own result/error text into the live timeline BY STEP
             # NUMBER, never by list position.
             #
@@ -2656,7 +2331,7 @@ async def execute_case(spec: CaseSpec, on_step=None, should_abort=None) -> Resul
                         ls["detail"] = src.get("detail", "")
             res.diagnostics = live_steps or hist
             history_path = os.path.join(workdir, "history.json")
-            _safe(lambda: history.save_to_file(history_path))
+            safe(lambda: history.save_to_file(history_path))
         else:
             res.diagnostics = live_steps
 
@@ -2724,7 +2399,21 @@ async def execute_case(spec: CaseSpec, on_step=None, should_abort=None) -> Resul
         # 另外 keep_alive 拦不住这里：_shutdown_browser 里的 CDP Browser.close 是
         # 绕过 keep_alive 直接关 Chromium 的。
         # 非复用模式（没有 pool key）保持原样：优雅关闭，让 persistent profile 落盘。
-        if browser is not None and not _closed[0] and not _pool_key:
+        # ★ attach 模式的关闭路径与上面**完全相反**，不要合并。
+        #
+        # 这里的判据必须同时排除 attach：attach 时 `_pool_key` 恒为 None（复用池被
+        # 刻意禁用），于是条件 `not _pool_key` 成立 → 会调 `_shutdown_browser` →
+        # 发 CDP `Browser.close` → **用户那个已登录的窗口被整个关掉**。
+        # 这正是 _shutdown_browser 新增 close_process 参数要挡的事。
+        if _attach_ep:
+            # 顺序有讲究：先关我们自己的标签页，再断 CDP。
+            # 反过来先断连接就找不到 target 了，那个标签页会永久留在用户窗口里。
+            await _close_agent_tab(browser, _agent_tab)
+            await _shutdown_browser(browser, close_process=False)
+            _closed[0] = True
+            _ACTIVE_BROWSER.pop("browser", None)
+            _stage["close"] = time.monotonic()
+        elif browser is not None and not _closed[0] and not _pool_key:
             await _shutdown_browser(browser)
             _closed[0] = True
         # 多角色：浏览器生命周期结束，别让 _ACTIVE_BROWSER 攥着一个已关的对象。
@@ -2732,7 +2421,8 @@ async def execute_case(spec: CaseSpec, on_step=None, should_abort=None) -> Resul
         # 而下一个用例启动时会重新赋值。
         if _closed[0]:
             _ACTIVE_BROWSER.pop("browser", None)
-        _stage["close"] = time.monotonic()
+        if "close" not in _stage:
+            _stage["close"] = time.monotonic()
 
         # collect + upload artifacts (best-effort; missing artifacts don't fail the case).
         # AFTER the shutdown: the video file is only finalized when the browser closes, and
@@ -2849,6 +2539,35 @@ async def execute_case(spec: CaseSpec, on_step=None, should_abort=None) -> Resul
     # Skipped for passed cases — there is no defect to describe.
     if res.status in ("failed", "error"):
         try:
+            # 截图版面事实：只看"这一帧画了些什么"，不看它写了什么字。
+            #
+            # 存在的理由是它能把两种都表现为"查不到"的世界分开：文字快照漏掉了
+            # 已渲染的表格 vs 页面确实空。前者报出来的是假缺陷，代价是开发
+            # 半天时间。所以这里把结论喂进归因的证据里，让 classifier 一并权衡。
+            _shot_facts = shot_probe.analyse(final_shot)
+            log.info("executor: %s", shot_probe.describe(_shot_facts))
+            _shot_evidence = shot_probe.evidence_line(
+                "\n".join(evidence), _shot_facts
+            )
+            if _shot_evidence:
+                evidence = [*evidence, _shot_evidence]
+
+            # 归因先算，写叙述时才知道该怎么写 —— 而且它决定这条到底能不能算缺陷。
+            #
+            # 放在这里而不是 judge 之后，是因为归因只需要文本证据（步骤观察 + 动作
+            # 日志 + agent 自述 + 截图佐证），不依赖判定结论；而把它算在叙述之后，
+            # 就来不及用它约束措辞了。实测两次假缺陷（列表读到中间态、导入未提交
+            # 审批）都是被这一步拦下来的。
+            _attribution = failure_attrib.classify(
+                "\n".join(evidence),
+                action_text="\n".join(narrative_actions),
+                final_answer=res.final_answer or "",
+            )
+            res.attribution = _attribution
+            log.info(
+                "executor: 失败归因 %s",
+                failure_attrib.describe(_attribution),
+            )
             nar = await describe_failure(
                 case_name=spec.name or f"case{spec.case_id}",
                 task=spec.prompt,
@@ -2858,6 +2577,8 @@ async def execute_case(spec: CaseSpec, on_step=None, should_abort=None) -> Resul
                 evidence=evidence,
                 judge_reason=res.judge_reason or res.error or "",
                 screenshot_b64=final_shot,
+                attribution=_attribution,
+                shot_hint=shot_probe.screenshot_hint(_shot_facts),
             )
             if not nar.is_empty():
                 res.failure_narrative = nar.as_dict()
@@ -2877,13 +2598,15 @@ async def execute_case(spec: CaseSpec, on_step=None, should_abort=None) -> Resul
     #   判定/描述  = 之后到函数返回（judge 每个用例一次；失败用例再加一次描述）
     try:
         total = time.monotonic() - t0
+        payload = _timing_payload(_stage, t0, total, len(res.diagnostics or []))
+        res.timing = payload
+        # 日志与落库共用同一份数字，避免两处各算一遍后悄悄漂移。
         seg = {
-            "启动浏览器": _stage.get("browser_up", t0) - t0,
-            "执行用例": _stage.get("agent", _stage.get("browser_up", t0))
-            - _stage.get("browser_up", t0),
-            "收尾": _stage.get("close", _stage.get("agent", t0)) - _stage.get("agent", t0),
-            "等视频": _stage.get("video", _stage.get("close", t0)) - _stage.get("close", t0),
-            "判定描述": total - (_stage.get("video", t0) - t0),
+            "启动浏览器": payload["browser_up_ms"] / 1000,
+            "执行用例": payload["agent_ms"] / 1000,
+            "收尾": payload["wrap_up_ms"] / 1000,
+            "等视频": payload["video_ms"] / 1000,
+            "判定描述": payload["judge_ms"] / 1000,
         }
         parts = " | ".join(f"{k} {v:.1f}s" for k, v in seg.items())
         fixed = seg["启动浏览器"] + seg["收尾"] + seg["等视频"]
@@ -3245,11 +2968,6 @@ async def _restore_session(browser, bundle_json: str) -> None:
         await browser._cdp_add_init_script(seed)  # noqa: SLF001 — private, pinned to browser-use 0.13.x
 
 
-def _safe(fn):
-    try:
-        return fn()
-    except Exception:
-        return None
 
 
 async def _safe_async(fn):

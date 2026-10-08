@@ -4,11 +4,17 @@ decide pass / fail. Errs toward 'failed' when evidence is thin (design doc §5.4
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 from typing import Any
 
 from app.config import get_settings
 from app.llm import llm_config, openai_client
+
+# 2026-10-08 补：下面"无依据的通过 → 翻案"那条分支在用它，但此前**从未定义** ——
+# 也就是说 gate 一旦真的拦下一条假通过，这里就抛 NameError，翻案逻辑从来没生效过。
+# 是 ruff 的 F821（未定义名字）把它翻出来的，不是覆盖率。
+log = logging.getLogger("potato-test.judge")
 
 _SYSTEM = (
     "You are a strict QA judge for an automated browser test. "

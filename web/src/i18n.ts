@@ -171,6 +171,15 @@ const zh: Record<string, string> = {
     "将运行 {{n}} 条用例。取个名字，方便以后区分。",
   "Start run": "开始运行",
   "Starting…": "正在启动…",
+  // 失败重试（2026-10-08）：per-run 覆盖全局 CASE_RETRIES
+  "Retries on failure": "失败后重试",
+  "Follow the global setting": "跟随全局设置",
+  "No retry": "不重试",
+  "Retry once": "重试 1 次",
+  "Retry twice": "重试 2 次",
+  "Retry three times": "重试 3 次",
+  "A retry only reruns failures a retry can actually fix (infra errors, steps that never ran). A real defect is never re-run, so it cannot be laundered into a flaky pass.":
+    "重试只对「重试能救回来」的失败生效（环境类错误、一步都没跑完）。真实缺陷不会被重跑，避免把缺陷洗成偶发通过。",
   "Expected outcome (for the judge)": "预期结果（用于自动判定）",
   "Import Excel": "导入 Excel",
   "Export Excel": "导出 Excel",
@@ -846,6 +855,16 @@ const zh: Record<string, string> = {
     "当预期结果里写死了条数（比如「1 行」）时填：应用里的数据会被其他用例改动，这段提示让 agent 不要把残留数据当成缺陷。留空 = 不注入。",
   "Leave empty unless the expected result mentions a specific number of rows":
     "除非预期结果里写死了具体行数，否则留空",
+  // 2026-10-08 补齐：以下 4 条在代码里被 t() 使用，但 zh 表里没有登记。
+  // 它们本身就是中文，所以界面显示一直是对的（fallback 返回 key 本身）—— 登记它们
+  // 不是为了修显示，而是为了**让"还有没有漏网的"这件事可被机械验证**：
+  // 只要 zh 表覆盖了全部 t() 字面量，就能写一条断言把"新增文案忘了登记"挡住。
+  // 这四个值刻意等于键：它们没有英文源串，将来要出英文版就得在这里补翻译。
+  "…": "…",
+  "这个项目有多少条用例？": "这个项目有多少条用例？",
+  "最近一次运行通过率多少？有哪些失败？": "最近一次运行通过率多少？有哪些失败？",
+  "当前编辑框只载入了前 20 万字符的预览。若直接保存，超出的部分会被删除。确定要保存吗？":
+    "当前编辑框只载入了前 20 万字符的预览。若直接保存，超出的部分会被删除。确定要保存吗？",
 };
 
 export const LANG_KEY = "tp_lang";

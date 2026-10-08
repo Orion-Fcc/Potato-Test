@@ -141,7 +141,6 @@ async def note_for_case(case_id: int, timeout_s: float = 10.0) -> str:
     if not case_id:
         return ""
     try:
-        from sqlalchemy import select
 
         from app.db import db_session
         from app.models import TestCase

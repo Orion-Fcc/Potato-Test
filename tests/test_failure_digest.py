@@ -15,8 +15,6 @@
 
 from __future__ import annotations
 
-import json
-import sqlite3
 from pathlib import Path
 
 import pytest
@@ -98,8 +96,6 @@ def test_cause_conflict_is_exposed():
     实测 case 4失败 4 次：前 3 次是 agent 没走完，第 4 次被分类成真缺陷。
     这种情况下按多数决猜一个动作会把真缺陷当成重跑处理掉。
     """
-    a = _row(id=1, case_id=1, root_cause="agent_incomplete")
-    b = _row(id=1, case_id=1, root_cause="product_defect")  # 同一用例不同次
     # 构造同一信号下的冲突：手动给两行相同 judge 但不同 cause
     rows = [
         _row(id=1, case_id=1, root_cause="product_defect", judge_reason="X"),

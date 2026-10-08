@@ -367,7 +367,7 @@ def test_safe_batching_never_clicks_twice() -> None:
     点击弹出弹窗时两者都不变、检测不到 → 后续动作会落在挪位后的元素上。
     所以截断必须由代码保证，不能指望模型每次都听话。
     """
-    from app.executor import _SAFE_TO_BATCH, _action_name, _truncate_for_safety
+    from app.browser_hygiene import _SAFE_TO_BATCH, _action_name, _truncate_for_safety
 
     cases = [
         # (输入, 期望输出, 是否发生截断)

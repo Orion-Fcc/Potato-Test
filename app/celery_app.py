@@ -52,6 +52,14 @@ celery.conf.update(
             "task": "app.celery_app.reconcile_runs",
             "schedule": 60.0,  # a run whose worker died must not hang forever
         },
+        # 2026-10-08 套件到期自动执行。此前只有一个"发提醒"的任务（下面那条），
+        # 到期套件仍需人工点一次；cadence 记下来就该自己跑。
+        # 与进程内扫描器互斥由 suite_schedule.sweep_forever 负责（配了 Redis 时
+        # 进程内那条不启动），即使两边都跑，due_at 的 CAS 也保证至多执行一次。
+        "sweep-due-suites": {
+            "task": "app.celery_app.sweep_due_suites",
+            "schedule": 300.0,  # cadence 是天粒度；这个间隔只决定"最多晚多久开跑"
+        },
     },
 )
 
@@ -95,6 +103,19 @@ def reconcile_runs() -> list[int]:
     from app.engine import reconcile_stale_runs
 
     return asyncio.run(reconcile_stale_runs())
+
+
+@celery.task(name="app.celery_app.sweep_due_suites")
+def sweep_due_suites() -> list[int]:
+    """Create + launch a run for every suite whose cadence is due.
+
+    Beat-side counterpart of the in-process sweeper (app/suite_schedule.py). Both funnel
+    into the same ``sweep_due_suites`` function, so "manual suite run" and "scheduled suite
+    run" cannot drift apart, and the due_at compare-and-swap makes double-firing a no-op.
+    """
+    from app.suite_schedule import sweep_due_suites as _sweep
+
+    return asyncio.run(_sweep())
 
 
 @celery.task(

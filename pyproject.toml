@@ -52,7 +52,7 @@ gitlab = ["celery>=5.3", "redis>=5.0"]
 s3 = ["boto3>=1.34"]
 postgres = ["asyncpg>=0.29"]
 migrate = ["alembic>=1.13"]
-dev = ["pytest>=8", "pytest-asyncio>=0.23", "ruff==0.9.0"]
+dev = ["pytest>=8", "pytest-asyncio>=0.23", "pytest-cov>=5", "mypy>=1.11", "ruff==0.9.0"]
 
 [tool.ruff]
 line-length = 100
@@ -68,3 +68,50 @@ ignore = ["BLE001", "E712"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 markers = ["unit: fast pure-logic tests (no browser/network/db)"]
+
+# ---------------------------------------------------------------------------
+# 覆盖率（2026-10-08 加）
+# 862 个测试听起来很足，但没人知道它们**盖住了哪**。首次实测：app/ 共 9044 条语句，
+# 覆盖 53%。最大的两个文件恰恰是最低的 —— api.py 28%（1514 条语句）、
+# executor.py 45%（1258 条）—— 也就是说风险最高的地方恰好是测试最少的地方。
+# 这个配置的作用是让这个数字可见，并且**只能往上不能往下**。
+# ---------------------------------------------------------------------------
+[tool.coverage.run]
+source = ["app"]
+omit = [
+    # 本地一次性诊断/基准脚本（bench_browsers / check_* / dump_struct /
+    # make_desktop_shortcut）。它们是操作者手动跑的工具，不是产品代码；
+    # 算进覆盖率只会把分母撑大、把数字压低，掩盖真正该关注的文件。
+    "app/_*.py",
+    # 只在配了 Redis 的部署里运行（本机 CI 不装 celery/redis，import 都会失败）。
+    "app/celery_app.py",
+]
+
+[tool.coverage.report]
+skip_covered = true
+show_missing = true
+# 门槛定在略低于实测值（omit 之后约 55%）。它要拦的是"覆盖率往下掉"，
+# 不是逼着一次补齐 45% —— 那种目标只会催生凑数测试。
+# 补完一块就往上抬一点，别一次抬到位。
+fail_under = 52
+
+# ---------------------------------------------------------------------------
+# 类型检查（2026-10-08 加）
+# 刻意从**宽松**开始，理由：这个代码库大量使用 duck-typing 的替身（测试里的
+# _Run/_Settings 一类）和 SQLAlchemy 的动态列访问，上来就 strict 会产出几百条
+# 与真实缺陷无关的告警，然后所有人学会忽略 mypy —— 那比没有更糟。
+# 现在的目标只有一个：**新代码不再引入明显类型错误**，存量逐步收。
+# ---------------------------------------------------------------------------
+[tool.mypy]
+python_version = "3.11"
+files = ["app"]
+ignore_missing_imports = true
+# 不因为存量问题阻塞：先把 mypy 跑起来看清单，再决定哪些开成 error。
+warn_unused_ignores = false
+warn_redundant_casts = false
+no_implicit_optional = true
+# 这几个文件是纯函数 + 类型标注已经写得比较满的，单独开更严的检查收益最高。
+# 之所以不全局开：SQLAlchemy 的 Mapped[]/relationship 在这个版本下仍会误报。
+[[tool.mypy.overrides]]
+module = ["app.page_gate", "app.spec_drift", "app.failure_attrib", "app.suite_schedule", "app.cdp_endpoint"]
+disallow_untyped_defs = true

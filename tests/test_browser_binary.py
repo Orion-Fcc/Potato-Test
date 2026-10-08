@@ -15,6 +15,36 @@ import pytest
 from app import browser_binary as bb
 
 
+def test_the_omitted_argument_default_agrees_with_the_configured_default():
+    """The function's own default and the project's configured default must match.
+
+    Found by a verification script that called ``resolve_browser_executable()`` with no
+    candidates argument, got Edge, and concluded the Chrome switch hadn't taken effect —
+    when the switch was fine and the *caller* was wrong. Nothing in the code objected,
+    because a function that resolves a browser has no way to know the project picked a
+    different one.
+
+    This is the generalisable version: a default duplicating a value configured elsewhere
+    will drift, and it drifts silently since each copy looks right on its own. Asserting
+    the two agree turns that silent drift into a red test.
+    """
+    import inspect
+
+    from app.config import Settings
+
+    sig = inspect.signature(bb.resolve_browser_executable)
+    default = sig.parameters["candidates"].default
+    configured = Settings.model_fields["browser_candidates"].default
+
+    assert default == configured, (
+        f"browser_binary 的默认候选是 {default!r}，"
+        f"而 config.browser_candidates 是 {configured!r} —— "
+        "不传参数的调用方会拿到另一个浏览器，且不会报错"
+    )
+    # And the order must be identical, not just the set: a probe order is a preference.
+    assert bb.candidate_names(default) == bb.candidate_names(configured)
+
+
 def test_bundled_is_never_probed_on_disk():
     """"bundled" is a sentinel, not a path. A folder called `bundled` must not win."""
     assert bb.resolve_browser_executable("bundled", "edge,chrome") is None
@@ -102,8 +132,41 @@ def test_windows_table_matches_reality():
 
 
 def test_describe_is_readable_both_ways():
-    assert "msedge.exe" in bb.describe(r"C:\p\msedge.exe")
+    assert "Edge" in bb.describe(r"C:\p\msedge.exe")
     assert "Chromium" in bb.describe(None)
+
+
+def test_describe_names_the_browser_not_just_the_filename():
+    """`msedge.exe` in a log tells the reader nothing they don't already know.
+
+    The log is what someone reads when a run misbehaves, so it should say which browser
+    it was in language a person uses ("Edge"), not the file name.
+    """
+    assert "Edge 正式版" in bb.describe(r"C:\p\msedge.exe")
+    assert "Chrome 正式版" in bb.describe(r"C:\p\chrome.exe")
+    assert "Brave" in bb.describe(r"C:\p\brave.exe")
+
+
+def test_describe_does_not_claim_isolation_it_cannot_know():
+    """It must not say "独立实例" for a system binary.
+
+    `describe` receives a path and nothing about profiles, so it cannot tell whether the
+    run will share the daily browser's profile — which is exactly the situation that
+    produced "我这边登录了，同一个电脑里面另一边就会出现故障". Claiming isolation it has
+    not verified would be the most reassuring possible lie.
+    """
+    out = bb.describe(r"C:\p\chrome.exe")
+    assert "不共用" in out          # states the arrangement it can see
+    assert "独立实例" not in out     # does not assert isolation it cannot check
+
+
+def test_describe_keeps_the_playwright_chromium_distinct():
+    """Two Chromium flavours both exist on this machine; conflating them loses the
+    distinction that the benchmark turned on (8.35s vs 5.74s intranet first paint)."""
+    pw = bb._playwright_chromium()
+    if not pw:
+        return  # not installed here; nothing to distinguish
+    assert "Playwright 自带" in bb.describe(pw)
 
 
 def test_module_does_not_import_app_package():
@@ -182,7 +245,6 @@ def test_executor_omits_key_when_no_system_browser(monkeypatch):
     """
     import browser_use  # noqa: PLC0415
 
-    from app import executor as ex  # noqa: PLC0415
 
     monkeypatch.setattr(bb, "resolve_browser_executable", lambda configured="", candidates="": None)
 

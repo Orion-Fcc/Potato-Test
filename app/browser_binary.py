@@ -234,7 +234,7 @@ def describe(found: str | None) -> str:
         return "Chromium（内置）"
     if _playwright_chromium() == found:
         return "Chromium（Playwright 自带，独立 profile）"
-    name = os.path.basename(found)
+    name = os.path.basename(found.replace("\\", "/"))
     label = {
         "chrome.exe": "Chrome 正式版",
         "msedge.exe": "Edge 正式版",

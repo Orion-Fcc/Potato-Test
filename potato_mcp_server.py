@@ -305,43 +305,79 @@ def update_case(
     return jstr(call("PUT", f"/api/testcases/{case_id}", body=body, extra_headers=_AUDIT_HEADERS))
 
 
+# 危险删除的确认词：真删前必须原样带回，缺一不删（比 dry_run 更保守的第二道闸门）。
+_DELETE_CONFIRM = "确认删除"
+
+
+def _preview_deletion(case_id: int, project_id: int | None) -> dict:
+    """组装「删 case_id 会清掉什么」的只读预览。绝不碰写接口。
+
+    给 project_id 就顺带带出用例名/编号，预览更好认。用例不存在时回 case_exists=False，
+    多半是 case_id 拿错 —— 让调用方在真删前就能发现。"""
+    preview: dict = {"case_id": case_id}
+    try:
+        results = call("GET", f"/api/testcases/{case_id}/results")
+        preview["case_exists"] = True
+        preview["history_results_will_be_deleted"] = (
+            len(results) if isinstance(results, list) else 0
+        )
+    except RuntimeError as e:
+        preview["case_exists"] = False
+        preview["note"] = f"未找到该用例或其历史结果：{e}"
+        return preview
+    if project_id is not None:
+        for c in call("GET", f"/api/projects/{project_id}/testcases"):
+            if c.get("id") == case_id:
+                preview.update(
+                    {k: c.get(k) for k in ("name", "case_key", "module", "priority", "enabled")}
+                )
+                break
+    return preview
+
+
 @server.tool()
-def delete_case(case_id: int, project_id: int | None = None, dry_run: bool = False) -> str:
+def delete_case(
+    case_id: int,
+    project_id: int | None = None,
+    dry_run: bool = False,
+    confirm_delete: str = "",
+) -> str:
     """删一条用例，并级联清掉它的全部历史结果（run_result）。删了没挽回余地。
 
-    强烈建议两步走：
-    1. 先 dry_run=True（可选带 project_id 让预览带出用例名/编号）——**不删任何东西**，
-       只回「这条用例是什么 + 会连带清掉多少条历史结果」，供你确认 case_id 没拿错。
-    2. 确认无误再 dry_run=False 真删。
+    两道闸，都比「直接调」保守：
+    1. dry_run=True（可选带 project_id）：只回「这条用例是什么 + 会连带清掉多少条历史
+       结果」，**不删任何东西**。
+    2. confirm_delete：真删（dry_run=False）时**必须**原样传 confirm_delete="确认删除"，
+       否则会**拒绝删除**、只回预览 —— 强制调用方先看过预览再动手。
 
-    不新增后端端点：预览用现有只读接口组合（/testcases/{cid}/results 数历史结果，
+    推荐流程：先 dry_run=True 看预览 → 确认 case_id 没错、该删的确实要删 → 再调一次
+    dry_run=False + confirm_delete="确认删除" 真删。
+
+    不新增后端端点：预览全靠现有只读接口组合（/testcases/{cid}/results 数历史结果，
     /projects/{pid}/testcases 取用例名）。真删走 DELETE /testcases/{cid}（后端已做
     404/权限校验 + 级联）。"""
+    # 预览分支：永远只读。
     if dry_run:
-        preview: dict = {"dry_run": True, "case_id": case_id}
-        # 先探这条用例有没有历史结果；端点 404/异常 → 多半是 case_id 拿错或不存在。
-        try:
-            results = call("GET", f"/api/testcases/{case_id}/results")
-            preview["case_exists"] = True
-            preview["history_results_will_be_deleted"] = (
-                len(results) if isinstance(results, list) else 0
-            )
-        except RuntimeError as e:
-            preview["case_exists"] = False
-            preview["note"] = f"未找到该用例或其历史结果：{e}"
-            return jstr(preview)
-        # 给了项目就顺手把这条用例本身的信息带出来（name/case_key/…），预览更好认。
-        if project_id is not None:
-            for c in call("GET", f"/api/projects/{project_id}/testcases"):
-                if c.get("id") == case_id:
-                    preview.update(
-                        {k: c.get(k) for k in ("name", "case_key", "module", "priority", "enabled")}
-                    )
-                    break
-        preview["hint"] = (
-            "以上为将被删除/级联清掉的内容。确认 case_id 无误后，再调一次 dry_run=False 真删。"
-        )
+        preview = _preview_deletion(case_id, project_id)
+        preview["dry_run"] = True
+        preview["hint"] = "以上为将被删除/级联清掉的内容。确认无误后，再调 dry_run=False 真删。"
         return jstr(preview)
+
+    # 真删分支：没带确认词 → 拒绝动手，退回预览（这是比 dry_run 更保守的硬闸门）。
+    if _DELETE_CONFIRM not in (confirm_delete or ""):
+        refused = _preview_deletion(case_id, project_id)
+        refused.update(
+            {
+                "dry_run": False,
+                "deleted": False,
+                "reason": (
+                    "未带确认词，未删除。这是危险操作（级联清历史结果，不可逆），"
+                    f"请先确认要删的确实是 case#{case_id}，再传 confirm_delete=\"{_DELETE_CONFIRM}\" 重调。"
+                ),
+            }
+        )
+        return jstr(refused)
+
     return jstr(call("DELETE", f"/api/testcases/{case_id}", extra_headers=_AUDIT_HEADERS))
 
 

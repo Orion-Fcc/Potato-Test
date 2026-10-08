@@ -39,8 +39,25 @@ jobs:
         run: python -m mypy
       # 覆盖率门槛由 pyproject 的 [tool.coverage.report] fail_under 控制。
       # 它的作用是"只能往上不能往下"——首次实测 53%，计入 omit 后约 55%。
+      #
+      # set -o pipefail 不能省：不加的话整条的退出码是 tee 的 0，测试失败也会被吞成通过。
       - name: Unit tests + coverage
-        run: python -m pytest tests/ -q --cov=app
+        run: |
+          set -o pipefail
+          python -m pytest tests/ -q --cov=app 2>&1 | tee "$RUNNER_TEMP/pytest.log"
+      # 失败时把 pytest 的尾部写进 Job Summary。
+      # 为什么需要这一步：Actions 的原始日志在网页端是 JS 渲染的，自动化（含我）读不到，
+      # 而 annotation 里往往只剩一句 "Process completed with exit code 1"。第一次接 CI
+      # 就因为这个瞎猜了两轮（先后怀疑 mypy 版本、覆盖率门槛，实际是空库导致的 sqlite 报错）。
+      - name: Surface the pytest failure
+        if: failure()
+        run: |
+          {
+            echo "## pytest 失败摘要"
+            echo '```'
+            tail -80 "$RUNNER_TEMP/pytest.log"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
   web:
     runs-on: ubuntu-latest

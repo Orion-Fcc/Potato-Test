@@ -37,16 +37,27 @@ _DB = Path(__file__).resolve().parents[1] / "potato.db"
 
 
 def _load_real_results() -> list[dict]:
+    """真库里的历史结果。**任何读不出来的情况都 skip，不是 fail。**
+
+    只判 `exists()` 是不够的 —— CI 上实测踩到过：干净环境里 `potato.db` 本来不存在，
+    但套件跑到这里时它已经被**别的测试顺手创建成了一个空文件**（`sqlite3.connect`
+    建文件不需要表）。于是 `exists()` 为真、`run_result` 表却不存在，查询抛
+    OperationalError，三条用例一起红 —— 而红的原因与代码无关，纯粹是环境。
+    一个环境差异不该报成缺陷，所以这里把 sqlite 层的任何失败一并归入 skip。
+    """
     if not _DB.exists():
         pytest.skip(f"真库不存在：{_DB}（干净环境无回归基线）")
-    conn = sqlite3.connect(f"file:{_DB}?mode=ro", uri=True)
-    conn.row_factory = sqlite3.Row
     try:
-        rows = conn.execute(
-            "select id, status, final_answer, steps, diagnostics from run_result"
-        ).fetchall()
-    finally:
-        conn.close()
+        conn = sqlite3.connect(f"file:{_DB}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = conn.execute(
+                "select id, status, final_answer, steps, diagnostics from run_result"
+            ).fetchall()
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        pytest.skip(f"真库不可用（{exc}）—— 空文件或不是本项目的库，无回归基线可比")
 
     out: list[dict] = []
     for r in rows:

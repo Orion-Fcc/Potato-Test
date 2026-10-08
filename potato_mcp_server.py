@@ -406,6 +406,171 @@ def revert_result_override(result_id: int) -> str:
     return jstr(call("PATCH", f"/api/results/{result_id}", body={"clear": True}, extra_headers=_AUDIT_HEADERS))
 
 
+# ── 第 5 组：账号凭证 / 项目配置 / 批量导入（2026-10-08 补齐）────────
+# 此前 agent 只能走裸 HTTP 干这三件事；补齐后全部进 MCP，写操作带审计头。
+# 铁律：密码只进（secret 参数），读接口回的是脱敏结构（含 healthy/last_error，不含明文）。
+
+
+@server.tool()
+def list_credentials(project_id: int) -> str:
+    """列项目已配置的登录账号（password / storage_state，含角色、健康状态、最近报错）。
+
+    回显不含密码明文（secret 服务端加密、API 永不返回）。
+    看某账号是否 healthy 用这里；手动复测账号用 recheck_credential。"""
+    return jstr(call("GET", f"/api/projects/{project_id}/credentials"))
+
+
+@server.tool()
+def create_credential(
+    project_id: int,
+    username: str,
+    password: str,
+    role: str | None = None,
+    label: str = "",
+    credential_id: int | None = None,
+) -> str:
+    """新增一条密码账号（password 凭证，服务端加密存储）；传 credential_id 则改为更新既有账号。
+
+    username/password 是**被测系统**的测试账号（如 cwpxzxzl），不是 Potato 平台账号。
+    role 对应用例 Role 列里的角色名，多账号项目的角色必须与项目 roles 列表一致，
+    否则执行时报「角色没有可用账号」。password 只在本次请求里传输，不存明文、不回显。
+    传 credential_id + 新 password = 密码轮换（不会丢 role/会话缓存）。"""
+    if credential_id is not None:
+        body: dict = {"label": label or None, "username": username or None}
+        if password:
+            body["secret"] = password
+        if role is not None:
+            body["role"] = role
+        return jstr(call(
+            "PATCH", f"/api/credentials/{credential_id}",
+            body=body, extra_headers=_AUDIT_HEADERS,
+        ))
+    body = {"type": "password", "username": username, "secret": password}
+    if role:
+        body["role"] = role
+    if label:
+        body["label"] = label
+    return jstr(call("POST", f"/api/projects/{project_id}/credentials", body=body))
+
+
+@server.tool()
+def delete_credential(
+    credential_id: int,
+    project_id: int | None = None,
+    dry_run: bool = False,
+    confirm_delete: str = "",
+) -> str:
+    """删一条账号凭证。两道闸与 delete_case 同款：
+
+    dry_run=True 只看预览（该账号是谁、删了影响哪些角色），不动任何东西；
+    真删必须原样传 confirm_delete="确认删除"，否则拒绝执行。
+    删掉后对应 role 的用例会找不到账号，删前确认没有在用。传 project_id 可让预览带全字段。"""
+    if dry_run:
+        preview: dict = {"credential_id": credential_id, "dry_run": True}
+        if project_id is not None:
+            for c in call("GET", f"/api/projects/{project_id}/credentials"):
+                if c.get("id") == credential_id:
+                    preview["account"] = c
+                    break
+            else:
+                preview["note"] = f"在 project {project_id} 未找到 credential {credential_id}"
+        preview["hint"] = "确认无误后调 dry_run=False + confirm_delete=\"确认删除\" 真删。"
+        return jstr(preview)
+    if _DELETE_CONFIRM not in (confirm_delete or ""):
+        return jstr({
+            "credential_id": credential_id, "deleted": False, "dry_run": False,
+            "reason": f"未带确认词，未删除。请先 dry_run 看预览，再传 confirm_delete=\"{_DELETE_CONFIRM}\" 重调。",
+        })
+    return jstr(call("DELETE", f"/api/credentials/{credential_id}", extra_headers=_AUDIT_HEADERS))
+
+
+@server.tool()
+def recheck_credential(credential_id: int) -> str:
+    """服务端重新登录复测某账号健康度（healthy 被翻成 false 后用这个恢复）。
+
+    起浏览器真登录一次被测系统 base_url；通过则 healthy 恢复 true。
+    账号密码确实失效时返回 last_error（登录失败原因），不瞎猜。"""
+    return jstr(call("POST", f"/api/credentials/{credential_id}/recheck"))
+
+
+@server.tool()
+def set_project_roles(project_id: int, roles: list[str]) -> str:
+    """整体替换项目允许的角色列表（用例 Role 列取值必须在此列表内）。
+
+    保持传入顺序、去空去重。传空列表=清空。改完跑用例前先用 list_credentials
+    确认每个角色都有对应账号，否则执行报「角色没有可用账号」。"""
+    return jstr(call("PUT", f"/api/projects/{project_id}/roles", body={"roles": roles}))
+
+
+@server.tool()
+def import_cases_from_xlsx(
+    project_id: int,
+    xlsx_path: str,
+    overwrite: bool = False,
+    confirm_overwrite: str = "",
+) -> str:
+    """把本地 xlsx 批量导入为项目用例（Potato 唯一的批量导入通道，模板 18 列）。
+
+    xlsx 列头与模板一致（Case Key/Module/Name/.../Role），可从
+    GET /api/projects/{pid}/testcases/template 下载现成模板。
+    Steps 列格式：每行「操作 => 预期」。返回 {imported: N}。
+
+    overwrite 行为：默认 False —— 只追加，case_key 重复行会被服务端跳过/报错；
+    overwrite=True 先删掉与文件 case_key 冲突的既有用例再导入（覆盖更新语义）。
+    删既有数据同样两道闸：overwrite 真执行时必须传 confirm_overwrite="确认覆盖"，
+    否则拒绝。重复导入同一份文件想增量跳过就保持 overwrite=False。"""
+    if not os.path.isfile(xlsx_path):
+        raise RuntimeError(f"xlsx 不存在：{xlsx_path}（传绝对路径）")
+    deleted = 0
+    if overwrite:
+        if confirm_overwrite != _DELETE_CONFIRM_OVERWRITE:
+            return jstr({
+                "imported": 0, "deleted": 0, "overwritten": False,
+                "reason": f"overwrite 会先删既有冲突 case_key，需传 confirm_overwrite=\"{_DELETE_CONFIRM_OVERWRITE}\"。",
+            })
+        wb = _load_local_workbook(xlsx_path)
+        new_keys = {r.get("case_key") for r in wb if r.get("case_key")}
+        existing = call("GET", f"/api/projects/{project_id}/testcases")
+        hits = [c for c in existing if c.get("case_key") in new_keys]
+        for c in hits:
+            call("DELETE", f"/api/testcases/{c['id']}", extra_headers=_AUDIT_HEADERS)
+            deleted += 1
+    data = open(xlsx_path, "rb").read()
+    boundary = "----PotatoMcpBoundary"
+    body = (
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="file"; filename="import.xlsx"\r\n'
+        f"Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet\r\n\r\n"
+    ).encode("latin-1") + data + f"\r\n--{boundary}--\r\n".encode("latin-1")
+    headers = {"Content-Type": f"multipart/form-data; boundary={boundary}"}
+    try:
+        r = _client.request(
+            "POST", f"{BASE_URL}/api/projects/{project_id}/testcases/import",
+            content=body, headers=headers, timeout=300.0,
+        )
+    except httpx.HTTPError as e:
+        raise RuntimeError(f"Potato 后端连不上（{BASE_URL}）：{e}") from e
+    if r.status_code >= 400:
+        raise RuntimeError(f"HTTP {r.status_code} 导入失败: {r.text[:500]}")
+    out = json.loads(r.text) if r.text.strip().startswith("{") else {}
+    out["overwritten"] = bool(overwrite)
+    out["deleted_existing"] = deleted
+    return jstr(out)
+
+
+_DELETE_CONFIRM_OVERWRITE = "确认覆盖"
+
+
+def _load_local_workbook(path: str) -> list[dict]:
+    """把 xlsx 读成 import 记录（复用 app.excel 的解析；MCP 与 Potato 同仓库同 venv，可直接 import）。"""
+    import sys, pathlib
+    root = pathlib.Path(__file__).parent
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+    from app import excel
+    return excel.parse_workbook(open(path, "rb").read())
+
+
 def main() -> None:
     asyncio.run(server.run_stdio_async())
 

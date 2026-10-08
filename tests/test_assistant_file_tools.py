@@ -57,7 +57,9 @@ def _allow_tmp_path_in_roots(tmp_path, monkeypatch):
         "~/Pictures/private/photo.png",
         "~/.config/gcloud/application_default_credentials.json",
         "C:/Windows/System32/config/SAM",
-        "C:/Users/16132/AppData/Roaming/Microsoft/Passwords",
+        # 用占位用户名，不写跑测试这台机器的真实账户名 —— 本仓库是公开的，
+        # 而样本值是什么完全不影响这条断言（它只要求路径被拒绝）。
+        "C:/Users/some-user/AppData/Roaming/Microsoft/Passwords",
     ],
 )
 def test_secrets_and_system_paths_are_refused(target):
@@ -122,11 +124,26 @@ def test_an_allowed_project_file_resolves():
     assert path.is_absolute()
 
 
-def test_the_user_desktop_is_readable_because_that_is_where_specs_land():
-    """Where a downloaded spec actually is. If this were refused, the feature would be useless."""
+def test_the_user_desktop_is_readable_because_that_is_where_specs_land(tmp_path, monkeypatch):
+    """Where a downloaded spec actually is. If this were refused, the feature would be useless.
+
+    ★ 2026-10-08 重写。原写法断言「当前机器的 `~/Desktop` 在可读根里」，而这在 CI（Linux）
+    上必然失败：`/home/runner` 下没有 Desktop 目录，而 `_read_roots()` 会过滤掉不存在的根
+    （那条过滤本身是对的，见该函数注释），于是断言红。但红说明不了任何问题 —— 它测的是
+    "这台机器恰好有没有桌面"，不是"桌面在不在允许列表里"。
+
+    改成**把环境造出来**：给 `Path.home()` 指一个临时 home，在里面建出 Desktop，清掉缓存
+    再断言。这样在任何平台上验证的都是同一件事，且不再依赖跑测试的机器长什么样。
+    """
+    fake_home = tmp_path / "home"
+    (fake_home / "Desktop").mkdir(parents=True)
+    monkeypatch.setattr(pathlib.Path, "home", classmethod(lambda cls: fake_home))
+    # 缓存必须清掉：_read_roots() 只在第一次调用时算，autouse 夹具已经让它算过一遍了。
+    monkeypatch.setattr(assistant, "_ASSISTANT_READ_ROOTS", None)
+
     roots = {str(r).lower() for r in assistant._read_roots()}
-    home_desktop = str((pathlib.Path.home() / "Desktop")).lower()
-    assert home_desktop in roots, "桌面不在可读目录里 —— 用户刚下载的需规就导不进来"
+    desktop = str((fake_home / "Desktop").resolve()).lower()
+    assert desktop in roots, "桌面不在可读目录里 —— 用户刚下载的需规就导不进来"
 
 
 def test_import_refuses_a_secret_path_rather_than_reading_it(tmp_path):

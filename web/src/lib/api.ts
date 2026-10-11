@@ -1221,6 +1221,15 @@ export const api = {
       "/admin/settings/llm/pool",
     ),
   testLlmSettings: () => req<LlmTestResult>("/admin/settings/llm/test", { method: "POST" }),
+  // 各角色 token 占比：真实实测（执行流 by_role 聚合）优先，无数据回退结构估算。
+  getLlmTokenShare: () =>
+    req<{
+      measured: Record<string, number>;
+      estimate: Record<string, number>;
+      has_data: boolean;
+      runs: number;
+      total_tokens: number;
+    }>("/admin/settings/llm/token-share"),
   setFeishuSettings: (b: FeishuSettingsIn) =>
     req<FeishuStatus>("/admin/settings/feishu", { method: "PUT", body: JSON.stringify(b) }),
 

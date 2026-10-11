@@ -71,6 +71,27 @@ PREMIUM_ROLES: tuple[str, ...] = (
 # 输入几 k）。judge 不在里面 —— 判定的初判刻意留给便宜模型，那正是两级判定的意义。
 PREMIUM_DEFAULT_ROLES: tuple[str, ...] = ("judge_escalate", "specgen", "narrative")
 
+# 各角色 token 占比的**结构估算**（2026-10-12）。
+#
+# 用途：设置页在「高端模型接管」每个用途勾选项旁显示「这个用途占全部 token 的百分之几」，
+# 让用户一眼看清"勾哪个最烧钱"。优先用真实实测（执行流里按角色拆分的 by_role 账本聚合，
+# 见 app/executor.py / app/judge.py）；**只有该角色没有真实数据时**才回退到这个估算，
+# 且界面会明确标 ≈，绝不把估算当真实显示。
+#
+# 依据（不是拍脑袋，是系统工作方式）：agent 每条用例跑 N 步（N=浏览器操作数，可达 5~33），
+# 每次 LLM 往返约 1.6 万输入 token；judge 每条用例固定一次（~3-4k 输入）、
+# judge_escalate 仅在失败/闸门报警时才调用、narrative 仅在失败时、specgen 各一次、
+# assistant 偶发。所以 agent 占绝对多数 —— 这正是"省钱主旋钮在 agent"的量化依据。
+# 六个值之和必须为 100（前端按它做兜底占比）。
+ROLE_TOKEN_SHARE_ESTIMATE: dict[str, float] = {
+    "agent": 94.0,
+    "judge": 2.5,
+    "judge_escalate": 1.5,
+    "specgen": 1.0,
+    "narrative": 0.5,
+    "assistant": 0.5,
+}
+
 
 
 @dataclass(frozen=True)

@@ -728,6 +728,45 @@ async def get_admin_llm_pool() -> dict:
     }
 
 
+@router.get("/admin/settings/llm/token-share", dependencies=[Depends(auth.require_admin)])
+async def get_admin_llm_token_share() -> dict:
+    """各角色 token 占比：优先用真实实测（执行流里按角色拆分的 by_role 账本聚合），
+    没有实测数据的角色回退到结构估算（界面会标 ≈）。
+
+    ★ 为什么这样：历史运行的 usage 原本只有每条用例的「总量」，2026-10-12 才加了
+    by_role 逐角色拆分。所以老运行没有 by_role、新运行才有 —— 回退估算保证界面
+    永远有数字，且绝不把估算当真实显示（has_data=false 时前端只显示估算值）。
+    """
+    from app import llm as llm_mod
+    from sqlalchemy import select
+
+    async with db_session() as s:
+        rows = (await s.execute(select(RunResult.timing))).scalars().all()
+    # 跨所有运行聚合 per-role 的 total token。
+    agg: dict[str, int] = {}
+    runs = 0
+    for t in rows:
+        if not isinstance(t, dict):
+            continue
+        by_role = (t.get("usage") or {}).get("by_role") or {}
+        if not isinstance(by_role, dict) or not by_role:
+            continue
+        runs += 1
+        for role, u in by_role.items():
+            if not isinstance(u, dict):
+                continue
+            agg[role] = agg.get(role, 0) + int(u.get("total") or 0)
+    total = sum(agg.values())
+    measured = {r: round(v / total * 100, 1) for r, v in agg.items()} if total else {}
+    return {
+        "measured": measured,
+        "estimate": dict(llm_mod.ROLE_TOKEN_SHARE_ESTIMATE),
+        "has_data": runs > 0,
+        "runs": runs,
+        "total_tokens": total,
+    }
+
+
 @router.post("/admin/settings/llm/test", dependencies=[Depends(auth.require_admin)])
 async def test_admin_llm() -> dict:
     """Ping the gateway the platform is ACTUALLY using, with a 1-token completion.

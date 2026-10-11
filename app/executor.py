@@ -2496,10 +2496,15 @@ async def execute_case(spec: CaseSpec, on_step=None, should_abort=None) -> Resul
         # live_steps already carry per-step screenshots (uploaded in the callback); the
         # history adds each step's result/error, which we merge in by index.
         history = getattr(agent, "history", None) if agent is not None else None
+        # 逐角色 token 账本（2026-10-12）：agent 这一步的所有 LLM 往返先记进 by_role，
+        # 后面 judge / judge_escalate 再并进来。后端 token-share 接口按它聚合各角色占比。
+        by_role: dict[str, dict] = {}
         if history is not None:
             # token 账本：agent 这一次的所有 LLM 往返。
             # 放在 final_result 之前采集 —— 它和结果无关，晚取反而可能因为异常拿不到。
             res.usage = safe(lambda: _usage_payload(getattr(history, "usage", None))) or {}
+            if res.usage:
+                by_role["agent"] = dict(res.usage)
             res.final_answer = safe(lambda: history.final_result()) or ""
             res.steps = safe(lambda: history.action_names()) or []
             # P3: we restored a session but the agent ended on a login page → session dead.
@@ -2741,12 +2746,25 @@ async def execute_case(spec: CaseSpec, on_step=None, should_abort=None) -> Resul
             # 判定器的 token 并进本条用例的账（agent 侧已在上面采集过）。
             # 两个来源分开累加、键名一致，报告里可以一眼看出"贵在跑还是在判"。
             _ju = getattr(verdict, "usage", None) or {}
-            if _ju:
+            _jbr = getattr(verdict, "usage_by_role", None) or {}
+            if _ju or _jbr:
                 _au = res.usage or {}
-                res.usage = {
-                    k: int(_au.get(k, 0)) + int(_ju.get(k, 0))
-                    for k in ("prompt", "completion", "cached", "total", "calls")
-                }
+                if _ju:
+                    _au = {
+                        k: int(_au.get(k, 0)) + int(_ju.get(k, 0))
+                        for k in ("prompt", "completion", "cached", "total", "calls")
+                    }
+                # 逐角色拆分并进来：judge 与 judge_escalate 走不同模型、各自占比不同。
+                for _role, _u in _jbr.items():
+                    if not isinstance(_u, dict):
+                        continue
+                    _b = by_role.setdefault(
+                        _role,
+                        {"prompt": 0, "completion": 0, "cached": 0, "total": 0, "calls": 0},
+                    )
+                    for k in ("prompt", "completion", "cached", "total", "calls"):
+                        _b[k] = int(_b.get(k, 0)) + int(_u.get(k, 0))
+                res.usage = _au
 
     # Bug description for anything that did not pass. "error" counts: an errored case is
     # still a case the tester has to look at, and a narrative is what they read first.
@@ -2815,8 +2833,13 @@ async def execute_case(spec: CaseSpec, on_step=None, should_abort=None) -> Resul
         payload = _timing_payload(_stage, t0, total, len(res.diagnostics or []))
         # token 账本并进同一列：两者一起看才有意义（"这一步很慢" vs "这一步很贵"
         # 是两种不同的病，处置方式也不同）。timing 是 JSON 列，加键不用迁移。
-        if res.usage:
-            payload["usage"] = res.usage
+        # by_role 是逐角色拆分（2026-10-12）：agent / judge / judge_escalate 各自一份，
+        # 落进 usage.by_role，设置页据此算"各角色 token 占比"的真实值。
+        if res.usage or by_role:
+            _u = dict(res.usage or {})
+            if by_role:
+                _u["by_role"] = by_role
+            payload["usage"] = _u
         if res.judge_escalated:
             payload["judge_escalated"] = True
             payload["judge_escalated_from"] = res.judge_escalated_from

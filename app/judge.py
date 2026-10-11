@@ -176,6 +176,11 @@ class Verdict:
     # 不把它算进账里，就会出现"agent 看起来很省、整体却依然很贵"的错觉。
     # 两级判定开启时，这里累计的是**两层之和**（初判 + 复核）—— 账要能看出"复核花了多少"。
     usage: dict = field(default_factory=dict)
+    # 逐角色 token 拆分（2026-10-12）：{"judge": {...}, "judge_escalate": {...}}，
+    # 键与 usage 同形。为什么要有：判定与复核走不同模型（premium 勾了 judge_escalate
+    # 就想知道"贵在初判还是复核"），只给一个合计账看不出这层；而且它是设置页
+    # 「各角色 token 占比」真实数据的唯一来源（执行流里 agent 同理拆分）。
+    usage_by_role: dict = field(default_factory=dict)
     # 两级判定（2026-10-11）：这条结论是**复核层**给出的。
     # 为什么必须记下来：复核层用的是更贵的模型，"哪些结论真的动用了它"直接决定这套机制
     # 是省钱还是烧钱；没有这个标记就没法复盘升级率，也就没法调阈值。
@@ -346,14 +351,23 @@ async def judge(
     # token 账本（2026-10-09）：判定器自己也要调 LLM，它的消耗必须算进这条用例的总账，
     # 否则"agent 花的"和"实际花的"对不上，优化就会盯着错误的目标。
     _usage = {"prompt": 0, "completion": 0, "cached": 0, "total": 0, "calls": 0}
+    # 逐角色拆分账：_usage 是合计，_usage_by_role 按 role 各记一份（值同形）。
+    # 两者一起累加，verdict 同时带出，executor 再并进这条用例的 by_role。
+    _usage_by_role: dict[str, dict] = {}
 
-    def _tally(res: _llm.ChatResult) -> None:
+    def _tally(res: _llm.ChatResult, role: str = "judge") -> None:
         u = res.usage or {}
         if not u:
             return
         _usage["calls"] += int(u.get("calls", 1) or 1)
         for k in ("prompt", "completion", "total", "cached"):
             _usage[k] += int(u.get(k, 0) or 0)
+        _bucket = _usage_by_role.setdefault(
+            role, {"prompt": 0, "completion": 0, "cached": 0, "total": 0, "calls": 0}
+        )
+        _bucket["calls"] += int(u.get("calls", 1) or 1)
+        for k in ("prompt", "completion", "total", "cached"):
+            _bucket[k] += int(u.get(k, 0) or 0)
 
     async def _call(content: Any, role: str = "judge") -> _llm.ChatResult:
         # 走统一门面（app/llm_chat.py）：协议由 profile 决定 —— OpenAI 兼容 / Anthropic /
@@ -378,7 +392,7 @@ async def judge(
 
     async def ask(content: Any, role: str = "judge") -> Verdict:
         res = await _call(content, role)
-        _tally(res)
+        _tally(res, role)
         data = res.json(default=None)
         if not isinstance(data, dict):
             data = {}
@@ -439,6 +453,7 @@ async def judge(
                 evidence_gap=True,
                 root_cause=_gate.root_cause,
                 usage=dict(_usage),
+                usage_by_role=dict(_usage_by_role),
             )
         return Verdict(
             status=status,

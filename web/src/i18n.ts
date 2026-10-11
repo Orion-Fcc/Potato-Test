@@ -400,6 +400,9 @@ const zh: Record<string, string> = {
   // 「按用途分模型」这两块"看上去感觉冲突"。查下来冲突感来自结构（两张同级卡片、
   // 各一个保存按钮、两句近义现状），不是语义 —— 它们是同一问题的两级答案。
   // 所以并成一张卡 + 编号 + 竖向连线 + **一个保存按钮**，用结构消掉"二选一"的暗示。
+  // 2026-10-12 三次简化：用户要求"只留一个"——删掉「逐环节指定模型」子卡，只保留
+  // 「高端模型接管」这一支粗粒度机制；每个用途勾选项右侧显示该角色占全部 token 的
+  // 百分比（真实实测优先，无数据回退结构估算并标 ≈），让用户一眼看清"勾哪个最烧钱"。
   "Model assignment": "模型分配",
   "These two are not alternatives — they are two levels of the same answer, and the more specific one wins: step 1 gives some steps a better model, step 2 names one model per step. Whatever step 2 leaves blank still follows the pool's set 1.":
     "这两步不是二选一，而是同一个问题的两级答案，越具体越优先：第 1 步让部分环节改用一支更好的模型，第 2 步逐行点名。第 2 步留空的环节，仍然跟模型池的第 1 套。",
@@ -415,6 +418,16 @@ const zh: Record<string, string> = {
     "这里填的值同样盖过上面的第 1 步 —— 这是最具体的一层。",
   "All following the default.": "全部跟随默认。",
   "Save model assignment": "保存模型分配",
+  "One save submits the premium-model assignment.": "一次保存只提交「高端模型接管」这一项设置。",
+  "This is the only model-assignment control. Tick a step to give it the premium model; everything you leave unticked keeps using the cheap pool.":
+    "这是唯一的模型分配控件。勾选某个环节，它就改用高端模型；没勾的环节继续用便宜的模型池。",
+  "One switch decides quality vs cost: turn it on and the steps you tick use the premium model; leave it off and every step falls back to the pool's set 1 — no extra spend at all.":
+    "一个开关决定质量与花费：打开后，你勾选的环节改用高端模型；不打开，所有环节回落到模型池第 1 套——零额外花费。",
+  "Based on measured runs": "基于历史运行实测",
+  "No measured data for this step yet — structural estimate": "该环节暂无实测数据，按调用结构估算",
+  "No run data yet — the ratios above are structural estimates (agent dominates). They become measured once you run cases after this update.":
+    "暂无运行数据，上方比例为按调用结构的估算（agent 占绝大多数）。本次更新后你跑过用例，就会变成真实实测值。",
+  "Token share from {{n}} measured run(s).": "以上占比来自 {{n}} 次运行的实测。",
   "Clear all per-step models": "清空所有逐环节指定",
   "One save submits steps 1 and 2 together — they are the same setting, applied by priority.":
     "一个保存按钮同时提交第 1、2 步 —— 它们本来就是同一项设置，只是按优先级生效。",

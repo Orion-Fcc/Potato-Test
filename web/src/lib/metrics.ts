@@ -64,3 +64,16 @@ export function fmtClockTime(iso: string | null | undefined): string {
     d.getSeconds(),
   ).padStart(2, "0")}`;
 }
+
+/** token 数的可读格式：12345 -> "12.3k"。
+ *
+ *  为什么需要：token 的量级本身就是结论 —— "这条 40k" 和 "这条 4k" 是两种不同的
+ *  问题（前者多半在打转，后者是一步到位的正常用例）。精确到个位没有意义，
+ *  但量级必须一眼看出来。0/未测到一律返回 "—"：把"没测到"画成 0 会让人低估成本。
+ */
+export function fmtTokens(n: number | null | undefined): string {
+  if (!n) return "—";
+  if (n < 1000) return String(n);
+  if (n < 1_000_000) return `${(n / 1000).toFixed(n < 10_000 ? 1 : 0)}k`;
+  return `${(n / 1_000_000).toFixed(2)}M`;
+}

@@ -34,22 +34,34 @@ def _t(
     video: int = 1000,
     wrap: int = 0,
     judge: int = 3600,
+    usage: dict | None = None,
 ) -> str:
     """造一条 timing JSON（形态照 executor._timing_payload 的真实产物）。"""
     agent = max(0, total - browser_up - video - wrap - judge)
     per_step = int(agent / steps) if steps else 0
-    return json.dumps(
-        {
-            "browser_up_ms": browser_up,
-            "agent_ms": agent,
-            "wrap_up_ms": wrap,
-            "video_ms": video,
-            "judge_ms": judge,
-            "total_ms": total,
-            "steps": steps,
-            "per_step_ms": per_step,
-        }
-    )
+    payload = {
+        "browser_up_ms": browser_up,
+        "agent_ms": agent,
+        "wrap_up_ms": wrap,
+        "video_ms": video,
+        "judge_ms": judge,
+        "total_ms": total,
+        "steps": steps,
+        "per_step_ms": per_step,
+    }
+    if usage is not None:
+        payload["usage"] = usage
+    return json.dumps(payload)
+
+
+def _usage(prompt: int, cached: int, completion: int, calls: int) -> dict:
+    return {
+        "prompt": prompt,
+        "cached": cached,
+        "completion": completion,
+        "total": prompt + completion,
+        "calls": calls,
+    }
 
 
 def _run(specs: list[tuple[int, str]]) -> list[dict]:
@@ -212,3 +224,96 @@ def test_thresholds_are_conservative() -> None:
     assert SLOW_FACTOR >= 2.5, "倍数门限太低会把正常波动报成异常"
     assert ABS_SLOW_STEP_MS >= 30_000, "绝对门限太低会把慢页面报成异常"
     assert MIN_SAMPLES >= 3
+
+
+# ── 成本的形状（2026-10-11）──────────────────────────────────────────────────
+#
+# 用户的原话是「token 太花钱」。这一组守的是"看得见钱花在哪儿"：
+# 只报一个总数（"本轮 470 万 token"）对优化毫无帮助 —— 它既没说是谁花的，
+# 也没说该往哪个方向改。所以必须有排行榜，而且必须点到**次数**上：
+# 实测每次往返的输入量各条之间差别不大（约 1.6 万），钱是被次数乘出来的。
+
+
+def test_cost_aggregates_cache_calls_and_total() -> None:
+    rows = _run(
+        [
+            (1, _t(60_000, 6, usage=_usage(10_000, 7_000, 500, 4))),
+            (2, _t(60_000, 6, usage=_usage(20_000, 12_000, 1_000, 8))),
+        ]
+    )
+    rep = analyse_run(rows)
+    assert rep.token_prompt == 30_000
+    assert rep.token_cached == 19_000
+    assert rep.token_uncached == 11_000
+    assert rep.token_total == 31_500
+    assert rep.token_calls == 12
+    assert round(rep.cache_hit_pct, 1) == 63.3
+    d = rep.as_dict()
+    # 只暴露"总量"而不暴露"未命中量"会让人以为省 token 就是省钱 —— 两者不是一回事
+    assert d["token_uncached"] == 11_000
+    assert d["token_calls"] == 12
+
+
+def test_cost_leaderboard_ranks_by_tokens_and_reports_share() -> None:
+    """排行榜要能回答"这笔钱是不是被少数几条吃掉的"。实测答案是"是"。"""
+    rows = _run(
+        [
+            (1, _t(60_000, 6, usage=_usage(5_000, 3_000, 100, 2))),
+            (2, _t(60_000, 6, usage=_usage(90_000, 60_000, 2_000, 30))),
+            (3, _t(60_000, 6, usage=_usage(9_000, 6_000, 300, 3))),
+        ]
+    )
+    rep = analyse_run(rows)
+    assert [c.case_id for c in rep.cost_cases] == [2, 3, 1]
+    top = rep.cost_cases[0]
+    assert top.tokens == 92_000
+    assert top.calls == 30
+    assert round(top.share * 100, 1) == round(92_000 / (5_100 + 92_000 + 9_300) * 100, 1)
+    # 占比必须是**百分数**口径（as_dict 里 ×100），否则界面会显示成 0.9%
+    assert rep.as_dict()["cost_cases"][0]["share"] > 1
+
+
+def test_cost_heavy_flag_keys_off_call_count_not_tokens() -> None:
+    """★ 报"次数"而不是"token"。
+
+    人能去查"这条为什么跑了 30 步"，却对"60 万 token"做不了任何事。
+    所以 flag 必须由次数触发，且 detail 里要带次数。
+    """
+    rows = _run(
+        [
+            (1, _t(60_000, 6, usage=_usage(10_000, 6_000, 400, 3))),
+            (2, _t(60_000, 6, usage=_usage(10_000, 6_000, 400, 4))),
+            (3, _t(60_000, 6, usage=_usage(10_000, 6_000, 400, 5))),
+            (9, _t(60_000, 6, usage=_usage(500_000, 330_000, 12_000, 33))),
+        ]
+    )
+    rep = analyse_run(rows)
+    kinds = {f.case_id: f.kind for f in rep.flags}
+    assert kinds.get(9) == "cost_heavy"
+    assert 1 not in kinds and 3 not in kinds, "正常次数的用例不该被报成本异常"
+
+    f = rep.by_case[9]
+    assert "33" in f.detail, "detail 必须写出往返次数"
+    assert "往返" in f.note, "note 要把原因指到往返次数上"
+    # 措辞同样不能像"判定结果" —— 它只是钱多，不是判错了
+    assert "失败" not in f.note
+
+
+def test_cost_threshold_is_conservative() -> None:
+    """门限偏保守：一次假成本告警，下次用户就不看这个面板了。
+
+    实测分布是「中位 5 次、最高 33 次」，所以 15（中位的 3 倍）只抓真正的重头。
+    """
+    from app.perf_analysis import COST_TOP_N, HEAVY_CALLS
+
+    assert HEAVY_CALLS >= 12, "门限太低会把正常用例报成成本异常"
+    assert 3 <= COST_TOP_N <= 10, "排行榜太短看不出形状，太长会淹掉信号"
+
+
+def test_cost_survives_rows_without_usage() -> None:
+    """旧数据没有 usage —— 不能因此报 0（"没测到"和"没花钱"是两回事）。"""
+    rows = _run([(1, _t(60_000, 6)), (2, _t(60_000, 6))])
+    rep = analyse_run(rows)
+    assert rep.token_total == 0
+    assert rep.cost_cases == []
+    assert rep.cache_hit_pct == 0.0

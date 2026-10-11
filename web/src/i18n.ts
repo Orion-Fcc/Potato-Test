@@ -351,6 +351,26 @@ const zh: Record<string, string> = {
     "判定层与复核层实际是同一支模型（{{model}}），复核会被跳过。给「判定复核」单独设一支模型才有真正的二次审查。",
   "Reviewed by the escalation model (initial verdict: {{from}})": "由复核模型给出（初判：{{from}}）",
   reviewed: "已复核",
+  // 「这一轮的钱花在哪儿」（2026-10-11）。刻意把**往返次数**摆在最显眼处：
+  // 实测每次往返的输入量各条之间差不了多少，钱是被次数乘出来的 ——
+  // 次数是人能去查、能去改的东西，"60 万 token"不是。
+  "Where this run's tokens went": "这一轮的 token 花在哪儿",
+  "Total tokens": "总 token",
+  "Cache hit": "缓存命中",
+  "Cached input is billed far cheaper. Only the rest costs full price: {{n}} tokens.":
+    "命中缓存的部分计价便宜得多，真正按全价算的只有剩下这些：{{n}} token。",
+  "LLM round-trips": "LLM 往返次数",
+  "Cost is driven by the number of round-trips, not by how big each one is.":
+    "花多少钱由往返**次数**决定，而不是每次请求有多大。",
+  "Top {{n}} share": "前 {{n}} 条占比",
+  "How concentrated the bill is. High means a few cases are worth fixing.":
+    "账单的集中程度。占比高说明只要修好几条就能省下大头。",
+  "Most expensive cases": "最费钱的用例",
+  "{{n}} calls": "{{n}} 次往返",
+  "{{n}} case(s) reviewed by the escalation model, {{c}} verdict(s) changed":
+    "{{n}} 条走了复核层，其中 {{c}} 条被改判",
+  "To cut cost, look for cases with many round-trips — the per-call input size is roughly the same across cases.":
+    "要省钱就找往返次数多的用例 —— 每次请求的输入量在各条之间差别不大，钱是被次数乘出来的。",
   "(inherit default)": "（跟随默认）",
   "now: {{model}}": "当前生效：{{model}}",
   "gateway URL (optional)": "网关地址（可选）",

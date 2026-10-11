@@ -132,6 +132,34 @@ export interface ProjectStats {
   top_failing: { case_id: number; name: string; fail_count: number }[];
 }
 
+/** 一条"贵"的用例（见后端 app/perf_analysis.py::CostCase）。 */
+export interface CostCase {
+  case_id: number;
+  tokens: number;
+  calls: number;
+  /** 占本轮总 token 的百分数（后端已 ×100）。 */
+  share: number;
+}
+
+/** 一轮的性能/成本分析（2026-10-11 起含 token 经济学）。纯计算，不调模型。 */
+export interface PerfReport {
+  baseline_per_step_ms: number;
+  samples: number;
+  flags: { case_id: number; kind: string; detail: string; note: string; ratio: number }[];
+  note: string;
+  token_prompt: number;
+  token_cached: number;
+  token_uncached: number;
+  token_total: number;
+  /** LLM 往返总次数 —— 实测这是成本的真正驱动（而不是每步输入量）。 */
+  token_calls: number;
+  cache_hit_pct: number;
+  cost_cases: CostCase[];
+  cost_top_share: number;
+  escalated_cases: number;
+  escalated_changed: number;
+}
+
 export interface Environment {
   id: number;
   project_id: number;
@@ -1069,6 +1097,8 @@ export const api = {
   readAllNotifications: () =>
     req<{ ok: boolean }>("/notifications/read-all", { method: "POST" }),
   getResults: (rid: number, o?: Opts) => req<RunResult[]>(`/runs/${rid}/results`, o),
+  /** 这一轮的耗时/成本分析（纯计算，不调模型）。 */
+  runPerf: (rid: number, o?: Opts) => req<PerfReport>(`/runs/${rid}/perf`, o),
   // 2026-10-06 人工改判：AI 判定会不准，测试工程师必须能自己拍板。
   // clear=true 表示撤销改判、回到 AI 的原判。
   overrideResult: (resId: number, b: { status?: "passed" | "failed"; reason?: string; clear?: boolean }) =>

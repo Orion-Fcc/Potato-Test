@@ -16,7 +16,7 @@ import "@vidstack/react/player/styles/default/theme.css";
 import "@vidstack/react/player/styles/default/layouts/video.css";
 import { api, type Run, type RunResult, type TestCase } from "../lib/api";
 import { usePolling, useShowThoughts } from "../lib/hooks";
-import { fmtSpan } from "../lib/metrics";
+import { fmtSpan, fmtTokens } from "../lib/metrics";
 import { Badge, Button, Card, Input, LiveDot } from "../components/ui";
 import { Modal } from "../components/Modal";
 import { chartTooltip } from "../components/table";
@@ -24,6 +24,7 @@ import { ShotViewer } from "../components/ShotViewer";
 import { useToast, useErrorToast } from "../components/toast";
 import { RunHeader } from "../components/run/RunHeader";
 import { RunKpis } from "../components/run/RunKpis";
+import { CostPanel } from "../components/run/CostPanel";
 import { ReplayPanel } from "../components/run/ReplayPanel";
 import { StepLine } from "../components/run/StepLine";
 import { CaseDrawer } from "../components/CaseDrawer";
@@ -46,15 +47,6 @@ const FILTERS = [
   { key: "passed", label: "passed" },
   { key: "error", label: "error" },
 ] as const;
-
-/** token 数的可读格式：12345 -> "12.3k"。表格里不需要精确到个位，
- *  但量级必须一眼看出来（"这条 40k" 和 "这条 4k" 是两种不同的问题）。 */
-function fmtTokens(n: number): string {
-  if (!n) return "—";
-  if (n < 1000) return String(n);
-  if (n < 1_000_000) return `${(n / 1000).toFixed(n < 10_000 ? 1 : 0)}k`;
-  return `${(n / 1_000_000).toFixed(2)}M`;
-}
 
 export function RunReport() {
   const { rid, pid } = useParams();
@@ -329,6 +321,13 @@ export function RunReport() {
       )}
 
       <RunKpis run={run} summary={s ?? null} active={active} duration={duration} runningCount={runningIds.length} />
+
+      {/* 这一轮的钱花在哪儿（2026-10-11）。没有 token 账本时它自己不渲染。 */}
+      <CostPanel
+        runId={runId}
+        active={active}
+        caseName={(id) => caseById.get(id)?.name ?? `#${id}`}
+      />
 
       {active && (
         <Card className="p-4">

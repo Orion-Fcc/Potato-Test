@@ -312,7 +312,9 @@ export function relTime(iso: string | null | undefined): string {
 
 export type CasePriority = "P0" | "P1" | "P2" | "P3";
 export type CaseType = "functional" | "smoke" | "regression" | "acceptance" | "negative";
-export type CaseStatus = "draft" | "active" | "deprecated";
+// 2026-10-09 加 blocked：有些用例 agent 跑不了（需要人工先做一步、依赖拿不到的数据…），
+// 人要能把它标出来并写清原因。与 deprecated 的区别见后端 app/schemas.py::CaseStatus。
+export type CaseStatus = "draft" | "active" | "deprecated" | "blocked";
 
 export interface TestStep {
   action: string;
@@ -328,6 +330,10 @@ export interface TestCase {
   priority: CasePriority;
   type: CaseType;
   status: CaseStatus;
+  /** status="blocked" 时为什么跑不了（2026-10-09）。
+   *  必须由人能直接看到：只显示一个"受阻"标记的话，还得点进去才知道原因，
+   *  而原因才是决定下一步做什么的东西。 */
+  blocked_reason: string;
   owner: string | null;
   role: string | null;
   // 2026-10-04 多角色：执行时依次使用的身份，顺序即切换顺序。
@@ -601,8 +607,204 @@ async function req<T>(path: string, init?: ReqInit): Promise<T> {
  *  slow response can never land on a screen the operator already left. */
 export type Opts = { signal?: AbortSignal };
 
+// ---- 从需规生成用例（2026-10-09）------------------------------------------
+// 一条待审阅的生成用例。字段与 TestCase 对齐，但它**还没入库** ——
+// 所以刻意不是 TestCase 的子类型：把它当 TestCase 用会让人以为它已经有 id 和 case_key。
+export interface SpecDraftCase {
+  name: string;
+  prompt: string;
+  expected: string;
+  module: string;
+  type: string;
+  priority: string;
+  precondition: string;
+}
+
+/** 一个可分批生成的模块（由模型把原始章节标题归并而成）。 */
+export interface SpecModule {
+  name: string;
+  titles: string[];
+  /** false = 这一节通篇在浏览器里观测不到（性能指标/数据库约束/部署运维），不该生成用例。 */
+  testable: boolean;
+  reason: string;
+}
+
+export interface SpecOutline {
+  headings: string[];
+  modules: SpecModule[];
+  has_knowledge: boolean;
+  planned?: boolean;
+  /** true = 模型归并失败、已退回"每个标题一个模块"。界面要如实说明，
+   *  别让用户以为文档就这么碎。 */
+  degraded?: boolean;
+  /** true = 这次是**缓存命中**（没花 token）。 */
+  cached?: boolean;
+  // ---- 长文档的分批进度（2026-10-09）------------------------------------
+  // ★ 这三个字段是"586 个标题的文档能不能被走完"的关键。一次只规划 60 个标题，
+  // 所以界面必须能显示"已规划 60 / 586"，并提供"继续规划下一批"。
+  // 少了它们，用户只能看到文档的 10%，而且完全不知道剩下的去哪儿了。
+  /** 文档里的章节标题总数。 */
+  total?: number;
+  /** 已经规划到第几个标题（下一批从它开始）。 */
+  planned_until?: number;
+  /** 还有没规划的标题。 */
+  has_more?: boolean;
+  batch_from?: number;
+  batch_to?: number;
+  /** true = 这一批**规划失败**（网关报错等），没有推进。
+   *  界面据此停在错误上，而不是继续给"下一批"按钮 ——
+   *  实测网关持续 500 时，那个按钮会变成一个点一次失败一次的陷阱。 */
+  failed?: boolean;
+  usage?: TokenUsage | null;
+  error?: string | null;
+  note?: string;
+}
+
+/** 直接把一份需规文档发过去的结果（2026-10-09）。 */
+export interface SpecUploadResult {
+  filename: string | null;
+  format: string;
+  chars: number;
+  /** true = 文档太长被截断了。仍然"上传成功"，但生成出来的用例会缺一块。 */
+  truncated: boolean;
+  /** 解析期的提醒（空文档、图片型 PDF、没有标题…）。必须显示给用户 ——
+   *  否则"上传成功却没有模块"看起来像功能坏了。 */
+  warnings: string[];
+  appended: boolean;
+  headings: number;
+  modules: SpecModule[];
+  planned_until: number;
+  has_more: boolean;
+  usage?: TokenUsage | null;
+  error?: string | null;
+  /** true = 模型归并失败，模块是"一个标题一个"的兜底分批。 */
+  degraded?: boolean;
+}
+
+export interface SpecDraftResult {
+  module: string;
+  titles: string[];
+  cases: SpecDraftCase[];
+  /** 被解析层丢弃的用例及原因。不静默丢弃 —— 用户要靠它判断这次生成的整体质量。 */
+  dropped: string[];
+  count: number;
+  usage?: TokenUsage | null;
+  source: string;
+  error?: string | null;
+}
+
+// ---- 后端接口探索（2026-10-09）--------------------------------------------
+/** 从**页面实际流量**里学到的后端接口。写接口只能看，不能被用例调用。 */
+export interface ApiEndpoint {
+  id: number;
+  method: string;
+  /** 归一化路径，具体 ID 已换成 {id} —— 所以翻两页不会多出两条"不同"接口。 */
+  path: string;
+  /** 原始样例 URL，便于核对归一化有没有做错。 */
+  sample: string;
+  /** 参数名 → 值的形状（int/str/opaque…）。**只有形状，没有值**。 */
+  query: Record<string, string>;
+  body_fields: string[];
+  /** 被观察到的次数：多说明它是主干接口（菜单、列表）。 */
+  hits: number;
+  writable: boolean;
+  origin: string;
+  last_seen: string | null;
+}
+
+export interface ApiEndpointList {
+  endpoints: ApiEndpoint[];
+  total: number;
+  note: string;
+}
+
+export interface ApiProbeResult {
+  ok: boolean;
+  status: number;
+  json: unknown;
+  text: string;
+  content_type: string;
+  error: string;
+  url: string;
+  elapsed_ms: number;
+  origin?: string;
+  method?: string;
+}
+
 export const api = {
   listProjects: (o?: Opts) => req<Project[]>("/projects", o),
+  /** 单个项目详情。形状与 listProjects 的每一项逐字段一致（后端共用同一个 helper）。 */
+  getProject: (pid: number, o?: Opts) => req<Project>(`/projects/${pid}`, o),
+
+  // ---- 后端接口探索（2026-10-09）---------------------------------------
+  /** 从页面流量里学到的后端接口。写接口会被标记 —— 它们只能看，不能被调用。 */
+  listApiEndpoints: (pid: number, writable?: "0" | "1", o?: Opts) =>
+    req<ApiEndpointList>(
+      `/projects/${pid}/api-endpoints${writable ? `?writable=${writable}` : ""}`,
+      o,
+    ),
+  /** 只读重放一个**已观察到**的接口，用来核对数据。写方法与没见过的路径都会被拒。 */
+  probeApiEndpoint: (
+    pid: number,
+    b: { method: string; path: string; params?: Record<string, unknown> },
+  ) =>
+    req<ApiProbeResult>(`/projects/${pid}/api-endpoints/probe`, {
+      method: "POST",
+      body: JSON.stringify(b),
+      timeoutMs: 60_000,
+    }),
+
+  // ---- 从需规文档生成用例（2026-10-09）----------------------------------
+  /** 列出可按哪些模块/章节分批生成。plan=false 时不调模型（零 token）。
+   *
+   *  同一批的后端结果是**缓存**的 —— 所以重复进页面/刷新不会再花 token，
+   *  也不会出现"刷新一下分批全变了"。`refresh=true` 才强制重新分批，
+   *  而且只有用户主动点「重新分批」时才该传它。 */
+  specOutline: (pid: number, plan = true, refresh = false) =>
+    req<SpecOutline>(
+      `/projects/${pid}/spec/outline?plan=${plan ? "true" : "false"}${refresh ? "&refresh=true" : ""}`,
+    ),
+  /** 从第 `start` 个标题开始规划下一批（长文档用）。
+   *  586 个标题的文档一批只规划 60 个，所以要逐批往下推 ——
+   *  没有这个入口的话，用户只能看到文档的 10%，而且不知道剩下的去哪儿了。 */
+  specOutlineFrom: (pid: number, start: number) =>
+    req<SpecOutline>(`/projects/${pid}/spec/outline?plan=true&start=${start}`),
+  /** 直接把一份需规文档发给它：入库 + 规划一步完成（2026-10-09）。
+   *  支持 Word / PDF / Excel / Markdown / txt / csv / html / rtf。 */
+  specUpload: async (pid: number, file: File, append = true): Promise<SpecUploadResult> => {
+    const fd = new FormData();
+    fd.append("file", file);
+    return req<SpecUploadResult>(`/projects/${pid}/spec/upload?append=${append ? "true" : "false"}`, {
+      method: "POST",
+      body: fd,
+      // 大文档解析 + 一次规划，远超默认 30s。
+      timeoutMs: 300_000,
+    });
+  },
+  /** 针对一个模块生成一批**草稿**（不落库，先给用户看）。 */
+  specDraft: (pid: number, b: { module: string; titles: string[] }) =>
+    req<SpecDraftResult>(`/projects/${pid}/spec/draft`, {
+      method: "POST",
+      body: JSON.stringify(b),
+      // 生成一次要跑模型，远超默认 30s 预算 —— 超时会看起来像"生成失败"。
+      timeoutMs: 300_000,
+    }),
+  /** 把审阅过的草稿落库。activate=false（默认）时落成 draft，不进回归集。 */
+  specAccept: (
+    pid: number,
+    b: { cases: SpecDraftCase[]; module?: string; source?: string; activate?: boolean },
+  ) =>
+    req<{ created: { id: number; case_key: string; name: string }[]; count: number; status: string }>(
+      `/projects/${pid}/spec/accept`,
+      { method: "POST", body: JSON.stringify(b) },
+    ),
+  /** 批量改用例状态（草稿审阅用：一次改一批，而不是 120 次请求）。
+   *  status="blocked" 时 reason 必填 —— 后端会拒空原因。 */
+  setCasesStatus: (pid: number, ids: number[], status: string, reason?: string) =>
+    req<{ requested: number; found: number; changed: number; status: string }>(
+      `/projects/${pid}/testcases/status`,
+      { method: "POST", body: JSON.stringify({ ids, status, reason: reason ?? "" }) },
+    ),
   createProject: (b: { name: string; base_url?: string; login_state?: string }) =>
     req<Project>("/projects", { method: "POST", body: JSON.stringify(b) }),
   updateProject: (

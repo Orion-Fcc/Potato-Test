@@ -49,6 +49,11 @@ _ADDITIVE_COLUMNS: tuple[tuple[str, str, str], ...] = (
     # "功能不符"，只有归因能认出它们其实是页面没加载完 / 流程没走完。
     # 存量行为 NULL = 归因功能上线前的结果，报告侧要显示"未判定"而不是"系统行为"。
     ("run_result", "attribution", "VARCHAR(30)"),
+    # 2026-10-09 用例被人为挡住的原因（见 app/schemas.py::CaseStatus）。
+    # 用户要求"人可以变更用例状态，因为有些用例 agent 执行不了"——
+    # 状态枚举之外必须有原因，否则一个月后没人知道它为什么被挡住。
+    # 默认空串而不是 NULL：调用方不必区分"没填"和"NULL"两种情况。
+    ("test_case", "blocked_reason", "TEXT NOT NULL DEFAULT ''"),
     # 2026-10-07 需规漂移信号（见 app/spec_drift.py）。落在 run 上而不是 run_result 上，
     # 因为它**不是**某条用例的属性，而是一次执行的结论：这批用例 collectively 断言了
     # 互相矛盾的行为。挂到用例上会让「哪条用例漂移了」看起来像能逐条修，而实际要么是
@@ -88,6 +93,14 @@ _ADDITIVE_COLUMNS: tuple[tuple[str, str, str], ...] = (
     # 2026-10-08 per-run 重试次数。空值语义 = 0（不重试），与模型默认一致，
     # 所以历史 run 不需要回填。
     ("run", "retries", "INTEGER"),
+    # 2026-10-09 用例编号的永久计数器（见 models.Project.case_seq 的说明）。
+    # 必须在这里加：`create_all` 只建**缺的表**，对已存在的 project 表一个字段都不动 ——
+    # 于是老库永远没有这一列，而代码每次发号都要读它 → 每条新用例都报 "no such column"。
+    # 存量行会由这一句填上默认值 0，含义是"尚未回填"，首次发号时从现有编号推算，见
+    # app/api.py::_next_case_key。
+    ("project", "case_seq", "INTEGER NOT NULL DEFAULT 0"),
+    # 2026-10-09 用例来源溯源（人写的 / 从需规哪一节生成的），见 models.TestCase.source。
+    ("test_case", "source", "VARCHAR(300)"),
 )
 
 

@@ -144,6 +144,13 @@ def _case(c: TestCase, last: LastResult | None = None) -> dict:
         "priority": c.priority,
         "type": c.type,
         "status": c.status,
+        # 2026-10-09 人为阻挡的原因（status=blocked 时有值）。
+        # 必须回给前端：列表里只显示一个"已阻挡"标记，用户还得点进去才知道为什么被挡，
+        # 而"为什么"才是决定下一步做什么的东西。
+        "blocked_reason": c.blocked_reason or "",
+        # 2026-10-09 来源溯源（"" / "manual" = 人写的，"spec:<文档>#<章节>" = 生成的）。
+        # 界面按它分组展示"这批是生成的"，是在草稿审阅里分清"我写的"和"它写的"的唯一依据。
+        "source": c.source or "",
         "owner": c.owner,
         "role": c.role,
         # 2026-10-04 multi-role: the ordered list the agent switches through.

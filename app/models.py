@@ -60,6 +60,18 @@ class Project(Base):
     live_shot_every: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # the project's role vocabulary for multi-account auth (e.g. ["requester","approver"])
     roles: Mapped[list] = mapped_column(JSON, default=list)
+    # ★ 2026-10-09 用例编号的**永久计数器**（每个项目一份）。
+    #
+    # 为什么要单独存一列：之前 `_next_case_key` 靠"查现有用例的最大编号 +1"算下一个号。
+    # 那套在"删掉的恰好是最大编号"时会**把号重新发出去**：TC-001..TC-005 里删掉 TC-005，
+    # 下一条新建的又拿到 TC-005。用户看到的是"我删了的那条又回来了"，而报告/缺陷单里
+    # 两条完全不同的用例共用一个编号。
+    # 根因是"可用编号"被当成从当前数据推导出来的东西 —— 它其实是**发行过就不回收**的事实，
+    # 必须自己存下来。计数器只增不减，删用例不动它。
+    #
+    # 0 表示"还没有计数器"：老库（这一列是后加的）第一次发号时会从现有用例的最大编号
+    # 回填一次，见 app/api.py::_next_case_key。新项目默认 0，所以第一条就是 TC-001。
+    case_seq: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     # storage_state JSON for logged-in sessions; encrypt before persisting in prod
     login_state: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_by: Mapped[str | None] = mapped_column(String(100), nullable=True)
@@ -103,7 +115,16 @@ class TestCase(Base):
     type: Mapped[str] = mapped_column(
         String(20), default="functional"
     )  # functional|smoke|regression|acceptance|negative
-    status: Mapped[str] = mapped_column(String(20), default="active")  # draft|active|deprecated
+    # draft|active|deprecated|blocked —— 见 app/schemas.py::CaseStatus 的注释，
+    # 那里解释了为什么 blocked 必须与 deprecated 分开。
+    status: Mapped[str] = mapped_column(String(20), default="active")
+    # 为什么这条用例跑不了（status=blocked 时必填）。
+    #
+    # ★ 用户明确提出的需求：「用例也加上人可以变更状态的功能，因为有些用例 agent
+    #   可能执行不了」。只给一个状态枚举是不够的 —— 挡住的原因（需要人工在别的系统
+    #   先做一步 / 依赖拿不到的数据 / 需要特定时段）才是下一个人接手时要看的东西。
+    #   没有它，一个月后没人知道这条用例为什么是 blocked，只能重新试一遍。
+    blocked_reason: Mapped[str] = mapped_column(Text, nullable=False, default="")
     owner: Mapped[str | None] = mapped_column(String(120), nullable=True)
     # role this case executes as (multi-account auth); null => project default account
     role: Mapped[str | None] = mapped_column(String(60), nullable=True)
@@ -143,6 +164,16 @@ class TestCase(Base):
     start_url: Mapped[str | None] = mapped_column(String(2048), nullable=True)
     tags: Mapped[list] = mapped_column(JSON, default=list)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)  # included in "run all enabled"
+    # ★ 2026-10-09 来源溯源："用例是谁写的"。
+    #
+    # 为什么必须单独存一列：现在用例有两个来源 —— 人写的，和"从需规文档生成"的。
+    # 两者混在一起之后**没法再分开**：
+    #   * 生成出来的用例质量参差，审计时要能按来源筛选、批量回退；
+    #   * 生成质量问题（例如把"建议支持"写成了断言）复盘时，需要知道这批到底有多少条
+    #     来自生成、又是从哪份文档的哪一节来的，否则只能靠记忆猜。
+    # 格式刻意保持短（跟着 1200+ 条结果落库）："" 或 "manual" = 人写的；
+    # "spec:<文档名>#<章节>" = 从某份需规的具体章节生成。
+    source: Mapped[str | None] = mapped_column(String(300), nullable=True, default="")
     # ── 操作经验记忆（见 app/case_memory.py）──────────────────────────────────
     # 存的是**过程知识**：这条用例上次是怎么走到目标的（导航路径）、界面上哪些元素
     # 有什么脾气（加载慢、按钮相邻易点错）。用来减少每次重新摸索，让同一条用例的
@@ -591,3 +622,59 @@ class CaseChange(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
     __table_args__ = (Index("ix_case_change_proj_idx", "project_id", "id"),)
+
+
+class ApiEndpoint(Base):
+    """从**页面实际发出的流量**里学出来的后端接口（2026-10-09）。
+
+    ## 为什么需要它
+
+    用户要求系统有"探索后端"的能力：不少内部管理系统的**菜单本身就是后端给的**
+    （前端拿 `/api/menu` 渲染侧边栏），而"进了列表页看到数据"其实是
+    `GET /api/xxx/list` 的返回。只会点界面的话，这两件事都只能靠猜 ——
+    猜错就会写出"点了菜单但不知道数据从哪来"的用例。
+
+    ## 为什么是"观察"而不是"扫描"
+
+    页面为了渲染必然要调后端，那些请求就是权威答案：不用猜路径、不用撞目录，
+    也不会朝服务器发它没被设计来处理的请求（主动扫描在真实环境里是有风险的）。
+    实现挂在 `app/browser_hygiene.py` 已有的 CDP 请求拦截上，不新增开销。
+
+    ## 安全：这张表里**不含任何敏感值**
+
+    `query` 只存"参数名 → 值的形状"（`page` → `int`），请求头一律丢弃，
+    请求体只取顶层字段名。所以这张表即使被导出来也不会泄漏 token 或业务数据。
+    `writable=True` 的接口只被**登记**，重放层（app/api_probe.py）默认拒绝它们 ——
+    探索这个动作本身绝不允许改数据。
+    """
+
+    __tablename__ = "api_endpoint"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(
+        ForeignKey("project.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    # 归一化后的路径（具体 ID 换成 {id}），与 method 一起构成"同一个接口"的身份
+    path: Mapped[str] = mapped_column(String(500), nullable=False)
+    method: Mapped[str] = mapped_column(String(10), nullable=False, default="GET")
+    # 原始样例 URL（截断）。保留一条是为了让人能核对归一化有没有做错 ——
+    # 把 `/api/user/1024` 归一成 `/api/user/{id}` 是对的，归一错了就查不出来。
+    sample: Mapped[str] = mapped_column(String(500), nullable=False, default="")
+    # {"参数名": "形状"}。**只有形状，没有值**，见类注释。
+    query: Mapped[dict] = mapped_column(JSON, default=dict)
+    # 请求体顶层字段名（写接口才有）
+    body_fields: Mapped[list] = mapped_column(JSON, default=list)
+    # 被观察到的次数：多说明它是核心接口
+    hits: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    # True = 写操作。登记但默认拒绝重放。
+    writable: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # 从哪个页面观察到的（Origin）—— 一个项目可能同时访问多个后端
+    origin: Mapped[str] = mapped_column(String(300), nullable=False, default="")
+    first_seen: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    last_seen: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+    # (project, method, path) 唯一：重复观察到同一个接口时累加 hits，
+    # 而不是插一行新的 —— 否则清单里会出现几十条一模一样的接口。
+    __table_args__ = (
+        Index("ix_api_endpoint_uniq", "project_id", "method", "path", unique=True),
+    )

@@ -1,4 +1,4 @@
-import { FlaskConical as FlaskConicalIcon } from "lucide-react";
+import { FlaskConical as FlaskConicalIcon, Wand2 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Link, useNavigate, useParams } from "react-router-dom";
@@ -9,11 +9,12 @@ import { Badge, Button, Card, Checkbox, Field, Input, PageHeader, Select, Stat, 
 import { CASE_STATUS_LABELS, CASE_TYPE_LABELS, PRIORITY_LABELS, label } from "../lib/labels";
 import { CaseDrawer } from "../components/CaseDrawer";
 import { Modal } from "../components/Modal";
+import { SpecGenPanel } from "../components/SpecGenPanel";
 import { useToast, useErrorToast } from "../components/toast";
 
 const PRIORITIES: CasePriority[] = ["P0", "P1", "P2", "P3"];
 const TYPES: CaseType[] = ["functional", "smoke", "regression", "acceptance", "negative"];
-const STATUSES: CaseStatus[] = ["draft", "active", "deprecated"];
+const STATUSES: CaseStatus[] = ["draft", "active", "deprecated", "blocked"];
 
 const blankCase = (pid: number): TestCase => ({
   id: 0,
@@ -24,6 +25,7 @@ const blankCase = (pid: number): TestCase => ({
   priority: "P2",
   type: "functional",
   status: "active",
+  blocked_reason: "",
   owner: null,
   role: null,
   // 2026-10-04 多角色：空数组 = 跟随默认账号，与改动前 role:null 等价。
@@ -70,6 +72,13 @@ export function CasesPage() {
   const [resultFilter, setResultFilter] = useState("all");
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [editing, setEditing] = useState<TestCase | null>(null);
+  // 从需规生成用例的面板（2026-10-09）。草稿数单独算一次，
+  // 用来在工具栏上提示"有 N 条生成的用例还没人审" —— 没有这个提示，
+  // 生成完就关掉面板的用户会彻底忘记那批草稿的存在。
+  const [showSpecGen, setShowSpecGen] = useState(false);
+  // 批量改状态（2026-10-09）。blocked 需要原因，所以这里存"用户点了哪个动作"，
+  // 由弹窗收集原因后再提交 —— 而不是直接提交一个没有解释的状态。
+  const [bulkStatus, setBulkStatus] = useState<"active" | "blocked" | null>(null);
 
   const signal = useAbortSignal();
   const load = useMemo(
@@ -111,6 +120,10 @@ export function CasesPage() {
       }),
     [cases, dq, tag, priorityFilter, typeFilter, statusFilter, enabledFilter, resultFilter],
   );
+  // 生成后还没人审的草稿数。用 enabled+status 两个字段一起判：
+  // 草稿即使被手动打开 enabled 也不会被 "run all" 选中（run-all 只收 active），
+  // 所以"待审"的准确定义是 status==="draft"。
+  const draftCount = useMemo(() => cases.filter((c) => c.status === "draft").length, [cases]);
   const UNGROUPED = t("Ungrouped");
   const groups = useMemo(() => {
     const by = new Map<string, TestCase[]>();
@@ -294,12 +307,23 @@ export function CasesPage() {
         actions={
           <>
             {selected.size > 0 && (
-              <Button
-                variant="outline"
-                onClick={() => askRun([...selected], t("{{n}} selected cases", { n: selected.size }))}
-              >
-                {t("Run selected ({{n}})", { n: selected.size })}
-              </Button>
+              <>
+                <Button
+                  variant="outline"
+                  onClick={() => askRun([...selected], t("{{n}} selected cases", { n: selected.size }))}
+                >
+                  {t("Run selected ({{n}})", { n: selected.size })}
+                </Button>
+                {/* 批量改状态（2026-10-09）。用户要求"人可以变更用例状态，
+                    因为有些用例 agent 执行不了" —— 而这类用例往往是成批出现的
+                    （同一个功能依赖同一件人工前置），所以批量入口比逐条改有用得多。 */}
+                <Button variant="outline" onClick={() => setBulkStatus("active")}>
+                  {t("Enable ({{n}})", { n: selected.size })}
+                </Button>
+                <Button variant="outline" onClick={() => setBulkStatus("blocked")}>
+                  {t("Mark blocked ({{n}})", { n: selected.size })}
+                </Button>
+              </>
             )}
             <Button onClick={() => askRun(undefined, t("All enabled"))} disabled={cases.length === 0}>
               {t("Run all enabled")}
@@ -349,6 +373,23 @@ export function CasesPage() {
 
       <Card className="flex flex-wrap items-center gap-2 p-3">
         <Button onClick={() => setEditing(blankCase(pid))}>{t("+ New case")}</Button>
+        <div className="mx-1 h-5 w-px bg-[var(--line)]" />
+        {/* 从需规生成（2026-10-09）：把"上传文档 → 按章节生成 → 审阅 → 启用"
+            收进一个入口。此前这条路要走三个地方（知识库上传 / 助手逐条建 / 运行页），
+            没有任何一步是"对着这份文档"做的。 */}
+        <Button variant="outline" size="sm" onClick={() => setShowSpecGen(true)}>
+          <Wand2 className="h-3.5 w-3.5" />
+          {t("Generate from spec")}
+        </Button>
+        {draftCount > 0 && (
+          <button
+            onClick={() => setStatusFilter("draft")}
+            className="rounded-full bg-[var(--warn-bg)] px-2.5 py-0.5 text-[11.5px] font-medium text-[var(--warn-fg)]"
+            title={t("Cases generated from a spec that nobody has activated yet")}
+          >
+            {t("{{n}} drafts awaiting review", { n: draftCount })}
+          </button>
+        )}
         <div className="mx-1 h-5 w-px bg-[var(--line)]" />
         <Button variant="outline" size="sm" onClick={() => xlsxRef.current?.click()}>
           {t("Import Excel")}
@@ -522,30 +563,30 @@ export function CasesPage() {
                   </div>
                 </div>
                 {open && (
-                  <table className="w-full text-[13px]">
+                  <table className="w-full text-[13px] tp-table">
                     <thead className="tp-thead">
                       <tr>
-                        <th className="w-8 px-3 py-2.5" />
-                        <th className="w-24 px-2 py-2.5">{t("ID")}</th>
-                        <th className="px-2 py-2.5">{t("Case")}</th>
-                        <th className="w-14 px-2 py-2.5">{t("Priority")}</th>
-                        <th className="w-24 px-2 py-2.5">{t("Type")}</th>
-                        <th className="w-20 px-2 py-2.5">{t("Status")}</th>
-                        <th className="w-16 px-2 py-2.5">{t("Enabled")}</th>
-                        <th className="w-28 px-2 py-2.5">{t("Last result")}</th>
-                        <th className="px-2 py-2.5" />
+                        <th className="w-8" />
+                        <th className="w-24">{t("ID")}</th>
+                        <th>{t("Case")}</th>
+                        <th className="w-14">{t("Priority")}</th>
+                        <th className="w-24">{t("Type")}</th>
+                        <th className="w-20">{t("Status")}</th>
+                        <th className="w-16">{t("Enabled")}</th>
+                        <th className="w-28">{t("Last result")}</th>
+                        <th />
                       </tr>
                     </thead>
                     <tbody>
                       {visible.map((c) => (
                         <tr key={c.id} className="tp-row">
-                          <td className="w-8 px-3 py-2.5">
+                          <td className="w-8">
                             <Checkbox checked={selected.has(c.id)} onChange={() => toggle(c.id)} />
                           </td>
-                          <td className="w-24 whitespace-nowrap px-2 py-2.5 font-mono text-[11px] text-ink-400">
+                          <td className="w-24 whitespace-nowrap font-mono text-[11px] text-ink-400">
                             {c.case_key ?? `#${c.id}`}
                           </td>
-                          <td className="px-2 py-2.5">
+                          <td>
                             {renameId === c.id ? (
                               <Input
                                 autoFocus
@@ -582,25 +623,46 @@ export function CasesPage() {
                               {c.prompt}
                             </div>
                           </td>
-                          <td className="w-14 px-2 py-2.5">
+                          <td className="w-14">
                             <span className={"inline-flex rounded px-1.5 py-0.5 text-[11px] font-semibold " + (PRIORITY_STYLE[c.priority] ?? "")}>
                               {c.priority}
                             </span>
                           </td>
-                          <td className="w-24 whitespace-nowrap px-2 py-2.5 text-ink-700">
+                          <td className="w-24 whitespace-nowrap text-ink-700">
                             {label(CASE_TYPE_LABELS, c.type, lang)}
                           </td>
-                          <td className="w-20 px-2 py-2.5">
-                            <Badge status={c.status === "active" ? "passed" : c.status === "deprecated" ? "cancelled" : "pending"}>
+                          <td className="w-20">
+                            <Badge
+                              status={
+                                c.status === "active"
+                                  ? "passed"
+                                  : c.status === "deprecated"
+                                    ? "cancelled"
+                                    : c.status === "blocked"
+                                      ? "failed"
+                                      : "pending"
+                              }
+                            >
                               {label(CASE_STATUS_LABELS, c.status, lang)}
                             </Badge>
+                            {/* 阻挡原因直接显示在列表里（截断 + title 看全文）。
+                                只显示一个"受阻"标记的话，还得点进去才知道原因 ——
+                                而原因才是决定下一步做什么的东西。 */}
+                            {c.status === "blocked" && c.blocked_reason && (
+                              <div
+                                className="mt-0.5 max-w-[9rem] truncate text-[10.5px] text-[var(--bad-fg)]"
+                                title={c.blocked_reason}
+                              >
+                                {c.blocked_reason}
+                              </div>
+                            )}
                           </td>
-                          <td className="w-16 px-2 py-2.5">
+                          <td className="w-16">
                             <button onClick={() => toggleEnabled(c)} title={t("Toggle enabled")}>
                               {c.enabled ? <Badge status="passed">{t("on")}</Badge> : <Badge status="cancelled">{t("off")}</Badge>}
                             </button>
                           </td>
-                          <td className="w-28 whitespace-nowrap px-2 py-2.5">
+                          <td className="w-28 whitespace-nowrap">
                             {c.last_status ? (
                               <Link
                                 to={c.last_run_id ? `/projects/${pid}/runs/${c.last_run_id}` : "#"}
@@ -614,7 +676,7 @@ export function CasesPage() {
                               <span className="text-[11.5px] text-ink-400">{t("never run")}</span>
                             )}
                           </td>
-                          <td className="px-2 py-2.5 text-right">
+                          <td className="text-right">
                             <div className="flex justify-end gap-1">
                               <Button variant="outline" size="sm" onClick={() => setEditing(c)}>
                                 {t("Edit")}
@@ -632,7 +694,7 @@ export function CasesPage() {
                       ))}
                       {hidden > 0 && (
                         <tr className="tp-row">
-                          <td colSpan={9} className="px-3 py-2.5 text-center">
+                          <td colSpan={9} className="text-center">
                             <button
                               onClick={() => setShownRows((m) => ({ ...m, [module]: shown + ROW_PAGE }))}
                               className="rounded-md px-3 py-1.5 text-[12.5px] font-medium text-brand-700 outline-none transition-colors hover:bg-[var(--hover)] focus-visible:ring-2 focus-visible:ring-brand-100"
@@ -762,6 +824,106 @@ export function CasesPage() {
           )}
         </Modal>
       )}
+
+      {/* 从需规生成用例。关闭后重新拉列表：面板里刚存下的草稿要立刻出现在表格里，
+          否则用户会以为"存了但没生效"然后再存一遍。 */}
+      {showSpecGen && (
+        <SpecGenPanel
+          pid={pid}
+          onClose={() => {
+            setShowSpecGen(false);
+            load();
+          }}
+        />
+      )}
+
+      {bulkStatus && (
+        <BulkStatusModal
+          status={bulkStatus}
+          count={selected.size}
+          onClose={() => setBulkStatus(null)}
+          onSubmit={async (reason) => {
+            try {
+              const r = await api.setCasesStatus(pid, [...selected], bulkStatus, reason);
+              toast("success", t("Updated {{n}} cases", { n: r.changed }));
+              setBulkStatus(null);
+              setSelected(new Set());
+              load();
+            } catch (e) {
+              fail(e);
+            }
+          }}
+        />
+      )}
     </div>
+  );
+}
+
+
+/** 批量改状态的确认弹窗。
+ *
+ *  `blocked` 必须收集原因才允许提交：这个状态的**全部价值**就是那条原因。
+ *  只标一个红点的话，下一个人只能把这条用例重新跑一遍才知道它为什么被挡住 ——
+ *  而"重跑一遍"往往要花几分钟，这正是这个状态本该省掉的事。
+ */
+function BulkStatusModal({
+  status,
+  count,
+  onClose,
+  onSubmit,
+}: {
+  status: "active" | "blocked";
+  count: number;
+  onClose: () => void;
+  onSubmit: (reason: string) => void;
+}) {
+  const { t } = useTranslation();
+  const [reason, setReason] = useState("");
+  const [busy, setBusy] = useState(false);
+  const blocked = status === "blocked";
+  const canSubmit = !blocked || reason.trim().length > 0;
+
+  return (
+    <Modal onClose={onClose} className="max-w-lg">
+      {(close) => (
+        <Card className="p-5">
+          <div className="mb-1 text-[15px] font-semibold text-ink-900">
+            {blocked
+              ? t("Mark {{n}} cases as blocked", { n: count })
+              : t("Enable {{n}} cases", { n: count })}
+          </div>
+          <div className="mb-3 text-xs text-ink-500">
+            {blocked
+              ? t("A blocked case stays in the list with its history — it just leaves the regression set until the reason is resolved.")
+              : t("Enabled cases join the next run-all. Blocked reasons are cleared.")}
+          </div>
+          {blocked && (
+            <Field label={t("Why can the agent not run these?")}>
+              <textarea
+                value={reason}
+                onChange={(e) => setReason(e.target.value)}
+                rows={3}
+                placeholder={t("e.g. needs a human to create the approval record in another system first")}
+                className="w-full rounded-lg border border-[var(--line)] bg-[var(--panel)] px-2.5 py-1.5 text-[12.5px] text-ink-900 outline-none focus:border-brand-500"
+              />
+            </Field>
+          )}
+          <div className="mt-4 flex justify-end gap-2">
+            <Button variant="outline" onClick={close}>
+              {t("Cancel")}
+            </Button>
+            <Button
+              disabled={!canSubmit || busy}
+              onClick={() => {
+                setBusy(true);
+                onSubmit(reason);
+              }}
+            >
+              {busy ? t("Saving…") : t("Confirm")}
+            </Button>
+          </div>
+        </Card>
+      )}
+    </Modal>
   );
 }

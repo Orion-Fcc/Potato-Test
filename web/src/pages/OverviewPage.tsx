@@ -11,6 +11,7 @@ import { Empty, PageSkeleton } from "../components/feedback";
 import { SetupChecklist } from "../components/SetupChecklist";
 import { FailureDigestPanel } from "../components/FailureDigestPanel";
 import { CaseChangePanel } from "../components/CaseChangePanel";
+import { ApiEndpointsPanel } from "../components/ApiEndpointsPanel";
 
 export function OverviewPage() {
   const { t } = useTranslation();
@@ -91,6 +92,11 @@ export function OverviewPage() {
       {/* 用例改动审计：谁（人/助手）把哪条用例的哪个字段改成了什么。
           放在 KPI 之后、趋势之前 —— 和上方的失败清单呼应（清单驱动改动，审计记录改动）。 */}
       <CaseChangePanel />
+
+      {/* 后端接口探索（2026-10-09）。放在概览里而不是塞进设置页：
+          它是"这个系统长什么样"的一部分（菜单、列表数据从哪来），
+          和上面的 KPI/失败清单是同一类"看一眼就懂"的信息。 */}
+      <ApiEndpointsPanel pid={pid} />
 
       {stats.run_count === 0 ? (
         <Empty

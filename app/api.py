@@ -15,6 +15,7 @@ from urllib.parse import unquote
 from fastapi import APIRouter, Depends, File, HTTPException, Request, Response, UploadFile
 from fastapi.responses import RedirectResponse, StreamingResponse
 from sqlalchemy import delete, func, select
+from sqlalchemy.exc import IntegrityError
 from sse_starlette.sse import EventSourceResponse
 
 from app import auth, docparse, excel, feishu, feishu_notify, mailer, notify
@@ -1295,6 +1296,649 @@ async def search_project_knowledge(pid: int, request: Request, body: KnowledgeIn
     return await knowledge.search(pid, body.text or "")
 
 
+# ---- 从需规文档生成用例（2026-10-09）------------------------------------
+#
+# 串起原本散落的三步：文档已进知识库 → 按章节生成草稿 → 人工审阅后启用/直接跑。
+# 刻意**不**做成一个大而全的"一键生成全部"：一份 46 万字的需规一次生成几十上百条，
+# 调用会失控，而且生成质量无法逐节确认。所以接口按"列章节 → 逐节生成 → 审阅"三段拆开。
+
+
+@router.get("/projects/{pid}/api-endpoints")
+async def list_api_endpoints(pid: int, request: Request, writable: str = "") -> dict:
+    """从页面流量里学到的后端接口（2026-10-09）。
+
+    用户需求：「这个系统也要有探索后端的能力……去拿到这个菜单或者相关的数据」。
+
+    这张清单是**观察**来的，不是扫描来的 —— 页面为了渲染必然要调后端，
+    那些请求就是权威答案。所以清单里的每条接口都是真实在用的。
+    写入由 `executor._persist_endpoints` 在每轮用例结束时完成。
+
+    `writable` 可选过滤："1" 只看写接口，"0" 只看读接口。
+    界面上默认展示全部，但**写接口应当有明显标记** —— 它们只能看，不能被用例直接调用。
+    """
+    await _project_access(request, pid, "viewer")
+    from sqlalchemy import select
+
+    from app.models import ApiEndpoint
+
+    async with db_session() as s:
+        await _get_project_or_404(s, pid)
+        rows = (
+            (
+                await s.execute(
+                    select(ApiEndpoint)
+                    .where(ApiEndpoint.project_id == pid)
+                    .order_by(ApiEndpoint.hits.desc(), ApiEndpoint.path)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    if writable == "1":
+        rows = [r for r in rows if r.writable]
+    elif writable == "0":
+        rows = [r for r in rows if not r.writable]
+    return {
+        "endpoints": [
+            {
+                "id": r.id,
+                "method": r.method,
+                "path": r.path,
+                "sample": r.sample,
+                "query": r.query or {},
+                "body_fields": r.body_fields or [],
+                "hits": r.hits,
+                "writable": r.writable,
+                "origin": r.origin,
+                "last_seen": r.last_seen.isoformat() if r.last_seen else None,
+            }
+            for r in rows
+        ],
+        "total": len(rows),
+        # 有没有可探索的后端，取决于"跑过用例没有" —— 界面上要据此给出下一步提示，
+        # 而不是显示一个空表让人以为功能坏了。
+        "note": (
+            "这些接口是从**跑用例时页面实际发出的请求**里观察到的。"
+            "先把用例跑一轮，清单才会长出来。"
+            if not rows
+            else "写接口只做了解，用例不会直接调用它们（探索只读）。"
+        ),
+    }
+
+
+@router.post("/projects/{pid}/api-endpoints/probe")
+async def probe_api_endpoint(pid: int, request: Request, body: dict) -> dict:
+    """只读重放一个观察到的接口，用来核对数据（2026-10-09）。
+
+    用户选定的边界是「探索只读，写操作必须显式声明」，所以这里：
+
+    * **只允许 GET/HEAD/OPTIONS** —— 写方法由 `api_probe.method_allowed` 拒绝；
+    * **只允许打向项目自己的后端** —— 用 `build_url` 挡掉一切离开 origin 的写法
+      （`//evil.com`、绝对 URL、`..` 穿越），否则这就是一个拿着项目凭据的 SSRF 跳板；
+    * **需要 editor 权限** —— 它会带着项目凭据发出真实请求。
+
+    请求体：{"method":"GET","path":"/api/menu","params":{...}}
+    """
+    await _project_access(request, pid, "editor")
+    from app import api_probe
+    from app.models import ApiEndpoint
+
+    method = str(body.get("method") or "GET").upper()
+    path = str(body.get("path") or "")
+    if not path:
+        raise HTTPException(400, "path 不能为空")
+    if not api_probe.method_allowed(method):
+        raise HTTPException(
+            403,
+            f"只允许只读方法（{'/'.join(sorted(api_probe.READ_METHODS))}），"
+            f"{method} 会改动数据 —— 探索阶段的写请求可能在你测试环境里建/删真数据。",
+        )
+
+    async with db_session() as s:
+        proj = await _get_project_or_404(s, pid)
+        # 只允许重放**已经观察到**的接口。这一条把"探索"和"扫接口"彻底分开：
+        # 不能让这个端点变成一个可以打任意路径的探针。
+        row = (
+            await s.execute(
+                select(ApiEndpoint).where(
+                    ApiEndpoint.project_id == pid,
+                    ApiEndpoint.method == method,
+                    ApiEndpoint.path == path,
+                )
+            )
+        ).scalar_one_or_none()
+        if row is None:
+            raise HTTPException(
+                404,
+                f"没有观察到过 {method} {path}。只允许调用已发现的接口 —— "
+                "请先跑一轮用例，让页面把接口暴露出来。",
+            )
+        base = (proj.base_url or "").strip()
+
+    if not base:
+        raise HTTPException(400, "项目没有配置页面地址（base_url），无法确定后端 origin")
+
+    # 用项目自己的后端 origin。菜单接口通常要登录态，所以带上浏览器里那份会话。
+    origin = _origin_of(base)
+    headers = await _probe_headers(pid)
+    prober = api_probe.Prober(origin, headers)
+    res = await prober.get(path, {k: v for k, v in (body.get("params") or {}).items()})
+    return res.as_dict() | {"origin": origin, "method": method}
+
+
+def _origin_of(url: str) -> str:
+    from urllib.parse import urlparse
+
+    p = urlparse(url or "")
+    return f"{p.scheme}://{p.netloc}" if p.scheme and p.netloc else ""
+
+
+async def _observed_endpoints(pid: int, limit: int = 25) -> list:
+    """项目已观察到的后端接口（按被调用次数降序，取前 limit 个）。"""
+    try:
+        from sqlalchemy import select
+
+        from app.models import ApiEndpoint
+
+        async with db_session() as s:
+            return list(
+                (
+                    await s.execute(
+                        select(ApiEndpoint)
+                        .where(ApiEndpoint.project_id == pid)
+                        .order_by(ApiEndpoint.hits.desc(), ApiEndpoint.path)
+                        .limit(limit)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+    except Exception:  # noqa: BLE001 — 接口清单是**增强**，拿不到不该让生成失败
+        return []
+
+
+def _api_context_note(endpoints: list) -> str:
+    """把接口清单压成给模型的一段说明。没有接口时返回空串。
+
+    刻意与 `api_probe.summarize_for_prompt` 分开：那个是给"助手对话"用的措辞，
+    这个是给"生成用例"用的 —— 生成场景更需要一句"所以你的断言可以核对接口数据"，
+    否则模型看到一堆接口也不知道该拿它们干什么。
+    """
+    if not endpoints:
+        return ""
+    from app.api_probe import summarize_for_prompt
+
+    base = summarize_for_prompt(endpoints)
+    if not base:
+        return ""
+    return (
+        base
+        + "\n**生成用例时请利用这些接口**：菜单、列表这类内容往往是后端返回的，"
+        "所以更好的断言是核对「页面显示的内容」与「接口返回的数据」一致，"
+        "而不是只断言「页面上有某个元素」。\n"
+        "注意：写接口（POST/PUT/DELETE）只作了解，用例不要直接调用它们 —— "
+        "测试只能通过界面去改数据。"
+    )
+
+
+async def _probe_headers(pid: int) -> dict[str, str]:
+    """给只读探查用的请求头（带项目已保存的登录态）。
+
+    为什么要带：菜单、列表这些接口基本都要登录态，不带就只会拿到 401，
+    那"探索后端"就失去了意义 —— 用户要的正是"拿到这个菜单"。
+
+    只取凭据里那份 cookie/bearer，**不**记录、不回显。
+    """
+    headers: dict[str, str] = {}
+    try:
+        from sqlalchemy import select
+
+        from app.models import Credential
+
+        async with db_session() as s:
+            cred = (
+                await s.execute(
+                    select(Credential).where(Credential.project_id == pid).order_by(Credential.id)
+                )
+            ).scalars().first()
+        if cred is None:
+            return headers
+        from app import crypto
+
+        secret = crypto.decrypt(cred.secret) if cred.secret else ""
+        if not secret:
+            return headers
+        import json
+
+        if cred.type == "storage_state":
+            data = json.loads(secret)
+            cookies = data.get("cookies") or []
+            if cookies:
+                headers["Cookie"] = "; ".join(
+                    f"{c.get('name')}={c.get('value')}" for c in cookies if c.get("name")
+                )
+        elif cred.type == "token":
+            headers["Authorization"] = f"Bearer {secret}"
+        elif cred.type == "password":
+            # 用户名密码不能直接变成请求头 —— 那需要先登录换 token，
+            # 属于另一个流程。这里明确不做，让接口返回 401 而不是伪造一个坏请求。
+            pass
+    except Exception as exc:  # noqa: BLE001 — 拿不到凭据不是错误，接口会返回 401
+        # api.py 没有模块级 logger（其余地方也不需要），这里就地取一个。
+        import logging
+
+        logging.getLogger("potato-test.api").debug("api: 取探查凭据失败：%s", exc)
+    return headers
+
+
+def spec_outline_progress(*, total: int, lo: int, hi: int, failed: bool) -> dict:
+    """分批规划的进度三件套（2026-10-09 抽出成纯函数，便于单测）。
+
+    ## 为什么需要一个纯函数
+
+    这里有一个**实测踩到**的缺陷：一份 586 个标题的文档，第 3 批起网关持续返回 500，
+    而接口仍然回 `has_more=true` —— 界面于是给用户一个「规划下一批」按钮，
+    点一次失败一次，**永远推不动**。用户能做的只有反复点同一个键，而且
+    完全看不出是网关的问题还是功能的问题。
+
+    失败时的正确表达是"这批没成功，你可以重试"，而不是"后面还有很多"。
+    这条规则值得单独钉住 —— 藏在接口里就只能靠端到端测试才碰得到。
+    """
+    return {
+        "total": total,
+        # 失败时 planned_until 停在起点（lo）：没有推进，就不该让界面以为推进了。
+        # 否则界面显示"已规划 120/586"而实际一个模块都没拿到 ——
+        # 用户看到的进度是假的，下次还会从同一个位置重试失败。
+        "planned_until": lo if failed else hi,
+        "has_more": bool(hi < total and not failed),
+        "batch_from": lo,
+        "batch_to": hi,
+        "failed": bool(failed),
+    }
+
+
+@router.post("/projects/{pid}/spec/upload")
+async def spec_upload(
+    pid: int,
+    request: Request,
+    file: UploadFile = File(...),
+    append: bool = True,
+) -> dict:
+    """把一份需规文档直接吃进项目，并返回可生成的模块清单（2026-10-09）。
+
+    ## 为什么要有这一个端点
+
+    用户的原话是：「我想让这个 agent 实现的功能应该是我发需归文件给内置的助手，
+    包括不同格式，然后它可以生成测试用例」。在那之前这件事是**三步手工**：
+    界面上传 → 等解析 → 再去另一个面板点生成，而且每一步都要用户自己把上下文带过去。
+
+    这里合成一步：**上传即入库、入库即规划**。格式由 `app/docparse.py` 处理，
+    已经支持 md / txt / json / csv / docx / pdf / xlsx / html / rtf
+    （以及任何纯文本）—— 这块能力本来就有，缺的是把它接到"生成用例"这条路上。
+
+    `append=true`（默认）把文档**追加**进知识库：一个项目的需规常常是好几份文件
+    （需求说明 + 字段表 + 流程图），替换式上传会让上一次的内容消失，
+    而用户通常并不知道这一点。要整份替换得显式传 `append=false`。
+
+    规划失败或文档没有标题时**不是错误** —— 仍然返回已入库的事实与提示，
+    用户至少知道文件进去了（否则会反复重传同一份文件）。
+    """
+    await _project_access(request, pid, "editor")
+    from app import docparse, knowledge, specgen
+
+    data = await _read_upload_capped(file, docparse.MAX_UPLOAD_BYTES)
+    try:
+        res = docparse.extract(file.filename or "", data)
+    except docparse.UnsupportedDocument as e:
+        raise HTTPException(400, str(e)) from e
+    except Exception as e:  # noqa: BLE001 — 损坏文件给一句清楚的话，而不是 500
+        raise HTTPException(400, f"读不了「{file.filename}」：{e}") from e
+
+    async with db_session() as s:
+        await _get_project_or_404(s, pid)
+        if append:
+            await knowledge.append_knowledge(s, pid, res.text, source=file.filename or "upload")
+        else:
+            await knowledge.replace_knowledge(s, pid, res.text, source=file.filename or "upload")
+
+    headings = await specgen.list_headings(pid)
+    planned = await specgen.plan_modules(headings[: specgen.MAX_SECTIONS], await specgen.document_intro(pid))
+    modules = planned.modules
+    # 规划失败（网关不可用、配额用完、返回格式不对）**也要给出可用的分批**。
+    #
+    # 为什么：文档已经入库了，用户此刻的诉求是"拿它生成用例"。如果这里回一个空列表，
+    # 用户看到的是"上传成功但没有可生成的模块"，只能反复重传 —— 而真正的问题
+    # （模型调不通）藏在 error 字段里，没人会去看。
+    # 退化成"一个标题一个模块"粒度更碎，但整条路仍然走得通，而且 error 会如实带出去。
+    degraded = planned.degraded
+    if not modules and headings:
+        modules = specgen.group_titles_into_modules(headings[: specgen.MAX_SECTIONS])
+        degraded = True
+    return {
+        "filename": file.filename,
+        "format": res.fmt,
+        "chars": res.chars,
+        "truncated": res.truncated,
+        # 解析警告要带出去：空文档、图片型 PDF 这类情况**看起来是成功的**，
+        # 用户只有看到警告才知道"为什么后面生成不出用例"。
+        "warnings": res.warnings
+        + ([] if headings else ["文档里没找到章节标题 —— 可能是纯文本或扫描件，按标题分批生成会用不上"]),
+        "appended": append,
+        "headings": len(headings),
+        "modules": modules,
+        # 586 个标题的实测：一批只规划 60 个，所以必须告诉界面"还有多少"，
+        # 否则用户以为文档就这么大（这正是第一版的 bug）。
+        "planned_until": min(len(headings), specgen.MAX_SECTIONS),
+        "has_more": len(headings) > specgen.MAX_SECTIONS,
+        "usage": planned.usage or None,
+        "error": planned.error or None,
+        "degraded": degraded,
+    }
+
+
+@router.get("/projects/{pid}/spec/outline")
+async def spec_outline(
+    pid: int,
+    request: Request,
+    plan: bool = True,
+    start: int = 0,
+    chunk: int = 0,
+    refresh: bool = False,
+) -> dict:
+    """列出文档可以按哪些模块/章节分批生成用例。
+
+    ## 为什么要分批规划（2026-10-09 真机实测纠正）
+
+    实测那份《培训资源管理》合并需规有 **586 个章节标题**。第一版实现直接把
+    `headings[:60]` 送进规划，于是 **526 个标题（90% 的文档）被静默丢掉** ——
+    用户看到"2 个模块"还以为文档就这么大。这类"看起来正常、产出少一大截、
+    没有任何提示"的行为比报错糟糕得多。
+
+    现在改成**按文档顺序分块规划**：`start` 是本批的起点下标，`chunk` 是本批大小
+    （0 = 用默认值）。响应里的 `total / planned_until / has_more` 让界面能如实显示
+    "已规划 60 / 586，还有 526 个标题没规划"，并提供"继续规划下一批"。
+
+    `plan=false` 时只返回按原文顺序去重的标题清单，不调模型（零 token）。
+    """
+    await _project_access(request, pid, "viewer")
+    from app import specgen
+
+    async with db_session() as s:
+        await _get_project_or_404(s, pid)
+
+    headings = await specgen.list_headings(pid)
+    if not headings:
+        return {
+            "headings": [],
+            "modules": [],
+            "has_knowledge": False,
+            "total": 0,
+            "planned_until": 0,
+            "has_more": False,
+            "note": "这个项目还没有需规/资料。先在「需规 / 资料」里上传文档（支持 Word/PDF/Excel/Markdown/txt）。",
+        }
+
+    if not plan:
+        return {
+            "headings": headings,
+            "modules": specgen.group_titles_into_modules(headings),
+            "has_knowledge": True,
+            "planned": False,
+            "total": len(headings),
+            "planned_until": len(headings),
+            "has_more": False,
+        }
+
+    size = chunk if chunk and chunk > 0 else specgen.MAX_SECTIONS
+    lo = max(0, min(int(start), len(headings)))
+    hi = min(lo + size, len(headings))
+
+    # ★ 走带缓存的那条：同一批连续调用会得到**同一个分批结果**，并且不再花 token。
+    # 为什么必须这样：实测同一份文档连调四次，模型给出 2/16/18/13 个模块 ——
+    # 用户刚看到"16 个可测模块"，刷新一下变成"2 个、0 个可测"，只能认为功能坏了；
+    # 而且每次刷新都白烧一次规划调用（用户要求降消耗）。
+    # `refresh=true` 时绕过缓存 —— "重新分批"必须是用户主动的动作，不是刷新的副作用。
+    if refresh:
+        specgen.clear_plan_cache(pid)
+    # ★ 只在这一批的窗口内重排，把"最可能有需求的"排在前面（见 specgen.rank_window）。
+    # 全局顺序不动 —— planned_until 的推进语义依赖窗口是按序切的。
+    res = await specgen.plan_modules_cached(
+        pid,
+        specgen.rank_window(headings, lo, hi, pid),
+        lo,
+        hi,
+        await specgen.document_intro(pid),
+    )
+    # ★ 这一批**失败**时不能再报 has_more=true（2026-10-09 实测）。
+    #
+    # 实测：一份 586 个标题的文档，第 3 批开始网关持续返回 500（do_request_failed），
+    # 而接口仍然回 has_more=true —— 界面于是给用户一个"规划下一批"按钮，
+    # 点一次失败一次，而且**永远推不动**。用户能做的只有反复点。
+    #
+    # 失败时的正确表达是"这批没成功，你可以重试"，而不是"后面还有很多"。
+    # 所以失败时把 has_more 置 false 并带上 error，让界面停在错误上。
+    failed = bool(res.error) and not res.modules
+    return {
+        # headings 仍然返回**全部**标题：界面要能显示"还有多少没规划"，
+        # 而且用户可能想直接看清单（这一步不花钱）。
+        "headings": headings,
+        "modules": res.modules,
+        "has_knowledge": True,
+        "planned": True,
+        "degraded": res.degraded,
+        "cached": res.cached,
+        "usage": res.usage or None,
+        "error": res.error or None,
+        # 进度三件套见 spec_outline_progress 的注释（失败时不能报 has_more）。
+        **spec_outline_progress(total=len(headings), lo=lo, hi=hi, failed=failed),
+    }
+
+
+@router.post("/projects/{pid}/spec/draft")
+async def spec_draft(pid: int, request: Request, body: dict) -> dict:
+    """针对一个模块生成一批**草稿用例**（不落库，先给用户看）。
+
+    为什么不直接落库：LLM 生成的用例不可能全对，而回归集里混进一条永远失败的
+    假用例，代价是每次运行都红一次、且没人能证明它错。所以生成与入库分成两步，
+    中间必须有人过一眼（见 `spec/accept`）。
+
+    请求体：{"module": "模块名", "titles": ["逐字标题", ...]}
+    """
+    await _project_access(request, pid, "editor")
+    from app import specgen
+
+    module = str(body.get("module") or "").strip()
+    titles = [str(t) for t in (body.get("titles") or []) if str(t).strip()]
+    if not titles:
+        raise HTTPException(400, "titles 不能为空 —— 需要知道生成哪一节")
+
+    async with db_session() as s:
+        await _get_project_or_404(s, pid)
+
+    text = await specgen.section_text(pid, titles)
+    if not text:
+        raise HTTPException(
+            404,
+            "这些标题在知识库里找不到正文（可能文档被重新上传过）。请重新加载章节列表。",
+        )
+
+    # ★ 把"从页面流量里学到的后端接口"拼进生成上下文（2026-10-09）。
+    #
+    # 为什么这一步很关键：只知道界面的话，模型写断言只能写"点了菜单应该看到列表"，
+    # 而它**不知道数据从哪来** —— 菜单往往是后端给的，列表数据其实是某个
+    # `/api/xxx/list` 的返回。带上接口清单之后，模型就能写出"核对接口返回的
+    # 菜单项与页面侧边栏一致"这类真正有判别力的用例，而不是只描述像素。
+    #
+    # 没有接口时（还没跑过用例）返回空串，提示词与以前完全一样。
+    ctx = await specgen.document_intro(pid, 800)
+    eps = await _observed_endpoints(pid)
+    api_note = _api_context_note(eps)
+    if api_note:
+        ctx = f"{ctx}\n\n{api_note}" if ctx else api_note
+
+    res = await specgen.generate_for_section(
+        module or titles[0],
+        text,
+        extra_context=ctx,
+    )
+    return {
+        "module": module or titles[0],
+        "titles": titles,
+        "cases": [c.as_dict() for c in res.cases],
+        "dropped": res.dropped,
+        "count": len(res.cases),
+        "usage": res.usage or None,
+        "source": _spec_source(module or titles[0]),
+        "error": res.error or None,
+        # 0 条时告诉用户**为什么**。见 specgen.generate_for_section 末尾的说明：
+        # 不解释的话，用户看到"0 条"只能反复点同一个按钮。
+        "note": res.note or None,
+    }
+
+
+def _spec_source(module: str) -> str:
+    """草稿用例的来源标记，落进 TestCase.source。
+
+    格式短、可读、可筛选："spec:<模块名>"。模块名就是章节名，
+    所以事后能回答"这条用例是从哪一节生成的"。
+    """
+    return f"spec:{module}"[:300]
+
+
+@router.post("/projects/{pid}/testcases/status")
+async def bulk_set_case_status(pid: int, request: Request, body: dict) -> dict:
+    """批量改用例状态（2026-10-09）。
+
+    为什么必须批量：从需规生成一次常见的量级是几十到两百条，全部先落 `draft`。
+    逐条 PATCH 意味着"审阅 120 条草稿 = 120 次请求"，而且界面要么做乐观更新、
+    要么在每一条上等一个往返 —— 审阅体验会直接决定用户愿不愿意用这个功能。
+
+    请求体：{"ids":[...], "status":"draft"|"active"|"deprecated"|"blocked",
+             "reason":"..."}
+
+    只接受白名单取值：这是**批量**写，写错一个值就是几十条用例一起错。
+
+    ★ `blocked` 是用户明确要求的那一档（"有些用例 agent 可能执行不了"）。
+    它和 `deprecated` 的区别见 app/schemas.py::CaseStatus —— 一句话：
+    deprecated 是"这条不要了"，blocked 是"这条有效，但现在跑不了"。
+    转 blocked 时 `reason` 必填：只标状态不写原因，过一个月没人知道它为什么被挡住。
+    """
+    await _project_access(request, pid, "editor")
+    from app.schemas import CaseStatus  # noqa: F401  (keeps the allowed set in one place)
+
+    ids = [int(i) for i in (body.get("ids") or []) if str(i).strip()]
+    status = str(body.get("status") or "").strip()
+    reason = str(body.get("reason") or "").strip()[:2000]
+    allowed = {"draft", "active", "deprecated", "blocked"}
+    if not ids:
+        raise HTTPException(400, "ids 不能为空")
+    if status not in allowed:
+        raise HTTPException(400, f"status 必须是 {sorted(allowed)} 之一")
+    # blocked 必须带原因：这个状态的**全部价值**就是那个原因。
+    # 允许空原因会让它退化成"一个没有解释的红点"。
+    if status == "blocked" and not reason:
+        raise HTTPException(
+            400,
+            "标为 blocked 时必须说明原因（reason）—— "
+            "否则下一个人只能重新试一遍才知道它为什么跑不了。",
+        )
+
+    async with db_session() as s:
+        await _get_project_or_404(s, pid)
+        rows = (
+            (await s.execute(select(TestCase).where(TestCase.id.in_(ids)))).scalars().all()
+        )
+        # 归属校验：ids 是调用方给的，必须逐条确认都在这个项目里，
+        # 否则一个项目可以改另一个项目的用例状态。
+        foreign = [r.id for r in rows if r.project_id != pid]
+        if foreign:
+            raise HTTPException(403, f"用例 {foreign[:5]} 不属于项目 {pid}")
+        changed = 0
+        for r in rows:
+            if r.status != status or (status == "blocked" and r.blocked_reason != reason):
+                r.status = status
+                # 启用的同时把 enabled 归位：草稿期用户可能关过它，
+                # 现在明确要"启用"，两个字段不一致会让"运行全部启用用例"的行为难以解释。
+                if status == "active":
+                    r.enabled = True
+                if status == "blocked":
+                    # 被挡住的用例必须从回归集里出来，否则"挡住"只是个标签，
+                    # 下一次全量运行照样会跑到它、照样失败一次。
+                    r.enabled = False
+                    r.blocked_reason = reason
+                elif status == "active":
+                    # 解除阻挡时清掉旧原因：一条已经启用的用例还挂着
+                    # "为什么跑不了"，后面看报告的人会被这条过期信息误导。
+                    r.blocked_reason = ""
+                changed += 1
+    return {
+        "requested": len(ids),
+        "found": len(rows),
+        "changed": changed,
+        "status": status,
+        "reason": reason if status == "blocked" else "",
+    }
+
+
+@router.post("/projects/{pid}/spec/accept")
+async def spec_accept(pid: int, request: Request, body: dict) -> dict:
+    """把审阅过的草稿**落库**为用例（默认 status=draft，仍不进回归集）。
+
+    请求体：{"cases":[{name,prompt,expected,module,type,priority,precondition}],
+             "activate": false}
+
+    ★ `activate=false`（默认）时落库的用例是 `status=draft`，**不会**被
+    "运行全部启用用例"选中 —— 这正是"先审后启用"的机制保障。
+    只有用户显式传 `activate=true` 才直接建成 active。
+    """
+    await _project_access(request, pid, "editor")
+    from app import specgen
+
+    raw = body.get("cases")
+    if not isinstance(raw, list) or not raw:
+        raise HTTPException(400, "cases 不能为空")
+
+    # 走同一个解析器：界面回传的是模型产物经过用户编辑的结果，
+    # 用户也可能把 expected 清空 —— 那就必须在入库前再拦一次。
+    cases, dropped = specgen.parse_cases(raw, module_hint=str(body.get("module") or ""))
+    if not cases:
+        raise HTTPException(400, f"没有可入库的用例：{'; '.join(dropped) or '全部不完整'}")
+
+    activate = bool(body.get("activate"))
+    module = str(body.get("module") or "").strip()
+    source = str(body.get("source") or _spec_source(module))[:300]
+
+    async with db_session() as s:
+        await _get_project_or_404(s, pid)
+        created: list[dict] = []
+        for c in cases:
+            key = await _next_case_key(s, pid)
+            row = TestCase(
+                project_id=pid,
+                case_key=key,
+                name=c.name,
+                prompt=c.prompt,
+                expected=c.expected,
+                module=c.module or module,
+                type=c.type,
+                priority=c.priority,
+                preconditions=c.precondition,
+                # ★ 草稿是默认。回归集只收用户明确启用的东西。
+                status="active" if activate else "draft",
+                enabled=True,
+                source=source,
+            )
+            s.add(row)
+            await s.flush()
+            created.append({"id": row.id, "case_key": row.case_key, "name": row.name})
+    return {
+        "created": created,
+        "count": len(created),
+        "status": "active" if activate else "draft",
+        "dropped": dropped,
+    }
+
+
 @router.get("/projects/{pid}/stats")
 async def project_stats(pid: int, request: Request) -> dict:
     await _project_access(request, pid, "viewer")
@@ -1399,19 +2043,20 @@ async def _get_project_or_404(s, pid: int) -> Project:
 
 
 @router.get("/projects/{pid}/testcases")
-async def list_cases(pid: int, request: Request) -> list[dict]:
+async def list_cases(pid: int, request: Request, status: str = "") -> list[dict]:
+    """项目下的用例。
+
+    `status` 可选过滤（2026-10-09 加）：从需规生成的用例默认落成 `draft`，
+    审阅页需要"只看草稿"这一个视图。此前列表没有服务端过滤，前端筛，
+    草稿一多（生成 200 条很常见）每次都要把全部用例和它们的最近结果一起拉下来。
+    """
     await _project_access(request, pid, "viewer")
     async with db_session() as s:
         await _get_project_or_404(s, pid)
-        rows = (
-            (
-                await s.execute(
-                    select(TestCase).where(TestCase.project_id == pid).order_by(TestCase.id)
-                )
-            )
-            .scalars()
-            .all()
-        )
+        q = select(TestCase).where(TestCase.project_id == pid)
+        if status:
+            q = q.where(TestCase.status == status)
+        rows = (await s.execute(q.order_by(TestCase.id))).scalars().all()
         # latest RunResult per case (coverage / pass-rate / compare, and the cases table's
         # "last result" column); one query, newest-first, keep the first row seen per case.
         last: dict[int, LastResult] = {}
@@ -1435,20 +2080,8 @@ async def list_cases(pid: int, request: Request) -> list[dict]:
         return [_case(c, last.get(c.id)) for c in rows]
 
 
-async def _next_case_key(s, pid: int) -> str:
-    """Readable per-project id like TC-001.
-
-    2026-10-04 修两个缺陷：
-
-    1. **删过用例就会重号。** 旧实现用 `COUNT(*)` 当序号：删掉 TC-005 后总数少 1，
-       下一条新建的又拿到 TC-005 —— 两条不同用例撞同一个编号，报告和缺陷单里
-       无法区分。改成取**已用编号的最大值 +1**，序号只增不减。
-    2. **跨项目只靠前缀区分。** 每个项目都从 TC-001 开始，所以光看 "TC-001"
-       根本不知道是哪个项目的。这里保持 TC-NNN 的显示格式（563 条存量用例都在用，
-       改格式等于让所有历史报告对不上号），但把项目维度交给
-       `(project_id, case_key)` 唯一约束去保证，并在所有按编号查找的地方
-       强制带 project_id —— 见 _find_case_by_key。
-    """
+async def _reserved_case_keys(s, pid: int) -> list[str]:
+    """项目里已有的、形如 TC-<数字> 的编号。"""
     rows = (
         await s.execute(
             select(TestCase.case_key).where(
@@ -1456,15 +2089,80 @@ async def _next_case_key(s, pid: int) -> str:
             )
         )
     ).scalars().all()
+    return [k for k in rows if k]
 
+
+def _key_number(key: str | None) -> int | None:
+    """`TC-007` -> 7；不是这个形状（如导入的自由文本 "REQ-12"）-> None。
+
+    只认 TC-<数字>：Excel 导入允许自由文本编号，对它做 int() 会抛异常把整批导入打断。
+    """
+    m = re.fullmatch(r"TC-(\d+)", (key or "").strip())
+    return int(m.group(1)) if m else None
+
+
+async def _next_case_key(s, pid: int) -> str:
+    """Readable per-project id like TC-001，来自项目的**永久计数器**。
+
+    历史（两个已修的缺陷，别再退回去）：
+
+    1. `COUNT(*)` 当序号：删掉一条后总数少 1，下一条又拿到刚删掉的号 ——
+       两条不同用例撞同一个编号，报告和缺陷单里无法区分。
+    2. 改成"现有编号的最大值 +1"：修好了中间挖洞（删 TC-003 不会重发），
+       但**删掉最大编号仍会重发**：TC-001..TC-005 里删掉 TC-005，下一条又是 TC-005。
+       根因是把"下一个号"当成能从当前数据推导出来的东西，而它其实是
+       "发行过就不回收"的事实 —— 必须自己存（见 models.Project.case_seq）。
+
+    所以这里读写的是 `project.case_seq`，只增不减，删用例不动它。
+    老库该列是后加的（值为 0 = 尚未回填），第一次发号时从现有最大编号回填。
+
+    编号格式保持 `TC-NNN`：存量 1203 条用例都在用，改格式等于让所有历史报告对不上号。
+    跨项目只靠 `(project_id, case_key)` 唯一约束区分 —— 每个项目都从 TC-001 开始是设计如此。
+    """
+    proj = await s.get(Project, pid)
+    if proj is None:
+        raise HTTPException(404, "project not found")
+    await _backfill_case_seq(s, proj)
+    proj.case_seq += 1
+    # flush 不能省：Excel 导入是"一次会话里连着建多条"，号必须在同一批里递增，
+    # 否则这一批会全部拿到同一个号，然后一起撞唯一约束。
+    await s.flush()
+    return f"TC-{proj.case_seq:03d}"
+
+
+async def _backfill_case_seq(s, proj) -> None:
+    """把 `case_seq` 从 0（= 尚未回填）补成"现有用例的最大编号"。
+
+    只在为 0 时动手：计数器一旦发过号，它就是这个项目的真相，
+    再拿现有数据的最大值去覆盖它，等于把"删掉最大号"那个缺陷又请回来。
+    """
+    if proj.case_seq:
+        return
     top = 0
-    for k in rows:
-        # 只认 TC-<数字> 形式；导入的 Excel 里可能有自由文本编号（如 "REQ-12"），
-        # 那些不参与序号计算，否则 int() 会抛异常把整批导入打断。
-        m = re.fullmatch(r"TC-(\d+)", (k or "").strip())
-        if m:
-            top = max(top, int(m.group(1)))
-    return f"TC-{top + 1:03d}"
+    for k in await _reserved_case_keys(s, proj.id):
+        n = _key_number(k)
+        if n is not None:
+            top = max(top, n)
+    proj.case_seq = top
+
+
+async def _reserve_case_key(s, pid: int, key: str | None) -> None:
+    """把**手工指定**的编号计入计数器，避免它之后被自动编号撞上。
+
+    为什么必须有：用户可以导入或编辑出 `TC-050`，而计数器当时只到 3。
+    不回填的话自动编号会一路发到 TC-050 撞上唯一约束（或更糟，撞号）。
+    只在比当前计数大时才抬高 —— 计数器只增不减。
+    """
+    n = _key_number(key)
+    if n is None:
+        return
+    proj = await s.get(Project, pid)
+    if proj is None:
+        return
+    await _backfill_case_seq(s, proj)
+    if n > proj.case_seq:
+        proj.case_seq = n
+        await s.flush()
 
 
 @router.post("/projects/{pid}/testcases")
@@ -1475,6 +2173,9 @@ async def create_case(pid: int, body: TestCaseIn, request: Request) -> dict:
         data = body.model_dump()
         if not data.get("case_key"):
             data["case_key"] = await _next_case_key(s, pid)
+        else:
+            # 手工指定的号也要计入计数器，否则自动编号以后会一路发到它并撞车。
+            await _reserve_case_key(s, pid, data["case_key"])
         # 2026-10-04 多角色：归一化后再落库，并让 role 始终镜像 roles[0]。
         # 这样无论读哪一列、无论请求里只传了 role 还是只传了 roles，
         # 存下来的数据都自洽 —— 执行层也只需要认 roles 一个来源。
@@ -1483,7 +2184,17 @@ async def create_case(pid: int, body: TestCaseIn, request: Request) -> dict:
         data["role"] = _rs[0] if _rs else None
         c = TestCase(project_id=pid, **data)
         s.add(c)
-        await s.flush()
+        try:
+            await s.flush()
+        except IntegrityError as exc:
+            # (project_id, case_key) 复合唯一约束。以前这里直接 500，用户看到的是
+            # "服务器错误"，而真实原因是"这个编号在本项目里已经有了" —— 一个能自己
+            # 修的问题被报成了系统故障。约束是数据库强制的（不能只靠约定），所以
+            # 必须把它翻成一句人话。跨项目重名不算冲突：每个项目都从 TC-001 开始。
+            await s.rollback()
+            raise HTTPException(
+                409, f"编号 {data.get('case_key')} 在本项目里已经存在，请换一个。"
+            ) from exc
         return _case(c)
 
 
@@ -1531,6 +2242,34 @@ async def update_case(cid: int, body: TestCasePatch, request: Request) -> dict:
                 data["data_files"] = {"files": testdata.parse(body.data_files)} or None
             except testdata.SpecError as exc:
                 raise HTTPException(422, f"测试数据声明无效：{exc}") from exc
+        # blocked 的规则统一在这里收口（2026-10-09）：
+        #
+        #   * 转成 blocked 必须带原因 —— 这个状态的**全部价值**就是那条原因，
+        #     允许空原因会让它退化成"一个没有解释的红点"，下一个人只能重新试一遍。
+        #   * 离开 blocked 时清掉原因 —— 否则一条已经启用的用例还挂着"为什么跑不了"，
+        #     后面看报告的人会被这条过期信息误导。
+        #
+        # 放在 setattr 之前：校验失败时不应该有任何字段被改到。
+        if "status" in data:
+            _new_status = data["status"]
+            _incoming_reason = str(data.get("blocked_reason") or "").strip()
+            if _new_status == "blocked" and not (_incoming_reason or (c.blocked_reason or "").strip()):
+                raise HTTPException(
+                    400,
+                    "标为 blocked 时必须说明原因（blocked_reason）—— "
+                    "否则下一个人只能重新试一遍才知道它为什么跑不了。",
+                )
+            if _new_status == "blocked":
+                data["blocked_reason"] = _incoming_reason or (c.blocked_reason or "")
+                # 被挡住的用例必须从回归集里出来，否则"挡住"只是个标签，
+                # 下一次全量运行照样会跑到它、照样失败一次。
+                data["enabled"] = False
+            else:
+                data["blocked_reason"] = ""
+        # 改编号也要计入计数器（理由同 create_case）：手工把某条改成 TC-050 之后，
+        # 自动编号不能还傻乎乎地往 50 上撞。
+        if data.get("case_key"):
+            await _reserve_case_key(s, c.project_id, data["case_key"])
         # 改动前先快照这些字段的值 —— setattr 是就地的，事后拿不到旧值。
         # 审计要回答"哪一格被动了"，只有改之前的值才能回答。
         for k in data:
@@ -1985,6 +2724,9 @@ async def import_cases(pid: int, request: Request, file: UploadFile = File(...))
             payload = item.model_dump()
             if not payload.get("case_key"):
                 payload["case_key"] = await _next_case_key(s, pid)
+            else:
+                # 导入表里自带的编号同样要计入计数器（同 create_case 的理由）。
+                await _reserve_case_key(s, pid, payload["case_key"])
             s.add(TestCase(project_id=pid, **payload))
             await s.flush()
             imported += 1
@@ -2044,8 +2786,26 @@ async def create_run(pid: int, body: RunIn, request: Request) -> dict:
     await _project_access(request, pid, "editor")
     async with db_session() as s:
         proj = await _get_project_or_404(s, pid)
-        q = select(TestCase).where(TestCase.project_id == pid, TestCase.enabled == True)
+        # ★ "运行全部启用用例" 的取数口径：`enabled=True` **且** `status=active`。
+        #
+        # 2026-10-09 修：这里原来只看 `enabled`。而 `status` 与 `enabled` 是两个字段，
+        # 从需规生成的草稿落库时是 `status="draft", enabled=True` ——
+        # 于是"草稿不会被跑到"这个承诺**在 run-all 这条路径上是假的**：
+        # 用户点「运行全部」会把所有草稿一起跑掉，而且看起来完全正常。
+        # `tests/test_specgen_api.py` 里那条边界用例是照 `enabled and status=="active"`
+        # 的口径写的，所以它当时是绿的 —— 口径写对了，实现没跟上。
+        #
+        # 为什么用两个条件而不是只留 status：`enabled` 是用户手动勾的那个开关
+        # （界面上勾选框直接改它），单独把某条从回归集里摘掉时不该被迫改 status。
+        # 两个条件一起表达的是"启用 且 已审阅通过"，正是用户期望的语义。
+        q = select(TestCase).where(
+            TestCase.project_id == pid,
+            TestCase.enabled == True,  # noqa: E712 — SQLAlchemy 需要 == True 才能生成 IS
+            TestCase.status == "active",
+        )
         if body.case_ids:
+            # 显式点名要跑的用例不受这个口径限制：用户勾了草稿再点运行，
+            # 意思就是"我现在就要试这一条" —— 那正是审阅草稿的方式。
             q = select(TestCase).where(TestCase.project_id == pid, TestCase.id.in_(body.case_ids))
         cases = (await s.execute(q)).scalars().all()
         if body.tags:

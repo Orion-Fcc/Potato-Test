@@ -16,6 +16,9 @@ export const CASE_STATUS_LABELS: L = {
   draft: { zh: "草稿", en: "Draft" },
   active: { zh: "生效", en: "Active" },
   deprecated: { zh: "废弃", en: "Deprecated" },
+  // 2026-10-09：人和 agent 都可能跑不了的用例。与"废弃"分开，因为后续动作相反 ——
+  // 废弃是"这条不要了"，受阻是"这条有效，但当前跑不了，得想办法"。
+  blocked: { zh: "受阻", en: "Blocked" },
 };
 
 /** P0-P3 are shown verbatim (they are the industry-standard shorthand), so the map
@@ -42,26 +45,16 @@ export const SEVERITY_LABELS: L = {
   critical: { zh: "严重", en: "Critical" },
 };
 
-/** Run status (queued/running/completed/…) — used by badges and filters. */
-export const RUN_STATUS_LABELS: L = {
-  pending: { zh: "排队中", en: "Pending" },
-  queued: { zh: "排队中", en: "Queued" },
-  running: { zh: "运行中", en: "Running" },
-  completed: { zh: "已完成", en: "Completed" },
-  failed: { zh: "失败", en: "Failed" },
-  cancelled: { zh: "已取消", en: "Cancelled" },
-  error: { zh: "出错", en: "Error" },
-};
-
-/** Per-case result status. */
-export const RESULT_STATUS_LABELS: L = {
-  passed: { zh: "通过", en: "Passed" },
-  failed: { zh: "失败", en: "Failed" },
-  error: { zh: "出错", en: "Error" },
-  running: { zh: "运行中", en: "Running" },
-  pending: { zh: "等待中", en: "Pending" },
-  skipped: { zh: "已跳过", en: "Skipped" },
-};
+// 2026-10-09 删掉 RUN_STATUS_LABELS / RESULT_STATUS_LABELS（原第 45-64 行）。
+//
+// 它们看着像"状态文案的唯一来源"，其实两个问题都有：
+//   1. **没有任何消费点**（knip 报 unused export）。运行/结果状态是用 i18n 翻的：
+//      `t(r.status)`，而 i18n.ts 里 pending/running/completed/failed/cancelled/
+//      passed/error/skipped 都已经有词条 —— 两套并存只会让人不知道该改哪套。
+//   2. **内容已经过时**：RUN_STATUS_LABELS 里有 `queued`，但后端 Run.status 的取值是
+//      pending|running|completed|failed|cancelled（见 app/models.py），从来没有 queued；
+//      RESULT_STATUS_LABELS 里还留着 `skipped`。
+//      留着它们等于在仓库里放一份"看起来权威、实际是错的"的对照表。
 
 export const CADENCE_LABELS: L = {
   none: { zh: "手动(不提醒)", en: "Manual (no reminders)" },
@@ -75,4 +68,15 @@ export const CADENCE_LABELS: L = {
 export function label(map: L, key: string, lang: string): string {
   const e = map[key];
   return e ? (lang.startsWith("zh") ? e.zh : e.en) : key;
+}
+
+/**
+ * 枚举值 → 首字母大写的可读名（"admin" → "Admin"）。
+ *
+ * 原先 AdminUsersPage 与 MembersPage 各抄了一份一模一样的实现；
+ * 角色是后端自由文本，没有对应的 i18n 词条，所以这条规则必须有**唯一**来源 ——
+ * 否则同一个角色在两个页面里可能显示成两种样子。
+ */
+export function titleCase(v: string): string {
+  return v ? v.charAt(0).toUpperCase() + v.slice(1) : v;
 }

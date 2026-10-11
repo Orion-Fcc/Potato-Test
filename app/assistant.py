@@ -282,6 +282,148 @@ def _tools() -> list[dict]:
         {
             "type": "function",
             "function": {
+                "name": "spec_modules",
+                "description": (
+                    "把当前项目『需规/资料』里的文档**按章节归并成测试模块**，返回可生成用例的批次清单。"
+                    "从需规生成用例的**第一步就是它**：先看有哪些模块可测、哪些在浏览器里测不了。"
+                    "文档很长时用 start 分批（每批 60 个标题），响应的 total/planned_until 会告诉你进度 —— "
+                    "**不要**因为一次只看到 60 个就以为文档就这么大。"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "start": {
+                            "type": "integer",
+                            "description": "从第几个标题开始规划（默认 0）。接着上一批的 planned_until 传给下一批。",
+                        },
+                        "planned_only": {
+                            "type": "boolean",
+                            "description": "true 时只返回标题清单、不调模型（零成本）。想在生成前先看文档结构时用它。",
+                        },
+                    },
+                    "required": [],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "spec_draft_cases",
+                "description": (
+                    "针对一个模块，从需规文档**生成一批草稿用例**（返回内容，**不落库**）。"
+                    "参数 module 用 spec_modules 返回的模块名，titles 用该模块的 titles 原样传入。"
+                    "生成后把草稿给用户过目 —— 用户确认后再调 spec_save_cases 落库。"
+                    "落库默认存成 `draft` 状态（不会进回归集），用户显式要求时才传 activate=true。"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "module": {"type": "string", "description": "模块名（来自 spec_modules）。"},
+                        "titles": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "该模块的章节标题（逐字照抄 spec_modules 返回的 titles）。",
+                        },
+                    },
+                    "required": ["module", "titles"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "spec_save_cases",
+                "description": (
+                    "把用户**审阅过**的草稿用例落库。默认存成 `draft`（不进回归集），"
+                    "只有用户明确说「启用」时才传 activate=true。"
+                    "入库前会再校验一次预期结果是否可判定 —— 用户编辑时清空了预期会被拒绝。"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "cases": {
+                            "type": "array",
+                            "items": {"type": "object"},
+                            "description": "要入库的用例数组（spec_draft_cases 返回的 cases，可含用户修改）。",
+                        },
+                        "module": {"type": "string", "description": "模块名，作为用例的分类。"},
+                        "activate": {
+                            "type": "boolean",
+                            "description": "true = 直接启用（进回归集）；默认 false = 存草稿。",
+                        },
+                    },
+                    "required": ["cases"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "observed_endpoints",
+                "description": (
+                    "列出**从页面实际流量里观察到的后端接口**（跑过用例之后才有）。"
+                    "生成用例前先看它：菜单、列表这类内容往往是后端返回的，"
+                    "知道接口是什么，才能写出「页面显示与接口返回一致」这种有判别力的断言。"
+                    "写接口（POST/PUT/DELETE）只作了解，用例不要直接调用。"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "writable_only": {
+                            "type": "boolean",
+                            "description": "true 时只看写接口。默认返回全部（读接口在前）。",
+                        }
+                    },
+                    "required": [],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "web_search",
+                "description": (
+                    "联网搜索，用来核实**通用标准与常识**（如某个字段的行业规范、第三方组件的默认行为、"
+                    "无障碍/浏览器兼容要求）。**不要**用它查被测系统自己的业务规则 —— "
+                    "那些必须来自需规（search_knowledge）或用户，联网猜出来的业务规则会写出错误的用例。"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {"query": {"type": "string", "description": "搜索词"}},
+                    "required": ["query"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "ask_user",
+                "description": (
+                    "向用户提问，并把流程**停下来等回答**。用例的权威性来自需求本身，"
+                    "所以当需规没写清、信息不足以写出可判定断言时，**必须用它问清楚，"
+                    "不要自己猜一个填上**。一次问最关键的 1~3 个问题，并给出候选选项。"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "question": {"type": "string", "description": "要问的问题（简洁、具体）"},
+                        "options": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "候选答案（可选，方便用户直接选）",
+                        },
+                        "why": {
+                            "type": "string",
+                            "description": "为什么需要这个信息（一句话，让用户知道不回答的后果）",
+                        },
+                    },
+                    "required": ["question"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "search_knowledge",
                 "description": (
                     "在当前项目的『需规/资料』里按关键词检索，返回相关片段（带行号）。"
@@ -381,11 +523,14 @@ def _tools() -> list[dict]:
             "function": {
                 "name": "set_case_status",
                 "description": (
-                    "启用/停用当前项目里的一条用例（status: active / deprecated）。"
+                    "启用/停用/阻挡当前项目里的一条用例"
+                    "（status: active / deprecated / blocked）。"
                     "**这通常是「这条用例有问题」的第一选择** —— 停用是可逆的，"
                     "不丢历史执行结果，随时能启回来；重复用例、暂时跑不通的用例、"
                     "待确认的用例，先停用而不是删除。"
-                    "用户说「这条先别跑 / 别再跑它 / 暂时停一下」就用这个。"
+                    "用户说「这条先别跑 / 别再跑它 / 暂时停一下」→ deprecated；"
+                    "用户说「这条 agent 跑不了 / 需要人工先做一步 / 依赖拿不到」→ blocked，"
+                    "**并且必须问清原因再调用**（blocked 的全部价值就是那条原因）。"
                 ),
                 "parameters": {
                     "type": "object",
@@ -393,12 +538,18 @@ def _tools() -> list[dict]:
                         "case_id": {"type": "integer", "description": "用例 id"},
                         "status": {
                             "type": "string",
-                            "enum": ["active", "deprecated"],
-                            "description": "active=启用；deprecated=停用（不再参与「跑全部」）",
+                            "enum": ["active", "deprecated", "blocked"],
+                            "description": (
+                                "active=启用；deprecated=停用（这条不要了）；"
+                                "blocked=有效但当前跑不了（同时会移出回归集）"
+                            ),
                         },
                         "reason": {
                             "type": "string",
-                            "description": "停用原因，会写进审计，便于日后回查为什么停",
+                            "description": (
+                                "原因，会写进审计。**status=blocked 时必填** —— "
+                                "否则下一个人只能重新试一遍才知道它为什么跑不了。"
+                            ),
                         },
                     },
                     "required": ["case_id", "status"],
@@ -1035,6 +1186,35 @@ async def _run_tool(name: str, args: dict, pid: int) -> dict:
             "case": res if isinstance(res, dict) else {},
         }
 
+    if name == "spec_modules":
+        return await _spec_modules(pid, args)
+
+    if name == "spec_draft_cases":
+        return await _spec_draft_cases(pid, args)
+
+    if name == "spec_save_cases":
+        return await _spec_save_cases(pid, args)
+
+    if name == "observed_endpoints":
+        return await _observed_endpoints(pid, args)
+
+    if name == "web_search":
+        return await _web_search(str(args.get("query") or ""))
+
+    if name == "ask_user":
+        # ★ 这个工具**不产生副作用**：它的全部意义是把问题原样交回给用户，
+        # 并让对话在这一轮停下等回答（assistant_turn 的返回值里有 awaiting_user）。
+        return {
+            "asked": True,
+            "question": str(args.get("question") or "")[:500],
+            "options": [str(o)[:200] for o in (args.get("options") or [])][:8],
+            "why": str(args.get("why") or "")[:300],
+            "note": (
+                "已经把你的问题交给用户了。**这一轮到此为止** —— 不要自己编一个答案继续往下做。"
+                "等用户回答后再继续。"
+            ),
+        }
+
     if name == "set_case_status":
         case_id = args.get("case_id")
         if not isinstance(case_id, int):
@@ -1043,15 +1223,28 @@ async def _run_tool(name: str, args: dict, pid: int) -> dict:
         if scope_err is not None:
             return scope_err
         status = str(args.get("status") or "").strip().lower()
-        if status not in ("active", "deprecated"):
-            return {"error": "status 只能是 active 或 deprecated"}
+        if status not in ("active", "deprecated", "blocked"):
+            return {"error": "status 只能是 active / deprecated / blocked"}
+        reason = str(args.get("reason") or "").strip()
+        # ★ blocked 必须带原因。这个状态的**全部价值**就是那条原因 ——
+        # 允许空原因会让它退化成"一个没有解释的红点"，而下一个人只能重新试一遍。
+        # 这里先拦住并要求模型去问用户，而不是替它编一个原因。
+        if status == "blocked" and not reason:
+            return {
+                "error": "标为 blocked 时必须给出原因",
+                "hint": (
+                    "请先用 ask_user 问清楚「这条用例为什么跑不了」"
+                    "（是需要人工在别的系统先做一步？依赖拿不到的数据？还是需要特定时段？），"
+                    "拿到答案后再带 reason 重新调用。"
+                ),
+            }
         res = await _api(
             "PUT",
             f"/api/testcases/{case_id}",
-            {"status": status},
+            {"status": status, "blocked_reason": reason if status == "blocked" else ""},
             {
                 "x-change-source": "assistant",
-                "x-change-by": (str(args.get("reason") or "") or "助手停用/启用")[:200],
+                "x-change-by": (reason or "助手停用/启用")[:200],
             },
         )
         if isinstance(res, dict) and res.get("error"):
@@ -1062,6 +1255,12 @@ async def _run_tool(name: str, args: dict, pid: int) -> dict:
             "note": (
                 "已停用（可逆，历史执行结果保留，随时可启回来）。"
                 if status == "deprecated"
+                else (
+                    f"已标为 blocked 并移出回归集（原因：{reason}）。"
+                    "它**没有被删** —— 历史结果和用例内容都还在，"
+                    "等条件具备时改回 active 即可。"
+                )
+                if status == "blocked"
                 else "已启用。"
             ),
             "case": res if isinstance(res, dict) else {},
@@ -1254,6 +1453,293 @@ def _describe_tools(query: str | None = None) -> dict:
         "matched": len(out),
         "query": q or None,
         "tools": out,
+    }
+
+
+async def _spec_modules(pid: int, args: dict) -> dict:
+    """把需规文档归并成测试模块（生成用例的第一步）。
+
+    直接复用 `app/specgen.py`，与网页端"从需规生成"走**同一套**逻辑 ——
+    助手和界面各写一份的话，两边的分批口径、标题过滤规则会慢慢分叉，
+    而"生成的用例质量"正是取决于这些规则。
+    """
+    from app import specgen
+
+    headings = await specgen.list_headings(pid)
+    if not headings:
+        return {
+            "headings": [],
+            "modules": [],
+            "note": (
+                "这个项目的『需规/资料』还是空的。先让用户上传文档"
+                "（支持 Word/PDF/Excel/Markdown/txt/csv/html/rtf）——"
+                "可以用 import_file_to_knowledge 从本机导入，或让用户在界面上传。"
+            ),
+        }
+
+    if args.get("planned_only"):
+        return {
+            "headings": headings,
+            "total": len(headings),
+            "note": "只返回了标题清单（未调模型，零成本）。要归并成模块就去掉 planned_only。",
+        }
+
+    try:
+        start = max(0, int(args.get("start") or 0))
+    except (TypeError, ValueError):
+        start = 0
+    size = specgen.MAX_SECTIONS
+    lo = min(start, len(headings))
+    hi = min(lo + size, len(headings))
+    res = await specgen.plan_modules(headings[lo:hi], await specgen.document_intro(pid))
+    return {
+        # ★ 不把 586 个标题全塞回给助手：那会占掉大量上下文，而助手只需要
+        # 当前这一批的标题（titles 逐字传给 spec_draft_cases）。总长度单独报出来。
+        "modules": [
+            {"name": m["name"], "titles": m["titles"], "testable": m["testable"], "reason": m["reason"]}
+            for m in res.modules
+        ],
+        "total_headings": len(headings),
+        "planned_until": hi,
+        "has_more": hi < len(headings),
+        "usage": res.usage or None,
+        "error": res.error or None,
+        "note": (
+            f"本批规划了第 {lo}~{hi} 个标题（共 {len(headings)} 个）。"
+            + (
+                f"**还有 {len(headings) - hi} 个标题没规划** —— 把 start={hi} 再调一次继续。"
+                if hi < len(headings)
+                else "文档已全部规划完。"
+            )
+            + " testable=false 的模块在浏览器里测不了，不要为它们生成用例。"
+        ),
+    }
+
+
+async def _spec_draft_cases(pid: int, args: dict) -> dict:
+    """生成草稿用例（**不落库**）。
+
+    ★ 刻意分两步（draft → save）而不是一步生成入库：LLM 写的用例不可能全对，
+    而回归集里混进一条永远失败的假用例，代价是每次运行都红一次、且没人能证明它错。
+    所以中间必须有人过一眼 —— 助手把草稿展示给用户，用户确认后再落库。
+    """
+    from app import specgen
+
+    titles = [str(t) for t in (args.get("titles") or []) if str(t).strip()]
+    if not titles:
+        return {"error": "titles 不能为空 —— 先用 spec_modules 拿到模块的 titles 再原样传入"}
+    module = str(args.get("module") or "").strip() or titles[0]
+
+    text = await specgen.section_text(pid, titles)
+    if not text:
+        return {
+            "error": (
+                "这些标题在知识库里找不到正文（文档可能被重新上传过）。"
+                "请重新调 spec_modules 取最新的 titles。"
+            )
+        }
+
+    ctx = await specgen.document_intro(pid, 800)
+    # 带上观察到的后端接口：知道数据从哪来，才写得出"页面显示与接口返回一致"的断言。
+    api_note = _endpoints_note(await _endpoint_rows(pid))
+    if api_note:
+        ctx = f"{ctx}\n\n{api_note}" if ctx else api_note
+
+    res = await specgen.generate_for_section(module, text, extra_context=ctx)
+    return {
+        "module": module,
+        "cases": [c.as_dict() for c in res.cases],
+        "count": len(res.cases),
+        # 被丢弃的用例连原因一起给出 —— 不静默丢，用户要能判断这次生成的整体质量。
+        "dropped": res.dropped,
+        "usage": res.usage or None,
+        "error": res.error or None,
+        "note": (
+            "草稿已生成，**还没有入库**。请把 cases 展示给用户过目；"
+            "用户确认后调 spec_save_cases 落库（默认存 draft）。"
+            "如果没有值得测的内容，count=0 是合法结果 —— 不要为了凑数编用例。"
+        ),
+    }
+
+
+async def _spec_save_cases(pid: int, args: dict) -> dict:
+    """把审阅过的草稿落库。默认 draft（不进回归集）。"""
+    from app import specgen
+
+    raw = args.get("cases")
+    if not isinstance(raw, list) or not raw:
+        return {"error": "cases 不能为空"}
+
+    # 走同一个解析器再校验一遍：助手回传的是模型产物（可能被用户编辑过），
+    # 用户可能把 expected 清空 —— 那就必须在入库前再拦一次。
+    cases, dropped = specgen.parse_cases(raw, module_hint=str(args.get("module") or ""))
+    if not cases:
+        return {
+            "error": "没有可入库的用例",
+            "dropped": dropped,
+            "hint": "预期结果为空或同义反复的用例会被拒绝 —— 它们无法判定。",
+        }
+
+    activate = bool(args.get("activate"))
+    module = str(args.get("module") or "").strip()
+    body = {
+        "cases": [c.as_dict() for c in cases],
+        "module": module,
+        "activate": activate,
+    }
+    res = await _api(
+        "POST",
+        f"/api/projects/{pid}/spec/accept",
+        body,
+        {"x-change-source": "assistant", "x-change-by": "助手从需规生成"},
+    )
+    if isinstance(res, dict) and res.get("error"):
+        return res
+    count = (res or {}).get("count", len(cases))
+    return {
+        "created": (res or {}).get("created", []),
+        "count": count,
+        "status": (res or {}).get("status", "draft"),
+        "dropped": dropped,
+        "note": (
+            f"已入库 {count} 条，状态 **draft（草稿）** —— 它们**不会**被『运行全部启用用例』"
+            "跑到，需要用户审阅后在界面上启用（或让用户明确要求你启用）。"
+            if not activate
+            else f"已入库 {count} 条并**启用** —— 下一轮全量运行会跑到它们。"
+        ),
+    }
+
+
+async def _endpoint_rows(pid: int, limit: int = 25) -> list:
+    """项目已观察到的后端接口（按被调用次数降序）。"""
+    try:
+        from sqlalchemy import select
+
+        from app.db import db_session
+        from app.models import ApiEndpoint
+
+        async with db_session() as s:
+            return list(
+                (
+                    await s.execute(
+                        select(ApiEndpoint)
+                        .where(ApiEndpoint.project_id == pid)
+                        .order_by(ApiEndpoint.hits.desc(), ApiEndpoint.path)
+                        .limit(limit)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+    except Exception:  # noqa: BLE001 — 接口清单是增强，拿不到不该让生成失败
+        return []
+
+
+def _endpoints_note(rows: list) -> str:
+    if not rows:
+        return ""
+    from app.api_probe import summarize_for_prompt
+
+    base = summarize_for_prompt(rows)
+    if not base:
+        return ""
+    return (
+        base
+        + "\n生成用例时请利用这些接口：菜单、列表常常是后端返回的，"
+        "所以更好的断言是核对「页面显示」与「接口返回」一致。"
+        "写接口只作了解，用例不要直接调用。"
+    )
+
+
+async def _observed_endpoints(pid: int, args: dict) -> dict:
+    """列出观察到的后端接口（助手侧）。"""
+    rows = await _endpoint_rows(pid, limit=60)
+    if args.get("writable_only"):
+        rows = [r for r in rows if r.writable]
+    return {
+        "endpoints": [
+            {
+                "method": r.method,
+                "path": r.path,
+                "query": r.query or {},
+                "body_fields": r.body_fields or [],
+                "hits": r.hits,
+                "writable": r.writable,
+                "origin": r.origin,
+            }
+            for r in rows
+        ],
+        "total": len(rows),
+        "note": (
+            "这些接口是从**跑用例时页面实际发出的请求**里观察到的，不是扫描来的。"
+            "如果清单是空的，说明还没跑过用例 —— 先让用户跑一轮。"
+        ),
+    }
+
+
+async def _web_search(query: str) -> dict:
+    """联网搜索（核实通用标准，不用于业务规则）。
+
+    为什么需要它：有些"权威性"不来自需规，而来自外部标准 ——
+    某个字段的行业口径、第三方组件的默认行为、无障碍/兼容性要求。
+    这些用需规查不到，硬猜又会写出错误用例。
+
+    ★ 但**必须**在描述里把边界说死：业务规则只能来自需规或用户。
+    联网搜到的"类似系统怎么做的"不是需求，据此写断言等于编造。
+    """
+    q = (query or "").strip()
+    if not q:
+        return {"error": "query 不能为空"}
+    try:
+        from app import llm
+
+        pool = await llm.load_pool()
+        if not pool:
+            return {"error": "没有可用的模型配置，无法联网搜索"}
+        res = await llm.chat(
+            pool[0],
+            system=(
+                "你是测试领域的技术检索助手。只回答**通用标准与常识**类问题，"
+                "用简洁要点作答；不确定就说不确定，不要编造具体规范编号或版本号。"
+            ),
+            user=q,
+            temperature=0,
+            max_tokens=1200,
+            timeout=60.0,
+        )
+        text = (res.text or "").strip()
+        usage = dict(res.usage or {})
+        return {
+            "query": q,
+            "answer": text,
+            "usage": usage,
+            "note": (
+                "这是**通用知识**，不是被测系统的需求。"
+                "不要据此写业务断言 —— 业务规则必须来自需规或用户。"
+            ),
+        }
+    except Exception as exc:  # noqa: BLE001 — 搜索失败不该打断对话
+        return {"error": f"{type(exc).__name__}: {exc}"[:300], "query": q}
+
+
+def _tally_usage(resp) -> dict:
+    """把一次模型调用的 usage 记成与用例执行同一套键名。
+
+    为什么不各写一份：token 账本的键名一旦有两套（这里 prompt/completion、
+    那里 total_prompt_tokens），报告里就没法把它们加在一起 ——
+    而"这个功能贵不贵"正是用户最关心的问题之一。
+    键名与 `app/executor._usage_payload`、`app/specgen._call_json` 保持一致。
+    """
+    u = getattr(resp, "usage", None)
+    if u is None:
+        return {}
+    d = getattr(u, "prompt_tokens_details", None)
+    return {
+        "prompt": int(getattr(u, "prompt_tokens", 0) or 0),
+        "completion": int(getattr(u, "completion_tokens", 0) or 0),
+        "cached": int(getattr(d, "cached_tokens", 0) or 0) if d else 0,
+        "total": int(getattr(u, "total_tokens", 0) or 0),
+        "calls": 1,
     }
 
 

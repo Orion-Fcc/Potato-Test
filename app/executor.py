@@ -1757,6 +1757,17 @@ async def execute_case(spec: CaseSpec, on_step=None, should_abort=None) -> Resul
     _stage: dict[str, float] = {}
     art = f"runs/{spec.result_id or spec.case_id}"  # this attempt's artifact folder
     final_shot: str | None = None
+    # 后端接口观察器（2026-10-09）。挂在已有的 CDP 请求拦截上，
+    # 只记录"页面实际调了哪些后端接口"，不发任何主动请求。
+    # 关掉 network_capture 时是 None —— 那时观察路径完全不执行，行为与以前一致。
+    _api_recorder = None
+    if getattr(s, "network_capture", True):
+        try:
+            from app.api_discovery import Recorder
+
+            _api_recorder = Recorder(base_url_of(spec))
+        except Exception as exc:  # noqa: BLE001 — 观察是附加能力，绝不能挡住用例
+            log.debug("executor: 接口观察器初始化失败：%s", exc)
 
     with tempfile.TemporaryDirectory(prefix=f"tp_case_{spec.case_id}_") as workdir:
         video_dir = os.path.join(workdir, "video")
@@ -2041,8 +2052,12 @@ async def execute_case(spec: CaseSpec, on_step=None, should_abort=None) -> Resul
             # 这是 Fetch 域的网络拦截，是**浏览器级**设置 —— 装到用户自己的窗口上，
             # 会连带把他正在正常浏览的页面也拦一遍。所以 attach 模式跳过它，
             # 代价只是慢一点（内网 SPA 本身不埋百度统计，不存在被 beacon 卡住的问题）。
+            #
+            # ★ 同一处顺便**观察后端接口**（2026-10-09）：这个钩子已经在拦全部请求，
+            # 借它记录"页面实际调了哪些后端接口"是零额外开销的。
+            # 只在开了 network_capture 时挂 recorder；关掉时行为与以前逐字节一致。
             if not _attach_ep:
-                await _block_third_party_beacons(browser)
+                await _block_third_party_beacons(browser, _api_recorder)
             # 2026-10-04 多角色：把活着的浏览器交给 switch_account 工具，
             # 让它在运行中能换身份。放在这里（agent 启动前）而不是注册时，
             # 因为注册发生在 _build_tools，那时还没有 browser。
@@ -2617,7 +2632,85 @@ async def execute_case(spec: CaseSpec, on_step=None, should_abort=None) -> Resul
         )
     except Exception as exc:  # noqa: BLE001 — 埋点绝不能影响用例结果
         log.debug("executor: 耗时分解输出失败：%s", exc)
+
+    # 后端接口落库（2026-10-09）。放在最后、独立 try：观察结果是**附加产物**，
+    # 它写不进去不该影响这条用例的判定。
+    #
+    # 为什么要落库而不是只放内存：用户要的是"探索后端的能力" —— 学到的接口
+    # 得能跨用例累积、能在界面上看、能进后续的生成提示词。只留在内存里，
+    # 跑完这一轮就没了，每个用例都要从零再学一遍。
+    if _api_recorder is not None and not _api_recorder.is_empty():
+        try:
+            await _persist_endpoints(spec, _api_recorder)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("executor: 接口清单落库失败（不影响用例结果）：%s", exc)
     return res
+
+
+async def _persist_endpoints(spec, recorder) -> None:
+    """把这一轮观察到的接口并入项目的接口表。
+
+    用"存在则累加 hits、更新 last_seen"而不是"插新行"：同一批用例会反复调同样的接口，
+    插新行的话清单里会出现几十条一模一样的记录。
+
+    为什么用**独立会话**：这个函数在用例收尾阶段跑，而调用方的 session 可能已经
+    提交/关闭了（用例执行期间的连接不能跨 asyncio.run 复用）。
+    独立会话 + 自己的 try 是最不会互相牵连的做法。
+    """
+    from sqlalchemy import select
+
+    from app.db import db_session
+    from app.models import ApiEndpoint
+
+    async with db_session() as s:
+        existing = {
+            f"{e.method} {e.path}": e
+            for e in (
+                await s.execute(
+                    select(ApiEndpoint).where(ApiEndpoint.project_id == spec.project_id)
+                )
+            ).scalars()
+        }
+        changed = 0
+        for ep in recorder.endpoints():
+            key = ep.key
+            row = existing.get(key)
+            if row is None:
+                s.add(
+                    ApiEndpoint(
+                        project_id=spec.project_id,
+                        method=ep.method,
+                        path=ep.path,
+                        sample=ep.sample,
+                        query=ep.query,
+                        body_fields=ep.body_fields,
+                        hits=ep.hits,
+                        writable=ep.writable,
+                        origin=recorder.page_origin,
+                    )
+                )
+                changed += 1
+            else:
+                row.hits = int(row.hits or 0) + ep.hits
+                row.sample = ep.sample or row.sample
+                # 参数合并：新观察到的参数名要补进去（同一接口不同调用带不同参数）
+                merged = dict(row.query or {})
+                for k, v in (ep.query or {}).items():
+                    merged.setdefault(k, v)
+                row.query = merged
+                fields = sorted(set(row.body_fields or []) | set(ep.body_fields or []))
+                row.body_fields = fields
+                row.origin = recorder.page_origin or row.origin
+                from app.models import _utcnow
+
+                row.last_seen = _utcnow()
+                changed += 1
+        if changed:
+            log.info(
+                "executor: 观察到 %d 个后端接口（项目 %s）已并入接口清单",
+                changed,
+                spec.project_id,
+            )
 
 
 def _capture_profile_dir(project_id: int | None) -> str:

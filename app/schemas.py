@@ -45,7 +45,22 @@ class KnowledgeIn(BaseModel):
 
 Priority = Literal["P0", "P1", "P2", "P3"]
 CaseType = Literal["functional", "smoke", "regression", "acceptance", "negative"]
-CaseStatus = Literal["draft", "active", "deprecated"]
+# 用例状态（2026-10-09 扩充）。
+#
+# `draft` 与 `blocked` 是这次为"从需规生成"加的两个状态，它们回答的是**不同**的问题：
+#
+#   draft   —— *还没人审过*。生成出来的东西一律先落这里。
+#              它**不会**被"运行全部启用用例"选中（那个只收 active）。
+#   blocked —— *审过了，但 agent 跑不了*。这是用户明确提出的需求：
+#              "有些用例 agent 可能执行不了"。典型形态是它需要人工在别的系统里
+#              先做一步、或者依赖一件现实中拿不到的东西。
+#
+# 为什么 `blocked` 不能简单用 `deprecated` 代替：`deprecated` 的语义是
+# "这条用例不要了"，而 blocked 是"这条用例**有效**，只是当前执行不了"。
+# 混在一起的话，看清单的人分不清"该删的"和"该想办法的"——
+# 而这两者的后续动作完全相反。所以状态之外还要有 `blocked_reason`：
+# 只标一个红点而不写原因，下个月没人知道它为什么被挡住。
+CaseStatus = Literal["draft", "active", "deprecated", "blocked"]
 
 
 class TestStep(BaseModel):
@@ -87,6 +102,9 @@ class TestCaseIn(BaseModel):
     priority: Priority = "P2"
     type: CaseType = "functional"
     status: CaseStatus = "active"
+    # 为什么这条用例跑不了（status=blocked 时必填，其余状态可空）。
+    # 见 CaseStatus 的注释：只标状态不写原因，过一个月就没人知道它为什么被挡住了。
+    blocked_reason: str = ""
     owner: str | None = None
     role: str | None = None  # multi-account: which role/account this case runs as
     # 2026-10-04 multi-role: every role this case switches through, in order.
@@ -110,6 +128,7 @@ class TestCasePatch(BaseModel):
     priority: Priority | None = None
     type: CaseType | None = None
     status: CaseStatus | None = None
+    blocked_reason: str | None = None
     owner: str | None = None
     role: str | None = None
     # 2026-10-04 multi-role; empty list means "fall back to role".

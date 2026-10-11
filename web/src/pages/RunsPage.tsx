@@ -319,11 +319,19 @@ export function RunsPage() {
       ) : (
         <Card className="overflow-x-auto">
           {/*
-            table-fixed with TWO flexing columns: Run (col 2) and Actions (last col).
-            Actions holds at most 3 controls per row and never wraps — the long
-            "Re-run failed (378)" labels are the widest thing in the table, so the
-            column gets a min-width and the whole card scrolls below ~1080px
-            instead of squeezing the buttons onto a second line.
+            table-fixed：Run（col 2）与 Actions（最后一列）之外都是固定宽。
+            Card 自带 overflow-x-auto，所以窄窗口下整卡横向滚动，不会挤压按钮。
+
+            ★ Actions 必须 flex-wrap（2026-10-11）：这里的按钮最多能有 **5 个**
+            （查看 / 重跑失败 / 重跑异常 / 重跑 / 删除），实测一行需要 404px、
+            列内容宽只有 304px。以前注释写"最多 3 个、永不换行"——后来加了
+            「重跑异常」按钮，前提失效却没人回来改注释：table-fixed 下列宽不能长，
+            不换行的右对齐内容就只能**向左溢出**，正好压住「开始时间」「耗时」
+            的文字（用户截图实锤，明确要求不允许遮字）。
+            所以这里刻意选"换行"而不是"加宽列"：加宽到 436px 意味着日常窗口宽度下
+            就得横向滚动才能点到「重跑」，比按钮折一行难受得多。
+            每个按钮自带 whitespace-nowrap + shrink-0，折行只发生在按钮**之间**，
+            单个按钮的文字不会被拆开；宁可这行变高，也绝不遮住别的字。
           */}
           <table className="w-full min-w-[1080px] table-fixed text-[13px] tp-table">
             <colgroup>
@@ -335,7 +343,9 @@ export function RunsPage() {
               <col className="w-[60px]" />
               <col className="w-[92px]" />
               <col className="w-[100px]" />
-              <col className="w-[300px]" />
+              {/* 动作列。300px 放不下"查看+重跑失败+重跑异常+重跑+删除"五个中文按钮，
+                  是上面遮字问题的另一半原因 —— 加宽到 336px，配合 flex-wrap 兜底。 */}
+              <col className="w-[336px]" />
             </colgroup>
             <thead className="tp-thead">
               <tr>
@@ -436,7 +446,13 @@ export function RunsPage() {
                               {relTime(r.started_at ?? r.created_at)}
                             </td>
                             <td className="text-right">
-                              <div className="flex items-center justify-end gap-1 whitespace-nowrap">
+                              {/* ★ 必须 flex-wrap：这里的按钮最多能有 5 个（查看/重跑失败/重跑异常/重跑/删除），
+                                  而中文按钮都很宽。以前是 whitespace-nowrap + 右对齐 —— 列宽放不下时
+                                  整组按钮会**向左溢出**，正好压住「开始时间」「耗时」的文字（2026-10-11
+                                  用户截图实锤，明确要求不允许遮字）。
+                                  每个按钮自带 whitespace-nowrap + shrink-0，所以换行发生在按钮**之间**，
+                                  单个按钮的文字不会被拆开；宁可这行变高，也绝不遮住别的字。 */}
+                              <div className="flex flex-wrap items-center justify-end gap-x-1 gap-y-1">
                                 <Button
                                   size="sm"
                                   variant="outline"

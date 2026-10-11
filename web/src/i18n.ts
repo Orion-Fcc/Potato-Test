@@ -244,8 +244,10 @@ const zh: Record<string, string> = {
   Duration: "耗时",
   View: "查看",
   "Re-run": "重跑",
-  "Re-run failed ({{n}})": "重跑失败用例（{{n}} 条）",
-  "Re-run errors ({{n}})": "重跑异常用例（{{n}} 条）",
+  // 「用例」两个字在按钮里是冗余的（这一列显然就是用例），去掉能让五个按钮
+  // 在动作列里排得下一行 —— 按钮组曾经因为太宽向左溢出遮住别的列，宽度能省则省。
+  "Re-run failed ({{n}})": "重跑失败（{{n}} 条）",
+  "Re-run errors ({{n}})": "重跑异常（{{n}} 条）",
   Concurrency: "并发数",
   "Export CSV": "导出 CSV",
   Flaky: "不稳定",

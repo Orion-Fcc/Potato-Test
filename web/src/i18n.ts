@@ -310,18 +310,47 @@ const zh: Record<string, string> = {
   "Edit override": "修改改判",
   // 按用途分模型（2026-10-11）：省钱靠"执行步用便宜模型"，质量靠"判定用强模型"。
   "Model per purpose": "按用途分模型（省钱）",
-  "Cheap model for the high-volume execution steps, strong model where quality matters. Blank = follow the default.":
-    "量大的执行步用便宜模型，质量敏感的环节留强模型。留空 = 跟随默认配置。",
+  // ★ 2026-10-11 配置收敛：网关配置只剩「模型池」一个入口。
+  // 原来那张「基层模型」卡的字段在池非空时完全不生效，已合并进池。
+  "The gateway the browser agent actually calls. Edit it in the model pool below — there is exactly one place to set it, so what you save is what runs.":
+    "浏览器 agent 实际调用的网关。改它请到下面的「模型池」——现在只有这一个设置入口，保存什么就跑什么。",
+  "Currently in use (agent)": "当前生效（agent）",
+  "from .env — no pool saved yet": "来自 .env —— 还没有保存过模型池",
+  "from the pool ({{n}} set(s))": "来自模型池（共 {{n}} 套）",
+  "Per-purpose models below may override the model for judging, narration, spec generation and the assistant.":
+    "下面的「按用途分模型」可能覆盖判定 / 失败叙述 / 需规生成 / 助手所用的模型。",
+  "Tests the set the agent actually calls — and tells you which one that was.":
+    "测的是 agent 真正调用的那一套，并会告诉你测的是哪一套。",
+  "Several gateways tried in order: index 1 is preferred and is what the agent uses by default, the next one takes over when a key is rate-limited (429) or misconfigured. Leave an API key blank to keep the stored one.":
+    "多套网关按顺序尝试：第 1 套优先、也是 agent 默认用的那一套；某套 key 配额耗尽（429）或配置有误时自动换下一套。钥匙留空 = 保留已存的那把。",
+  "No pool saved yet — the row below is only a read-back of .env. Press Save to make it the real configuration; until then .env stays in charge.":
+    "还没有保存过模型池 —— 下面这一条只是 .env 的回显。点「保存模型池」它才会成为真实配置；在那之前仍然以 .env 为准。",
+  "One entry = no fallback: this set is used as-is.": "只有一套 = 没有兜底：就用这一套。",
+  "Priority: a value here wins over the pool's Agent model. Leave the execution row blank unless you want a different model than the pool set uses.":
+    "优先级：这里填了就以这里为准，会盖过模型池里的 Agent model。除非你想让「执行」用的模型和池条目不同，否则留空即可。",
+  "Cheap model for the high-volume execution steps, strong model where quality matters. Blank = follow the default (= set 1 of the pool above).":
+    "量大的执行步用便宜模型，质量敏感的环节留强模型。留空 = 跟随默认（即上面模型池的第 1 套）。",
   "Execution (agent, every step)": "执行（agent 每步调用）",
   "Judging (once per case)": "判定（每条用例一次）",
+  "Judge escalation (review)": "判定复核（强模型）",
   "Failure narrative / case memory": "失败叙述 / 用例记忆",
   "Case generation from spec": "需规生成用例",
   "Assistant chat & Feishu": "助手对话 / 飞书",
   "~95% of all tokens — the only lever that really cuts cost": "约占总 token 的 95% —— 唯一真正能省钱的旋钮",
   "small volume, quality-critical — keep the strong model here": "量小但质量关键 —— 这里该留强模型",
+  "only called when the cheap judge says failed or a gate warns — can be the priciest model":
+    "只在便宜模型判失败 / 闸门报警时才调用 —— 这里可以放最贵的模型",
   "runs only on failures, short output": "只在失败时跑，输出很短",
   "long-document batches, quality matters": "长文档批量生成，质量重要",
   "interactive, latency-sensitive": "交互式，对速度敏感",
+  // 两级判定（2026-10-11）：便宜模型先判，判 failed / 闸门报警才升级复核。
+  "Two-tier judging (cheap judge first, escalate on failure)": "两级判定（便宜模型先判，失败才升级复核）",
+  "The cheap judge runs first. Only a failed verdict or a deterministic gate warning spends the escalation model — routine passes never call it. Takes effect after saving.":
+    "先由便宜模型判定；只有判 failed 或确定性闸门报警时才动用复核模型 —— 通过且干净的结果不会多花一分钱。保存后生效。",
+  "Judging and escalation resolve to the same model ({{model}}), so escalation is skipped. Give the escalation row a different model to get real review.":
+    "判定层与复核层实际是同一支模型（{{model}}），复核会被跳过。给「判定复核」单独设一支模型才有真正的二次审查。",
+  "Reviewed by the escalation model (initial verdict: {{from}})": "由复核模型给出（初判：{{from}}）",
+  reviewed: "已复核",
   "(inherit default)": "（跟随默认）",
   "now: {{model}}": "当前生效：{{model}}",
   "gateway URL (optional)": "网关地址（可选）",

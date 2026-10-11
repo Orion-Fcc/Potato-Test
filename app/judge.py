@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from app.config import get_settings
@@ -174,7 +174,13 @@ class Verdict:
     # 判定器这一次消耗的 token（2026-10-09）：{"prompt","completion","cached","total","calls"}。
     # 为什么要带出来：判定是**每条用例固定一次**的调用，而它的 system 提示词有近 3000 token；
     # 不把它算进账里，就会出现"agent 看起来很省、整体却依然很贵"的错觉。
+    # 两级判定开启时，这里累计的是**两层之和**（初判 + 复核）—— 账要能看出"复核花了多少"。
     usage: dict = field(default_factory=dict)
+    # 两级判定（2026-10-11）：这条结论是**复核层**给出的。
+    # 为什么必须记下来：复核层用的是更贵的模型，"哪些结论真的动用了它"直接决定这套机制
+    # 是省钱还是烧钱；没有这个标记就没法复盘升级率，也就没法调阈值。
+    escalated: bool = False
+    escalated_from: str = ""  # 初判的结论（passed/failed/error），用于统计"升级改判率"
 
 
 # 根因分类表。key 是内部标识（落库用），值是给判定器看的中文说明。
@@ -349,7 +355,7 @@ async def judge(
         for k in ("prompt", "completion", "total", "cached"):
             _usage[k] += int(u.get(k, 0) or 0)
 
-    async def _call(content: Any) -> _llm.ChatResult:
+    async def _call(content: Any, role: str = "judge") -> _llm.ChatResult:
         # 走统一门面（app/llm_chat.py）：协议由 profile 决定 —— OpenAI 兼容 / Anthropic /
         # Gemini 都能跑，判定器不再绑定 OpenAI 协议。
         #
@@ -361,7 +367,7 @@ async def judge(
         #   2026-10-11 真实事故：直接把元组当 ChatResult 返回，_tally 取 .usage 时
         #   炸 'tuple' object has no attribute 'usage'，整轮判定全部 judge_error。
         res, _prof = await _llm.chat_with_pool(
-            role="judge",
+            role=role,
             system=system,
             user=content,
             json_mode=True,
@@ -370,8 +376,8 @@ async def judge(
         )
         return res
 
-    async def ask(content: Any) -> Verdict:
-        res = await _call(content)
+    async def ask(content: Any, role: str = "judge") -> Verdict:
+        res = await _call(content, role)
         _tally(res)
         data = res.json(default=None)
         if not isinstance(data, dict):
@@ -443,23 +449,99 @@ async def judge(
             usage=dict(_usage),
         )
 
-    try:
-        try:
-            return await ask(build_content(user, screenshot_b64))
-        except Exception:
-            if not screenshot_b64:
-                raise
-            # a gateway model without vision must not cost us the verdict entirely
-            return await ask(user)
-    except Exception as exc:  # judge failure must not pass a test by default
-        # 判定器自己挂了，属于执行侧问题而非产品缺陷 —— 归 environment，
-        # 这样它不会混进"真缺陷"统计里，也会被 ROOT_CAUSE_RETRYABLE 判为可重试。
+    def _judge_error(exc: BaseException) -> Verdict:
+        """判定层整体挂掉（两层都没给出结论）时的收口。
+
+        归 environment 而不是产品缺陷 —— 它不该混进"真缺陷"统计，也会被
+        ROOT_CAUSE_RETRYABLE 判为可重试。token 照记：失败前那几次调用是真花钱的。
+        """
         return Verdict(
             status="failed",
             reason=f"judge_error: {type(exc).__name__}: {exc}"[:500],
             root_cause="environment",
-            # 失败也要带上已经花掉的 token —— 判定出错前那几次调用是真花了钱的，
-            # 记 0 会让"账"漏掉这一截，而判定失败恰恰是最该被看见的一类。
             usage=dict(_usage),
         )
+
+    def _mark_escalated(v: Verdict, from_: str) -> Verdict:
+        """把"这条结论来自复核层"记到不可变 Verdict 上。
+
+        ★ Verdict 是 frozen dataclass —— 直接 `v.escalated = True` 会抛
+          FrozenInstanceError。这不是理论风险：2026-10-11 写这个文件时，
+          test_judge_two_tier.py 第一遍跑就把它抓出来了（5 条测试同时红），
+          否则代价是"运行里第一次真的升级判定就整轮崩"，而升级只在失败时发生，
+          所以本地跑通过的用例永远看不到。
+        """
+        return replace(v, escalated=True, escalated_from=from_)
+
+    async def _run_tier(role: str) -> Verdict:
+        """跑一层判定（带"模型不支持视觉就退回纯文本"的既有兜底）。"""
+        try:
+            try:
+                return await ask(build_content(user, screenshot_b64), role)
+            except Exception:
+                if not screenshot_b64:
+                    raise
+                # a gateway model without vision must not cost us the verdict entirely
+                return await ask(user, role)
+        except Exception as exc:  # noqa: BLE001 — 由调用方决定降级还是报错
+            log.warning("judge: %s 层未给出结论：%s: %s", role, type(exc).__name__, exc)
+            raise
+
+    # ── 两级判定（2026-10-11）──────────────────────────────────────────────
+    # 用户要求"多个 LLM 互相合作"，且"token 太贵"。判定的特点是：**量小、质量关键**
+    # （每条用例一次，输入 3~4k，占整轮 token 的个位数百分比）。所以这里刻意做成
+    # "便宜模型先判，只在真正需要时请强模型复核" —— 花钱买的是最容易出错的那些结论。
+    #
+    # 复核的触发条件（每一条都在"错判代价 > 一次复核成本"的一侧）：
+    #   ① 初判 failed：假失败会让人去查不存在的缺陷、写错缺陷单；
+    #   ② 初判 passed 但确定性校验已发现证据问题（宣布完成时操作没落位 / 数字找不到出处）
+    #      —— 这是假通过的高发区；
+    #   ③ 初判这层直接挂了（超时/输出不可解析）：换个模型可能就正常了。
+    #
+    # 复核层没配独立模型时**不做无谓的重复调用**（同一个模型再看一遍只是白花钱）。
+    two_tier = await _llm.judge_two_tier_enabled()
+    review_role = "judge_escalate"
+    if two_tier:
+        _p1 = await _llm.role_profile("judge")
+        _p2 = await _llm.role_profile(review_role)
+        if (_p1.base_url, _p1.model, _p1.api_key) == (_p2.base_url, _p2.model, _p2.api_key):
+            log.info("judge: 两级判定已开，但复核层与初判层是同一个模型 —— 跳过复核（不做无谓调用）")
+            two_tier = False
+
+    gate_flagged = bool(_pd_note or _claim_note)
+
+    try:
+        first = await _run_tier("judge")
+    except Exception as exc:  # noqa: BLE001
+        if not two_tier:
+            return _judge_error(exc)
+        try:
+            second = await _run_tier(review_role)
+        except Exception as exc2:  # noqa: BLE001 — 两层都挂：报第二层的错
+            return _judge_error(exc2)
+        second = _mark_escalated(second, f"error:{type(exc).__name__}")
+        log.info("judge: 初判层异常，复核层给出结论（%s）", second.status)
+        return second
+
+    if not two_tier:
+        return first
+
+    needs_review = first.status == "failed" or gate_flagged
+    if not needs_review:
+        return first
+
+    try:
+        second = await _run_tier(review_role)
+    except Exception as exc:  # noqa: BLE001
+        # 复核层挂了就保留初判：初判本身是有效结论，不能因为"复核失败"而没有结论。
+        log.warning("judge: 复核层失败，保留初判结论（%s）：%s", first.status, exc)
+        return first
+
+    second = _mark_escalated(second, first.status)
+    if second.status != first.status:
+        log.info(
+            "judge: ★ 复核改判 %s → %s（evidence_gate=%s）",
+            first.status, second.status, gate_flagged,
+        )
+    return second
     # 客户端的创建与关闭现在由门面负责（app/llm_chat.py），这里不再持有连接。

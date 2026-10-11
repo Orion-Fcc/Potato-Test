@@ -17,7 +17,6 @@ import logging
 
 from sqlalchemy import func, select
 
-from app.llm import llm_config, openai_client
 from app.models import Issue, Run, TestCase
 
 log = logging.getLogger("potato-test.feishu.agent")
@@ -159,14 +158,19 @@ async def agent_reply(session, text: str, context: str, project_id: int | None) 
 
     # 工具 schema 是 OpenAI 形状；协议不符（Claude / Gemini）时明确降级为单轮回答，
     # 而不是把 "tools 不被接受" 的错误当成机器人故障。
-    caps = await _llm.capabilities_for(await _llm.active_profile())
+    # ★ 2026-10-11 修正口径：飞书对话属于「助手」这个用途，配置要按用途解析
+    # （`role_profile("assistant")`），不能读 env / 旧单值字段 ——
+    # 那些在池非空时完全不生效，于是会出现"设置页配的是 A，飞书实际用 B"。
+    # client 也必须由这个 profile 建（`client_for`），否则网关/钥匙还是会用到另一套。
+    prof = await _llm.role_profile("assistant")
+    caps = await _llm.capabilities_for(prof)
     if caps.protocol != "openai" or not caps.tools:
         log.info("feishu agent: 协议 %s 不支持工具调用，降级为单轮回答", caps.protocol)
         res = await _llm.chat(role="assistant", system=system, user=user, temperature=0.2, timeout=90.0)
         return (res.text or "").strip() or "(没有生成回答)"
 
-    client = await openai_client()
-    model = (await llm_config()).model
+    client = await _llm.client_for(prof)
+    model = prof.agent_model or prof.model
     messages: list = [
         {"role": "system", "content": system},
         {"role": "user", "content": user},

@@ -367,6 +367,8 @@ class LlmSettingsIn(BaseModel):
     pool: list[LlmProfileIn] | None = None
     # 按用途分模型。给定时**整体替换**（None => 保持现状）；传空 dict 即全部恢复默认。
     roles: dict[str, LlmRoleIn] | None = None
+    # 两级判定开关：None => 不动；True/False => 开/关（存在 AppSetting，立即生效）。
+    judge_two_tier: bool | None = None
 
 
 class FeishuSettingsIn(BaseModel):

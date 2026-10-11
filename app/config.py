@@ -79,6 +79,13 @@ class Settings(BaseSettings):
     # 协议/能力探测结果的进程内缓存时长（秒）。探测只花一两次 1-token 调用，缓存后
     # 不再落在每个用例上；厂商能力随时可能变，所以默认 6 小时重探一次。
     llm_capability_ttl_s: int = 21600
+    # ★ 两级判定（2026-10-11）：初判失败 / 证据可疑时，用"判定复核"模型再看一遍。
+    #
+    # 默认关，理由是这个开关**会花钱**：它在最容易出错的那些结论上多调一次强模型。
+    # 判定本身只占整轮 token 的个位数百分比，所以这笔钱花得值 —— 但必须由人明确打开
+    # （并在设置页把"判定复核"选成一个更强的模型），不能悄悄替人决定。
+    # 也可用设置页的开关覆盖（AppSetting 优先于这里的默认值）。
+    judge_two_tier: bool = False
     report_language: str = "Chinese (简体中文)"  # language for agent reasoning + judge reason
 
     # --- optional integrations (both OFF by default — a plain install needs neither) ---

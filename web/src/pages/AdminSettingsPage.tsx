@@ -23,10 +23,13 @@ type RoleRow = LlmRoleStatus & { api_key?: string };
 // 用途清单与后端 app/llm.py::ROLES 对齐。顺序按"花费从大到小"排：
 // 真库实测 agent 每步调用占全部 token 的约 95%，所以"执行"这一行是省钱的唯一大旋钮，
 // 判定/生成量小而质量敏感，值得留强模型。
-const ROLES = ["agent", "judge", "narrative", "specgen", "assistant"] as const;
+// judge_escalate 是复核层：只有初判 failed 或确定性闸门报警时才调用，
+// 所以它可以放比 judge 更贵的模型 —— 没触发就一分钱不花。
+const ROLES = ["agent", "judge", "judge_escalate", "narrative", "specgen", "assistant"] as const;
 const ROLE_LABEL: Record<string, string> = {
   agent: "Execution (agent, every step)",
   judge: "Judging (once per case)",
+  judge_escalate: "Judge escalation (review)",
   narrative: "Failure narrative / case memory",
   specgen: "Case generation from spec",
   assistant: "Assistant chat & Feishu",
@@ -34,6 +37,7 @@ const ROLE_LABEL: Record<string, string> = {
 const ROLE_HINT: Record<string, string> = {
   agent: "~95% of all tokens — the only lever that really cuts cost",
   judge: "small volume, quality-critical — keep the strong model here",
+  judge_escalate: "only called when the cheap judge says failed or a gate warns — can be the priciest model",
   narrative: "runs only on failures, short output",
   specgen: "long-document batches, quality matters",
   assistant: "interactive, latency-sensitive",
@@ -66,28 +70,28 @@ export function AdminSettingsPage() {
   const [token, setToken] = useState("");
   const [saving, setSaving] = useState(false);
 
-  // LLM model
+  // LLM model（只读展示真实生效值 + 连通性测试；编辑入口在下面的模型池里）
   const [llm, setLlm] = useState<LlmStatus | null>(null);
-  const [llmBaseUrl, setLlmBaseUrl] = useState("");
-  const [llmModel, setLlmModel] = useState("");
-  const [llmAgentModel, setLlmAgentModel] = useState("");
-  const [llmProvider, setLlmProvider] = useState("auto");
-  const [llmApiKey, setLlmApiKey] = useState("");
-  const [savingLlm, setSavingLlm] = useState(false);
   const [testingLlm, setTestingLlm] = useState(false);
   const [llmTest, setLlmTest] = useState<{ ok: boolean; text: string; result?: LlmTestResult } | null>(
     null,
   );
   const [loadError, setLoadError] = useState("");
 
-  // LLM 池（多套网关，按顺序 429 兜底）
+  // LLM 池（多套网关，按顺序 429 兜底）—— 这是**唯一**的网关配置入口。
   const [pool, setPool] = useState<PoolRow[] | null>(null);
+  // 池为空时后端会回一条从 .env 读出来的回显条目（seeded=true）。界面要如实说明
+  // "这条还没进池"，否则用户会以为已经保存过了。
+  const [poolSeeded, setPoolSeeded] = useState(false);
   const [savingPool, setSavingPool] = useState(false);
 
   // 按用途分模型（agent 每步执行 / 判定 / 失败叙述 / 需规生成 / 助手对话）。
   // 空字符串 = 跟随默认配置；界面显示 effective_* 让"这个用途实际用哪个模型"一目了然。
   const [roles, setRoles] = useState<Record<string, RoleRow>>({});
   const [savingRoles, setSavingRoles] = useState(false);
+  // 两级判定（2026-10-11）：便宜模型先判，只有判 failed 或确定性闸门报警时才叫复核层。
+  // 默认关 —— 它确实会多花 token，必须由人显式打开。
+  const [twoTier, setTwoTier] = useState(false);
 
   // Feishu
   const [fs, setFs] = useState<FeishuStatus | null>(null);
@@ -106,12 +110,11 @@ export function AdminSettingsPage() {
       .then((s) => {
         setLoadError("");
         setTokenSet(s.gitlab_token_set);
+        // s.llm 现在是**真实生效**的那一套（池的第 1 条），不再是 env/旧单值字段。
+        // 所以下面这块面板显示的模型名与实际调用逐字节一致。
         setLlm(s.llm);
-        setLlmBaseUrl(s.llm.base_url);
-        setLlmModel(s.llm.model);
-        setLlmAgentModel(s.llm.agent_model);
-        setLlmProvider(s.llm.provider || "auto");
         setRoles(s.llm.roles || {});
+        setTwoTier(!!s.llm.judge_two_tier);
         setFs(s.feishu);
         setAppId(s.feishu.app_id);
         setApiBase(s.feishu.api_base);
@@ -122,7 +125,10 @@ export function AdminSettingsPage() {
   const loadPool = () =>
     api
       .getLlmPool()
-      .then((r) => setPool(r.pool.map((p) => ({ ...p, api_key: "" }))))
+      .then((r) => {
+        setPool(r.pool.map((p) => ({ ...p, api_key: "" })));
+        setPoolSeeded(!!r.seeded);
+      })
       .catch((e) => setLoadError(e?.message || String(e)));
 
   useEffect(() => {
@@ -130,33 +136,6 @@ export function AdminSettingsPage() {
     loadPool();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  const saveLlm = async () => {
-    setSavingLlm(true);
-    setLlmTest(null);
-    try {
-      const r = await api.setLlmSettings({
-        base_url: llmBaseUrl.trim(),
-        model: llmModel.trim(),
-        agent_model: llmAgentModel.trim(),
-        provider: llmProvider,
-        api_key: llmApiKey.trim() || undefined,
-      });
-      setLlm(r);
-      setLlmBaseUrl(r.base_url);
-      setLlmModel(r.model);
-      setLlmAgentModel(r.agent_model);
-      setLlmProvider(r.provider || "auto");
-      setLlmApiKey("");
-      toast("success", t("Saved"));
-    } catch (e: any) {
-      // Show it inline too — a toast disappears and the user is left guessing.
-      setLlmTest({ ok: false, text: e?.message || String(e) });
-      fail(e);
-    } finally {
-      setSavingLlm(false);
-    }
-  };
 
   const savePool = async () => {
     if (!pool) return;
@@ -202,7 +181,7 @@ export function AdminSettingsPage() {
         if (row.provider && row.provider !== "auto") item.provider = row.provider;
         if (Object.keys(item).length) payload[r] = item;
       }
-      await api.setLlmSettings({ roles: payload });
+      await api.setLlmSettings({ roles: payload, judge_two_tier: twoTier });
       await load();
       toast("success", t("Saved"));
     } catch (e: any) {
@@ -268,6 +247,11 @@ export function AdminSettingsPage() {
     }
   };
 
+  // 判定层/复核层"实际生效"的模型名（没配就是默认池的）。用来当场判断两级判定
+  // 是不是白开 —— 两个角色指向同一支模型时后端会直接跳过复核调用。
+  const judgeEff = roles.judge?.effective_model || llm?.model || "";
+  const escalateEff = roles.judge_escalate?.effective_model || llm?.model || "";
+
   return (
     <div className="space-y-6">
       <div>
@@ -285,21 +269,27 @@ export function AdminSettingsPage() {
         <div>
           <div className="text-sm font-medium text-ink-900">{t("LLM model")}</div>
           <div className="text-xs text-ink-500">
-            {t("The OpenAI-compatible endpoint and models behind the browser agent and the judge. Changes apply to new runs — no redeploy.")}
+            {t("The gateway the browser agent actually calls. Edit it in the model pool below — there is exactly one place to set it, so what you save is what runs.")}
           </div>
         </div>
 
-        {/* What the platform is ACTUALLY using right now. Only an admin sees this page, so
-            there is no reason to hide the model behind the input boxes: the saved value and
-            the inherited .env default look identical otherwise, and "which model ran that
-            case?" is the single most common question when a verdict looks wrong. */}
+        {/* 真实生效的那一套。
+            ★ 2026-10-11 修正：这块面板以前读的是 env / 旧单值字段，而配了池之后
+            它们**完全不参与运行** —— 也就是说它会显示一个没在跑的模型名，且不报错。
+            现在后端直接回池的第 1 条（agent 每步真正用的那套），并把来源一并回出来，
+            让"我在编辑的那一层是不是生效的那一层"当场可见。 */}
         <div className="rounded-lg bg-[var(--panel2)] px-3 py-2 text-xs text-ink-700">
-          <div className="font-medium">{t("Currently in use")}</div>
+          <div className="flex flex-wrap items-baseline justify-between gap-x-3">
+            <div className="font-medium">{t("Currently in use (agent)")}</div>
+            <div className="text-ink-500">
+              {llm?.pool_source === "env"
+                ? t("from .env — no pool saved yet")
+                : t("from the pool ({{n}} set(s))", { n: llm?.pool_count ?? 1 })}
+            </div>
+          </div>
           <div className="mt-1 grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5">
             <span className="text-ink-500">{t("Endpoint")}</span>
             <span className="break-all font-mono">{llm?.base_url || t("(not set)")}</span>
-            <span className="text-ink-500">{t("Model (judge + default)")}</span>
-            <span className="break-all font-mono">{llm?.model || t("(not set)")}</span>
             <span className="text-ink-500">{t("Agent model")}</span>
             <span className="break-all font-mono">
               {llm?.agent_model || llm?.model || t("(not set)")}
@@ -315,45 +305,17 @@ export function AdminSettingsPage() {
               {llm?.provider === "auto" ? t(" (detected by probe)") : ""}
             </span>
           </div>
-        </div>
-
-        <Field label={t("Protocol")}>
-          <Select value={llmProvider} onChange={(e) => setLlmProvider(e.target.value)}>
-            {PROVIDERS.map((p) => (
-              <option key={p} value={p}>
-                {t(PROVIDER_LABEL[p])}
-              </option>
-            ))}
-          </Select>
-          <div className="mt-1 text-xs text-ink-500">
-            {t("Auto-detect works for any OpenAI-compatible gateway (DeepSeek, Qwen, GLM, Kimi, vLLM, OpenRouter …) and for Claude / Gemini / Ollama. Only set it explicitly if detection guesses wrong.")}
+          <div className="mt-1 text-[11px] text-ink-500">
+            {t("Per-purpose models below may override the model for judging, narration, spec generation and the assistant.")}
           </div>
-        </Field>
-
-        <Field label={t("Base URL (OpenAI-compatible)")}>
-          <Input value={llmBaseUrl} onChange={(e) => setLlmBaseUrl(e.target.value)}
-            placeholder="https://api.openai.com/v1" />
-        </Field>
-        <Field label={llm?.api_key_set ? t("API key (set — leave blank to keep)") : t("API key")}>
-          <Input type="password" value={llmApiKey} onChange={(e) => setLlmApiKey(e.target.value)}
-            placeholder={llm?.api_key_set ? "••••••••" : "sk-…"} />
-        </Field>
-        <div className="grid grid-cols-2 gap-3">
-          <Field label={t("Model (judge + default)")}>
-            <Input value={llmModel} onChange={(e) => setLlmModel(e.target.value)} placeholder="gpt-4o" />
-          </Field>
-          <Field label={t("Agent model (optional — empty uses Model)")}>
-            <Input value={llmAgentModel} onChange={(e) => setLlmAgentModel(e.target.value)}
-              placeholder={t("e.g. a local VLM")} />
-          </Field>
         </div>
+
         <div className="flex items-center gap-3">
-          <Button onClick={saveLlm} disabled={savingLlm}>{savingLlm ? t("Saving…") : t("Save")}</Button>
           <Button variant="ghost" onClick={testLlm} disabled={testingLlm}>
             {testingLlm ? t("Testing…") : t("Test connection")}
           </Button>
           <span className="text-xs text-ink-500">
-            {llm?.api_key_set ? t("API key is set.") : t("No API key set — the gateway may reject calls.")}
+            {t("Tests the set the agent actually calls — and tells you which one that was.")}
           </span>
         </div>
         {llmTest && (
@@ -395,15 +357,23 @@ export function AdminSettingsPage() {
         </p>
       </Card>
 
-      {/* 池：多套网关按顺序兜底。之前只有 API/数据库能改 —— 也就是"换模型要改代码"
-          这件事的最后一块。顺序即优先级，429（配额耗尽）自动换下一套。 */}
+      {/* 池：多套网关按顺序兜底。**这里是唯一的网关配置入口** ——
+          2026-10-11 起把原来那张"基层模型"卡的输入框合并到这里了：那张卡的字段在池非空时
+          完全不生效（load_pool 会整体取代它们），留着只会让人改了模型发现没变。
+          顺序即优先级，429（配额耗尽）自动换下一套。 */}
       <Card className="max-w-2xl space-y-3 p-4">
         <div>
           <div className="text-sm font-medium text-ink-900">{t("Model pool (fallback order)")}</div>
           <div className="text-xs text-ink-500">
-            {t("Several gateways tried in order: index 1 is preferred, the next one takes over when a key is rate-limited (429) or misconfigured. Leave an API key blank to keep the stored one.")}
+            {t("Several gateways tried in order: index 1 is preferred and is what the agent uses by default, the next one takes over when a key is rate-limited (429) or misconfigured. Leave an API key blank to keep the stored one.")}
           </div>
         </div>
+
+        {poolSeeded && (
+          <div className="tp-alert tp-alert-warn text-[11px]">
+            {t("No pool saved yet — the row below is only a read-back of .env. Press Save to make it the real configuration; until then .env stays in charge.")}
+          </div>
+        )}
 
         {pool === null ? (
           <div className="text-xs text-ink-500">{t("Loading…")}</div>
@@ -499,7 +469,7 @@ export function AdminSettingsPage() {
               </Button>
               <span className="text-xs text-ink-500">
                 {pool.length <= 1
-                  ? t("One entry = no fallback: the single set above is used as-is.")
+                  ? t("One entry = no fallback: this set is used as-is.")
                   : t("{{n}} sets configured.", { n: pool.length })}
               </span>
             </div>
@@ -513,9 +483,37 @@ export function AdminSettingsPage() {
         <div>
           <div className="text-sm font-medium text-ink-900">{t("Model per purpose")}</div>
           <div className="text-xs text-ink-500">
-            {t("Cheap model for the high-volume execution steps, strong model where quality matters. Blank = follow the default.")}
+            {t("Cheap model for the high-volume execution steps, strong model where quality matters. Blank = follow the default (= set 1 of the pool above).")}
           </div>
         </div>
+
+        {/* 优先级说明。两个地方都能表达"执行用哪个模型"（池条目的 Agent model 与
+            这里的「执行」行），不说清楚就会出现"我改了池里的却没生效"。 */}
+        <div className="tp-alert tp-alert-warn text-[11px]">
+          {t("Priority: a value here wins over the pool's Agent model. Leave the execution row blank unless you want a different model than the pool set uses.")}
+        </div>
+
+        {/* 两级判定总开关。默认关：它确实会多花 token，得由人拍板。
+            右上角直接算出"实际生效的两个模型"是否同一支 —— 同一个模型时后端会跳过
+            复核调用（不做重复劳动），但那也就等于没开，必须当场说清楚，
+            否则用户会以为开了复核却什么都没发生。 */}
+        <div className="space-y-1.5 rounded-lg border border-[var(--line)] p-3">
+          <label className="flex cursor-pointer items-center gap-2">
+            <Checkbox checked={twoTier} onChange={(e) => setTwoTier(e.target.checked)} />
+            <span className="text-[13px] font-medium text-ink-900">
+              {t("Two-tier judging (cheap judge first, escalate on failure)")}
+            </span>
+          </label>
+          <div className="text-[11px] text-ink-400">
+            {t("The cheap judge runs first. Only a failed verdict or a deterministic gate warning spends the escalation model — routine passes never call it. Takes effect after saving.")}
+          </div>
+          {twoTier && judgeEff && judgeEff === escalateEff && (
+            <div className="tp-alert tp-alert-warn text-[11px]">
+              {t("Judging and escalation resolve to the same model ({{model}}), so escalation is skipped. Give the escalation row a different model to get real review.", { model: judgeEff })}
+            </div>
+          )}
+        </div>
+
         <div className="space-y-3">
           {ROLES.map((r) => {
             const row = roles[r];

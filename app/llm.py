@@ -29,7 +29,17 @@ _KEYS = (LLM_BASE_URL_KEY, LLM_API_KEY_KEY, LLM_MODEL_KEY, LLM_AGENT_MODEL_KEY, 
 # 占总量的个位数百分比。所以"全平台用一个最贵的模型"是把钱花在不需要的地方：
 # 该省的（量大的执行步）和该保的（质量敏感的判定/生成）必须能分开配。
 LLM_ROLES_KEY = "llm_roles"  # encrypted blob: {role: {model, base_url, api_key, provider}}
-ROLES: tuple[str, ...] = ("agent", "judge", "narrative", "specgen", "assistant")
+# 两级判定开关（"1" = 开）。默认关：它会在失败/证据可疑时多花一次强模型调用，
+# 得由人显式打开并选好复核模型 —— 悄悄打开等于悄悄加钱。
+LLM_JUDGE_TWO_TIER_KEY = "llm_judge_two_tier"
+ROLES: tuple[str, ...] = (
+    "agent",
+    "judge",
+    "judge_escalate",  # 复核层：初判失败/闸门报警时才动用（更贵的模型放这里）
+    "narrative",
+    "specgen",
+    "assistant",
+)
 
 
 @dataclass(frozen=True)
@@ -96,6 +106,8 @@ _cached: LLMConfig | None = None
 _cached_at: float = 0.0
 _roles_cached: dict[str, "RoleOverride"] | None = None
 _roles_cached_at: float = 0.0
+_two_tier_cached: bool | None = None
+_two_tier_cached_at: float = 0.0
 _TTL_S = 30.0  # ponytail: pull-based refresh; push invalidation across processes if 30s lag hurts
 
 
@@ -105,9 +117,10 @@ def invalidate_llm_cache() -> None:
     协议/能力探测结果一起清掉：换了 base_url 或模型之后，"旧端点支持什么"
     对新端点毫无参考价值，留着只会让新配置静默继承旧结论。
     """
-    global _cached, _roles_cached
+    global _cached, _roles_cached, _two_tier_cached
     _cached = None
     _roles_cached = None
+    _two_tier_cached = None
     from app.llm_protocol import invalidate_capabilities
 
     invalidate_capabilities()
@@ -141,35 +154,34 @@ async def llm_config() -> LLMConfig:
 
 
 async def active_profile() -> LLMProfile:
-    """当前生效配置对应的 profile（legacy 单套：AppSetting 覆盖 > env）。
+    """平台默认那套 —— 也就是**真正在跑**的那一套。
 
-    给门面 `llm_chat.chat()` 在没传 profile 时使用 —— 也就是"平台默认模型"。
+    ★ 2026-10-11 语义修正。以前它返回的是 legacy 单套（AppSetting `llm_model` 等 +
+    env），而那五个字段在**池非空时完全不生效**（load_pool 会整体取代它们）。
+    于是所有"没传用途"的调用点（助手、飞书、能力探测）都在拿一套没在用的配置说话，
+    而设置页还把它当成"正在使用"显示出来 —— 显示值和实际值对不上，且不报错。
+
+    现在它 = `pool_for_role("agent")[0]`，与 executor 实际用的那一套逐字节一致。
+    "谁在生效"只有这一个口径。
     """
-    cfg = await llm_config()
-    return LLMProfile(
-        name="legacy",
-        base_url=cfg.base_url,
-        api_key=cfg.api_key,
-        model=cfg.model,
-        agent_model=cfg.agent_model,
-        provider=cfg.provider,
-    )
+    return (await pool_for_role("agent"))[0]
 
 
-async def load_pool() -> list[LLMProfile]:
-    """The active LLM pool, ordered by priority (first = preferred).
+async def _load_pool_raw() -> tuple[list[LLMProfile], str]:
+    """(候选序列, 来源)。来源取值：
 
-    Source of truth is the encrypted `llm_pool` AppSetting blob. When it is absent
-    or empty, fall back to the legacy single-value keys so a pre-existing install
-    keeps working with one implicit profile. Never raises: a bad blob degrades to
-    the legacy profile rather than breaking every LLM call.
+      "pool" —— 池里有完整条目，这是真正在用的配置；
+      "env"  —— 池为空或条目都不完整，回落到 env / 旧单套字段（首次启动、DB 不可用）。
+
+    把来源单独回出来，是为了让界面能如实说明"现在生效的是哪一层"。
+    没有这个字段，设置页就只能猜，而猜错的表现正是显示一个没在跑的模型名。
     """
     import json
 
     # Legacy single profile (also the fallback shape).
     cfg = await llm_config()
     legacy = LLMProfile(
-        name="legacy",
+        name="env",
         base_url=cfg.base_url,
         api_key=cfg.api_key,
         model=cfg.model,
@@ -185,7 +197,7 @@ async def load_pool() -> list[LLMProfile]:
     except Exception:  # DB unavailable (early boot / bare test) -> legacy only
         raw = None
     if not raw:
-        return [legacy]
+        return [legacy], "env"
     try:
         items = json.loads(raw)
         profiles: list[LLMProfile] = []
@@ -208,10 +220,31 @@ async def load_pool() -> list[LLMProfile]:
                 )
             )
         if profiles:
-            return profiles
+            return profiles, "pool"
     except Exception:  # malformed JSON -> don't take the whole platform down
         pass
-    return [legacy]
+    return [legacy], "env"
+
+
+async def load_pool() -> list[LLMProfile]:
+    """The active LLM pool, ordered by priority (first = preferred).
+
+    Source of truth is the encrypted `llm_pool` AppSetting blob. When it is absent
+    or empty, fall back to the env values so a pre-existing install keeps working
+    with one implicit profile. Never raises: a bad blob degrades to that profile
+    rather than breaking every LLM call. Pool is re-read on every call — the
+    alternative (a process-wide cache) would make "saved but not applied" possible,
+    which is exactly the class of bug this platform has been fighting.
+    """
+    return (await _load_pool_raw())[0]
+
+
+async def pool_origin() -> str:
+    """"pool" = 生效配置来自模型池；"env" = 池为空，回落到 env 里的那一套。
+
+    界面靠它说清"你正在编辑的那一层，是不是当前生效的那一层"。
+    """
+    return (await _load_pool_raw())[1]
 
 
 async def load_roles() -> dict[str, RoleOverride]:
@@ -251,6 +284,36 @@ async def load_roles() -> dict[str, RoleOverride]:
     _roles_cached = out
     _roles_cached_at = time.monotonic()
     return out
+
+
+async def judge_two_tier_enabled() -> bool:
+    """两级判定的开关（admin 可改，默认关）。
+
+    关着的时候行为与以前**逐字节一致** —— 这是刻意的：这个开关会在"初判失败/证据可疑"
+    时多花一次强模型调用，属于"明确花钱买判定质量"的选择，只能由人打开（悄悄打开
+    等于悄悄加钱）。开关本身也存在 AppSetting 里，改了立刻生效。
+    """
+    global _two_tier_cached, _two_tier_cached_at
+    if _two_tier_cached is not None and time.monotonic() - _two_tier_cached_at < _TTL_S:
+        return _two_tier_cached
+
+    val: str | None = None
+    try:
+        from app.db import db_session
+        from app.settings_store import get_setting
+
+        async with db_session() as sess:
+            val = await get_setting(sess, LLM_JUDGE_TWO_TIER_KEY)
+    except Exception:  # DB unavailable (early boot / bare test) -> env default
+        val = None
+
+    if val is None or val == "":
+        enabled = bool(getattr(get_settings(), "judge_two_tier", False))
+    else:
+        enabled = str(val).strip().lower() in ("1", "true", "yes", "on")
+    _two_tier_cached = enabled
+    _two_tier_cached_at = time.monotonic()
+    return enabled
 
 
 async def role_profile(role: str) -> LLMProfile:
@@ -590,10 +653,12 @@ __all__ = [
     "extract_json",
     "llm_config",
     "load_pool",
+    "judge_two_tier_enabled",
     "load_roles",
     "openai_client",
     "pick_active_profile",
     "pool_for_role",
+    "pool_origin",
     "probe_profile",
     "role_profile",
     "roles_for_ui",

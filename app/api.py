@@ -461,16 +461,25 @@ async def update_user(uid: int, body: UserPatch) -> dict:
 
 @router.get("/admin/settings", dependencies=[Depends(auth.require_admin)])
 async def get_admin_settings() -> dict:
-    from app.llm import llm_config, roles_for_ui
+    from app import llm as llm_mod
+    from app.llm import roles_for_ui
     from app.settings_store import GITLAB_TOKEN_KEY, has_setting
 
     async with db_session() as s:
         token_set = await has_setting(s, GITLAB_TOKEN_KEY)
         feishu_cfg = await feishu.resolve_config(s)
-    llm_status = _llm_status(await llm_config())
+    # ★ 2026-10-11 修正：这里以前读 `llm_config()`（env + 旧单值字段），而配了池之后
+    # 真正在跑的是池的第 1 条 —— 于是「正在使用」面板会显示一个**没在用的模型名**。
+    # 现在固定读真实生效的那一套，另外把来源（pool / env）也告诉界面，
+    # 让"你正在编辑的那一层是不是生效的那一层"能当场说清。
+    llm_status = _llm_status(await llm_mod.active_profile())
+    llm_status["pool_source"] = await llm_mod.pool_origin()
+    llm_status["pool_count"] = len(await llm_mod.load_pool())
     # 按用途分模型：每个用途的"配了什么 + 实际生效的模型/网关"。
     # 一起回给界面，省得前端自己推算继承关系（推错就会显示一个不存在的模型名）。
     llm_status["roles"] = await roles_for_ui()
+    # 两级判定的当前开关（存在 AppSetting，可能覆盖 env 默认）
+    llm_status["judge_two_tier"] = await llm_mod.judge_two_tier_enabled()
     return {
         "llm": llm_status,
         "gitlab_token_set": token_set or bool(get_settings().gitlab_token),
@@ -478,25 +487,97 @@ async def get_admin_settings() -> dict:
     }
 
 
+async def _merge_into_pool_head(
+    sess,
+    *,
+    base_url: str | None,
+    model: str | None,
+    agent_model: str | None,
+    provider: str | None,
+    api_key: str | None,
+) -> None:
+    """把「默认模型」的单值改动合并进**池的第 1 条**（池空则新建一条）。
+
+    为什么需要它：这几个字段以前是独立的 AppSetting（`llm_model` / `llm_base_url` …），
+    而 `load_pool()` 在池非空时会整体取代它们 —— 于是"改了模型却没生效"是必然的，
+    而且不报错、界面上还显示得理直气壮。
+
+    合并之后，"改默认模型"这个意图只落在唯一那个真相来源（池第 1 条）上。
+    池里其余条目原样保留、顺序不变 —— 改默认模型不该动到 429 兜底的那几套。
+
+    拼不出一条完整条目时（缺 base_url / model / api_key）**什么都不写**：
+    半截的池条目会被 load_pool 忽略、然后回落 env，那正好又变回"保存了没生效"。
+    """
+    from app import llm as llm_mod
+    from app.settings_store import set_setting
+    import json
+    import logging
+
+    profiles, origin = await llm_mod._load_pool_raw()
+    head = profiles[0] if profiles else None
+
+    def _pick(new: str | None, old: str) -> str:
+        """None = 不动；"" = 显式清空（但对 base_url/model 清空等于不可用，由下面兜住）。"""
+        return old if new is None else new.strip()
+
+    entry = {
+        # 来源是 env 时不把 "env" 当名字存进池 —— 那会让人以为池里有个叫 env 的条目。
+        "name": (head.name if head and origin == "pool" else "default"),
+        "base_url": _pick(base_url, head.base_url if head else ""),
+        # 钥匙是只写的：留空 = 保留已存的那把（界面只显示掩码，不可能让人重输）
+        "api_key": (api_key or "").strip() or (head.api_key if head else ""),
+        "model": _pick(model, head.model if head else ""),
+        "agent_model": _pick(agent_model, head.agent_model if head else ""),
+        "provider": _pick(provider, head.provider if head else "auto") or "auto",
+    }
+    if not entry["base_url"] or not entry["model"] or not entry["api_key"]:
+        logging.getLogger("potato-test.api").warning(
+            "llm: 默认模型改动未落池（缺 base_url/model/api_key）—— 拒绝写入半截配置"
+        )
+        return
+
+    rest = (
+        [
+            {
+                "name": p.name,
+                "base_url": p.base_url,
+                "api_key": p.api_key,
+                "model": p.model,
+                "agent_model": p.agent_model,
+                "provider": p.provider,
+            }
+            for p in profiles[1:]
+        ]
+        if origin == "pool"
+        else []
+    )
+    await set_setting(
+        sess,
+        llm_mod.LLM_POOL_KEY,
+        json.dumps([entry, *rest], ensure_ascii=False),
+        secret=True,
+    )
+
+
 @router.put("/admin/settings/llm", dependencies=[Depends(auth.require_admin)])
 async def set_admin_llm(body: LlmSettingsIn) -> dict:
     """Set the platform's underlying model at runtime. Non-secret fields: None keeps,
-    "" clears the override (falls back to env). The API key is write-only."""
+    "" clears the override (falls back to env). The API key is write-only.
+
+    ★ 2026-10-11 语义修正：base_url / model / agent_model / provider / api_key 这几个
+    单值字段**不再单独落库**，而是合并进池的**第 1 条**（池空则新建一条）。
+
+    为什么必须这么改：那五个字段存在 AppSetting `llm_*` 里，而 `load_pool()` 在池非空时
+    会**整体取代**它们 —— 也就是说配了池之后，"保存基层模型"这个动作对运行零影响，
+    界面上却照旧显示"正在使用"。用户改完模型发现没变，就是这个原因。
+    现在改成"任何指定默认模型的请求都落到池的第 1 条"，只有一个真相来源：
+    你设了什么，跑的就是什么。
+    """
     from app import llm as llm_mod
     from app.settings_store import set_setting
     import json
 
     async with db_session() as s:
-        for value, key in (
-            (body.base_url, llm_mod.LLM_BASE_URL_KEY),
-            (body.model, llm_mod.LLM_MODEL_KEY),
-            (body.agent_model, llm_mod.LLM_AGENT_MODEL_KEY),
-            (body.provider, llm_mod.LLM_PROVIDER_SETTING_KEY),
-        ):
-            if value is not None:
-                await set_setting(s, key, value.strip(), secret=False)
-        if body.api_key:
-            await set_setting(s, llm_mod.LLM_API_KEY_KEY, body.api_key.strip(), secret=True)
         if body.pool is not None:
             # Persist the ordered pool as one encrypted blob (api_keys inside are secret).
             # api_key blank/None means "inherit the key at this same pool position in
@@ -537,6 +618,25 @@ async def set_admin_llm(body: LlmSettingsIn) -> dict:
                 )
             else:
                 await set_setting(s, llm_mod.LLM_POOL_KEY, "", secret=False)
+        elif any(
+            v is not None
+            for v in (body.base_url, body.model, body.agent_model, body.provider)
+        ) or body.api_key:
+            # 单值字段 → 合并进池第 1 条（见上面的长注释）。
+            await _merge_into_pool_head(
+                s,
+                base_url=body.base_url,
+                model=body.model,
+                agent_model=body.agent_model,
+                provider=body.provider,
+                api_key=body.api_key,
+            )
+        if body.judge_two_tier is not None:
+            # 两级判定开关：存 "1" / ""（空 = 关，回落到 env 默认）
+            await set_setting(
+                s, llm_mod.LLM_JUDGE_TWO_TIER_KEY,
+                "1" if body.judge_two_tier else "", secret=False,
+            )
         if body.roles is not None:
             # 按用途分模型：整体替换（None 才表示"不动"）。未知用途直接丢弃 ——
             # 一个拼错的用途名如果被存下来，界面会显示它"已配置"而实际从不生效。
@@ -562,16 +662,23 @@ async def set_admin_llm(body: LlmSettingsIn) -> dict:
                 secret=True,
             )
     llm_mod.invalidate_llm_cache()
-    return _llm_status(await llm_mod.llm_config())
+    # 回真实生效的那一套（池的第 1 条 + 用途覆盖），不是旧单值字段 ——
+    # 界面拿它刷新"正在使用"，两个口径必须一致。
+    return _llm_status(await llm_mod.active_profile())
 
 
 @router.get("/admin/settings/llm/pool", dependencies=[Depends(auth.require_admin)])
 async def get_admin_llm_pool() -> dict:
     """The ordered LLM pool, WITHOUT secrets. api_key is shown masked so the UI can
-    display how many sets are configured and their base_url/model, not the keys."""
+    display how many sets are configured and their base_url/model, not the keys.
+
+    ★ 池为空时这里回**一条从 env 读出来的条目**（`source="env"`），而不是空列表。
+    为什么：空列表会让界面显示"没有配置"，而实际上平台正在用 .env 里那一套跑。
+    用户看到的"什么都没有"和"有一套在跑"是最容易把人带偏的那种不一致。
+    """
     from app import llm as llm_mod
 
-    profiles = await llm_mod.load_pool()
+    profiles, origin = await llm_mod._load_pool_raw()
     masked = [
         {
             "name": p.name,
@@ -583,27 +690,36 @@ async def get_admin_llm_pool() -> dict:
         }
         for p in profiles
     ]
-    return {"pool": masked, "count": len(masked)}
+    return {
+        "pool": masked,
+        "count": len(masked),
+        # "pool" = 来自模型池；"env" = 池为空，回落 .env（这一条只是回显，保存后才会成为池）
+        "source": origin,
+        "seeded": origin == "env",
+    }
 
 
 @router.post("/admin/settings/llm/test", dependencies=[Depends(auth.require_admin)])
 async def test_admin_llm() -> dict:
-    """Ping the configured gateway with a 1-token completion and report what came back.
+    """Ping the gateway the platform is ACTUALLY using, with a 1-token completion.
 
     Exists because "saved but nothing works" is otherwise indistinguishable from a bad
     key, a wrong base URL, or a model name the gateway does not serve. Returns ok=False
     with the upstream message rather than raising, so the UI can show it inline.
+
+    ★ 2026-10-11 修正：以前测的是 env / 旧单值字段（`llm_config()` + `active_profile()`），
+    而配了池之后真正在跑的是池的第 1 条 —— 于是"测试通过"和"实际 401"可以同时成立，
+    而用户会以为是平台坏了。现在固定测 `pool_for_role("agent")[0]`，
+    也就是 agent 每步执行真正用的那一套（占全部 token 的约 95%）。
     """
     from app import llm as llm_mod
 
-    cfg = await llm_mod.llm_config()
-    model = (cfg.agent_model or cfg.model or "").strip()
-    if not cfg.base_url:
+    profile = (await llm_mod.pool_for_role("agent"))[0]
+    model = (profile.agent_model or profile.model or "").strip()
+    if not profile.base_url:
         return {"ok": False, "error": "Base URL is empty — nothing to call."}
     if not model:
         return {"ok": False, "error": "No model name set — fill in Model first."}
-
-    profile = await llm_mod.active_profile()
     try:
         # 协议与能力一起报出来：换厂商之后"能不能跑"就看这几个布尔值，
         # 不用再去翻日志找 400。force=True 绕过缓存 —— 这个按钮的语义就是"现在实测"。
@@ -615,7 +731,10 @@ async def test_admin_llm() -> dict:
             "ok": True,
             "model": model,
             "reply_model": getattr(res.raw, "model", model),
-            "api_key_set": bool(cfg.api_key),
+            "api_key_set": bool(profile.api_key),
+            # 测的是哪一套：名字 + 网关。界面上直接显示，避免"测通了但不知道测的谁"。
+            "profile": profile.name,
+            "base_url": profile.base_url,
             "protocol": caps.protocol,
             "json_object": caps.json_object,
             "json_schema": caps.json_schema,

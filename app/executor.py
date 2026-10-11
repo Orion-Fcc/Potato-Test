@@ -1309,6 +1309,9 @@ class ResultSpec:
     # 由 executor 从 agent 侧采集、judge 侧再叠加，最后并入 timing["usage"] 落库 ——
     # 借 timing 那一列（JSON）走，不用加列也不用迁移。
     usage: dict = field(default_factory=dict)
+    # 两级判定：这条结论是否由复核层给出（含初判结论，便于统计改判率）。
+    judge_escalated: bool = False
+    judge_escalated_from: str = ""
     error: str | None = None
     auth_failed: bool = False  # restored session was dead (ended on a login page) → self-heal
     timed_out: bool = False  # hit the wall-clock cap → a re-attempt cannot change the outcome
@@ -2730,6 +2733,11 @@ async def execute_case(spec: CaseSpec, on_step=None, should_abort=None) -> Resul
             res.evidence_gap = verdict.evidence_gap
             res.root_cause = verdict.root_cause
             res.verdict_evidence = list(verdict.evidence)
+            # 两级判定的复核标记：结论是复核层给的（更贵的模型）。
+            # 落到 timing（JSON 列，不用迁移），复盘时能直接算升级率与改判率 ——
+            # 没有这个数字就没法判断这套机制是省钱还是烧钱。
+            res.judge_escalated = bool(getattr(verdict, "escalated", False))
+            res.judge_escalated_from = str(getattr(verdict, "escalated_from", "") or "")
             # 判定器的 token 并进本条用例的账（agent 侧已在上面采集过）。
             # 两个来源分开累加、键名一致，报告里可以一眼看出"贵在跑还是在判"。
             _ju = getattr(verdict, "usage", None) or {}
@@ -2809,6 +2817,9 @@ async def execute_case(spec: CaseSpec, on_step=None, should_abort=None) -> Resul
         # 是两种不同的病，处置方式也不同）。timing 是 JSON 列，加键不用迁移。
         if res.usage:
             payload["usage"] = res.usage
+        if res.judge_escalated:
+            payload["judge_escalated"] = True
+            payload["judge_escalated_from"] = res.judge_escalated_from
         res.timing = payload
         # 日志与落库共用同一份数字，避免两处各算一遍后悄悄漂移。
         seg = {

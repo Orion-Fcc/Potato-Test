@@ -214,9 +214,18 @@ export interface LlmStatus {
   // auto（默认，自动识别）/ openai / anthropic / google / ollama
   provider: string;
   api_key_set: boolean;
-  // 按用途分模型（2026-10-11）：agent 每步执行 / judge 判定 / narrative 失败叙述 /
-  // specgen 需规生成 / assistant 助手对话。effective_* 是实际生效值（含继承默认）。
+  // 按用途分模型（2026-10-11）：agent 每步执行 / judge 判定 / judge_escalate 复核 /
+  // narrative 失败叙述 / specgen 需规生成 / assistant 助手对话。
+  // effective_* 是实际生效值（含继承默认）。
   roles?: Record<string, LlmRoleStatus>;
+  // 两级判定总开关：便宜模型先判，判 failed 或闸门告警时才升级复核。
+  // 默认关（要花钱），前端必须让用户显式打开。
+  judge_two_tier?: boolean;
+  // ★ 2026-10-11：上面这几个字段现在是**真实生效**的那一套（池的第 1 条），
+  // 不再是 env / 旧单值字段 —— 后者在池非空时完全不参与运行。
+  // pool_source 说明这套配置来自哪里：pool = 已保存的池；env = 池为空、回落 .env。
+  pool_source?: "pool" | "env";
+  pool_count?: number;
 }
 
 // 一个用途的配置现状。model/base_url/provider 为空 = 跟随默认；
@@ -246,6 +255,7 @@ export interface LlmSettingsIn {
   api_key?: string; // blank keeps the stored key
   pool?: LlmPoolIn[]; // when present it fully replaces the ordered pool
   roles?: Record<string, LlmRoleIn>; // when present it fully replaces the per-purpose map
+  judge_two_tier?: boolean; // two-tier judging on/off; omitted = leave unchanged
 }
 
 // 池里的一套网关（多套时按顺序 429 兜底）。api_key 是只写的：留空表示
@@ -275,6 +285,9 @@ export interface LlmTestResult {
   model?: string;
   reply_model?: string;
   api_key_set?: boolean;
+  /** 测的是哪一套（池条目的名字）。让"测通了"不至于不知道测的谁。 */
+  profile?: string;
+  base_url?: string;
   protocol?: string;
   json_object?: boolean;
   json_schema?: boolean;
@@ -515,6 +528,11 @@ export interface RunResult {
   override_at?: string | null;
   /** 改判前 AI 的原始结论（撤销改判时用来还原）。 */
   original_status?: string | null;
+  /** 两级判定（2026-10-11）：这条结论是**复核层**给出的（初判判失败/闸门报警才触发）。
+   *  必须能看到 —— 复核用的是更贵的模型，"哪些结论真动用了复核"决定这套机制是省钱还是烧钱。 */
+  judge_escalated?: boolean;
+  /** 初判的结论（passed/failed/error:XXX），用于统计"升级改判率"。 */
+  judge_escalated_from?: string | null;
 }
 
 /** LLM token 消耗（2026-10-09）。键名刻意取短：它跟着每条结果落库。
@@ -1134,7 +1152,12 @@ export const api = {
     }),
   setLlmSettings: (b: LlmSettingsIn) =>
     req<LlmStatus>("/admin/settings/llm", { method: "PUT", body: JSON.stringify(b) }),
-  getLlmPool: () => req<{ pool: LlmPoolEntry[]; count: number }>("/admin/settings/llm/pool"),
+  // ★ 池为空时这里回一条从 .env 读出来的**回显**条目（seeded=true），而不是空列表 ——
+  // 空列表会让界面显示"没有配置"，而实际上平台正在用 .env 那一套跑。
+  getLlmPool: () =>
+    req<{ pool: LlmPoolEntry[]; count: number; source: "pool" | "env"; seeded: boolean }>(
+      "/admin/settings/llm/pool",
+    ),
   testLlmSettings: () => req<LlmTestResult>("/admin/settings/llm/test", { method: "POST" }),
   setFeishuSettings: (b: FeishuSettingsIn) =>
     req<FeishuStatus>("/admin/settings/feishu", { method: "PUT", body: JSON.stringify(b) }),

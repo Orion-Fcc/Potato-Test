@@ -82,7 +82,13 @@ def _feishu_status(cfg: dict) -> dict:
 
 
 def _llm_status(cfg) -> dict:
-    """Public-safe view of the effective LLM config (key shown only as a boolean)."""
+    """Public-safe view of the effective LLM config (key shown only as a boolean).
+
+    2026-10-11：入参改成传**真实生效的 profile**（`llm.active_profile()`），
+    而不是 `llm_config()`（env + 旧单值字段）。字段名不变 ——
+    LLMProfile 与 LLMConfig 都有 base_url/model/agent_model/provider/api_key，
+    所以调用方只要换掉传进来的那个对象，界面显示的就是正在跑的那一套。
+    """
     return {
         "base_url": cfg.base_url,
         "model": cfg.model,
@@ -319,6 +325,10 @@ def _result(x: RunResult) -> dict:
         # 埋在 timing 里就得处处先判 None 再取 key。
         # None = 埋点前的历史行，或这次执行没拿到 usage（网关不回 usage 时）。
         "usage": (x.timing or {}).get("usage") or None,
+        # 两级判定（2026-10-11）：这条结论是不是"复核层"给的。
+        # 报告里要能一眼看出"哪些结论动用了更贵的模型、它把初判改成了什么"。
+        "judge_escalated": bool((x.timing or {}).get("judge_escalated")),
+        "judge_escalated_from": (x.timing or {}).get("judge_escalated_from") or "",
         "error": x.error,
         # 2026-10-06 人工改判痕迹。前端据此把"人改的"和"AI 判的"区分开 ——
         # 混在一起的话，通过率/真缺陷率这些数字就没有可信度了。

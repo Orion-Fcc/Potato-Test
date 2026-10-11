@@ -1,6 +1,6 @@
 """LLM 端点「说什么协议、有哪些能力」的自适应层。
 
-为什么需要它（2026-10-10 现场）：网关 api.agnes-ai.cn 突然开始拒绝
+为什么需要它（2026-10-10 现场）：网关 api.example.com 突然开始拒绝
 `response_format={"type":"json_schema"}`（400 `This response_format type is
 unavailable now`），而 browser-use 的 ChatOpenAI 默认**每一步**都带这个字段 ——
 结果 run17 里 TP-CCR-001/005 只导航成功，后面每一步全 400，用例被判"只导航、零动作"。

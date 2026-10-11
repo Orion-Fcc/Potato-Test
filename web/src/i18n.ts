@@ -381,6 +381,21 @@ const zh: Record<string, string> = {
     "先由便宜模型判定；只有判 failed 或确定性闸门报警时才动用复核模型 —— 通过且干净的结果不会多花一分钱。保存后生效。",
   "Judging and escalation resolve to the same model ({{model}}), so escalation is skipped. Give the escalation row a different model to get real review.":
     "判定层与复核层实际是同一支模型（{{model}}），复核会被跳过。给「判定复核」单独设一支模型才有真正的二次审查。",
+  // 设置页简化（2026-10-11）：用户反馈「前端 llm 设置页面过于复杂」。
+  // 改法是两层：① 长解释从正文段落挪进 ? 悬浮 → 默认视图每个区块只剩一句话；
+  // ② 只有一套网关时的那部分、以及「按用途分模型」整卡，默认收起。
+  // 注意措辞必须带上"收起来的东西还在"，否则折叠会被读成"功能被砍了"。
+  "Fallback gateways": "兜底网关",
+  "Only set 1 runs by default — the extras are tried in order when set 1 is rate-limited (429) or misconfigured. Keep them folded if you run a single gateway.":
+    "默认只跑第 1 套；第 1 套被限流（429）或配置有误时，才会按顺序换用下面的网关。只用一个网关就不用展开。",
+  "{{n}} extra gateway(s) configured for fallback.": "另有 {{n}} 套兜底网关已配置。",
+  "No step is individually set — every step uses the pool's set 1.":
+    "没有任何环节被单独指定 —— 全部使用模型池的第 1 套。",
+  "{{n}} step(s) have their own model.": "有 {{n}} 个环节单独指定了模型。",
+  "Only the model name is needed to swap models; the gateway, protocol and key are only for switching to a different provider.":
+    "只想换个模型，填「模型」这一个框就够。「协议 / 网关 / 钥匙」是换到另一家厂商时才需要的。",
+  "More options": "更多设置",
+  "Fewer options": "收起设置",
   "Reviewed by the escalation model (initial verdict: {{from}})": "由复核模型给出（初判：{{from}}）",
   reviewed: "已复核",
   // 「这一轮的钱花在哪儿」（2026-10-11）。刻意把**往返次数**摆在最显眼处：

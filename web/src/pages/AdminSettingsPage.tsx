@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
+import type { ReactNode } from "react";
 import { useTranslation } from "react-i18next";
+import { ChevronRight } from "lucide-react";
 import { api, type FeishuStatus, type LlmPoolEntry, type LlmPremiumStatus, type LlmRoleStatus, type LlmStatus, type LlmTestResult } from "../lib/api";
 import { useAuth } from "../lib/auth";
 import { Button, Card, Checkbox, Field, Input, Select } from "../components/ui";
@@ -46,6 +48,105 @@ const ROLE_HINT: Record<string, string> = {
 // 能力徽标只用符号，不引入新的文案键（服务端实测出来的布尔值无歧义）
 function mark(ok: boolean) {
   return ok ? "✓" : "✕";
+}
+
+/**
+ * 一个 ? 图标，悬浮（或键盘聚焦）才展开完整解释。
+ *
+ * 为什么要有它（2026-10-11 简化）：这个页面以前把每一条设计理由都写成正文段落，
+ * 一屏能堆七八段 —— 这就是「LLM 设置页面过于复杂」的一半来源。但那些理由本身有
+ * 价值（不讲清楚，用户会在"配了却没生效"上反复踩坑，而这正是前几版花大力气消灭的
+ * 那类错觉），直接删掉只是把复杂度换成了沉默。所以挪到悬浮层：默认视图每个区块
+ * 只说一句话，想深究的把鼠标放上去看全部。
+ *
+ * 两个实现上的坑：
+ * 1) 必须是 <button> 而不是 <span> —— 需要能 Tab 到，group-focus-within 才有意义，
+ *    也顺带给读屏器一个 aria-label。
+ * 2) **不要**把 Hint 放进 <label> 里。按钮的 click 会冒泡到 label、顺带切换关联的
+ *    复选框，于是"点问号看说明"会变成"点问号改了配置"。
+ */
+function Hint({ text }: { text: string }) {
+  return (
+    <span className="group relative ml-1 inline-flex align-baseline">
+      <button
+        type="button"
+        aria-label={text}
+        className="grid h-3.5 w-3.5 translate-y-[1px] place-items-center rounded-full border border-[var(--line-strong)] text-[9px] font-semibold leading-none text-ink-400 outline-none transition-colors hover:border-brand-500 hover:text-brand-600 focus-visible:ring-2 focus-visible:ring-brand-100"
+      >
+        ?
+      </button>
+      {/* pointer-events-none：它盖在下面的控件上，不能挡住点击 */}
+      <span
+        role="tooltip"
+        className="pointer-events-none absolute left-0 top-full z-30 mt-1.5 hidden w-[20rem] max-w-[70vw] rounded-lg border border-[var(--line)] bg-[var(--panel)] px-3 py-2 text-[11px] font-normal leading-relaxed text-ink-600 shadow-[var(--shadow-4)] group-hover:block group-focus-within:block"
+      >
+        {text}
+      </span>
+    </span>
+  );
+}
+
+/**
+ * 折叠区。默认收起 —— 这个页面的问题从来不是"功能缺失"，而是默认视图里塞了
+ * 四十多个控件和八段解释。折叠让默认视图只回答两个问题：现在跑的是哪一套 /
+ * 要不要为质量多加一支贵模型；真要逐项微调的人再展开。
+ *
+ * 标题用 <button>、提示用**同级**的 <Hint>（不是嵌在按钮里）—— 按钮套按钮是非法
+ * HTML，点击行为也会互相打架。右侧 summary 显示"收起来的时候你错过了什么"，
+ * 免得折叠等于藏东西。
+ */
+function Fold({
+  open,
+  onToggle,
+  title,
+  badge,
+  hint,
+  summary,
+  children,
+}: {
+  open: boolean;
+  onToggle: () => void;
+  title: string;
+  badge?: string;
+  hint?: string;
+  summary?: ReactNode;
+  children: ReactNode;
+}) {
+  return (
+    <div>
+      <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
+        <div className="flex flex-wrap items-baseline gap-x-2">
+          <button
+            type="button"
+            onClick={onToggle}
+            className="inline-flex items-center gap-1.5 text-sm font-medium text-ink-900 outline-none transition-colors hover:text-brand-700 focus-visible:ring-2 focus-visible:ring-brand-100"
+          >
+            <ChevronRight
+              className={`h-4 w-4 shrink-0 text-ink-400 transition-transform duration-150${open ? " rotate-90" : ""}`}
+            />
+            {title}
+          </button>
+          {badge && <span className="text-[11px] font-normal text-ink-400">{badge}</span>}
+          {hint && <Hint text={hint} />}
+        </div>
+        {summary && <div className="text-[11px] text-ink-500">{summary}</div>}
+      </div>
+      {open && <div className="mt-3 space-y-3">{children}</div>}
+    </div>
+  );
+}
+
+/** 卡片标题行：左边标题（可挂 ? 提示），右边一句"现在的状态"。 */
+function CardTitle({ title, hint, right }: { title: string; hint?: string; right?: ReactNode }) {
+  return (
+    <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+      <div className="text-sm font-medium text-ink-900">
+        {title}
+        {hint && <Hint text={hint} />}
+      </div>
+      {right && <div className="text-[11px] text-ink-500">{right}</div>}
+    </div>
+  );
 }
 
 // 一个用途行在"还没从后端拿到"时的空壳（含 effective_* 的占位），
@@ -132,6 +233,16 @@ export function AdminSettingsPage() {
   const [premiumKey, setPremiumKey] = useState("");
   const [savingPremium, setSavingPremium] = useState(false);
 
+  // 折叠态（2026-10-11 简化）。默认视图只留"最常用的两件事"，其余收起来：
+  //   showExtraGateways —— 模型池里第 2 套以后的兜底网关（只有一套网关时纯噪音）
+  //   showRolesCard     —— 「按用途分模型」整卡（6×4 = 24 个控件，占了页面一半的密度）
+  //   roleMore          —— 按用途卡里每一行是否展开"协议/网关/钥匙"
+  // 说明：roleMore 抽成"每行一个开关"而不是全卡一个开关，是因为绝大多数人只换模型名、
+  // 不换厂商；而"换厂商"是少数行的事，不该让所有行都摊开四个框。
+  const [showExtraGateways, setShowExtraGateways] = useState(false);
+  const [showRolesCard, setShowRolesCard] = useState(false);
+  const [roleMore, setRoleMore] = useState<Record<string, boolean>>({});
+
   // Feishu
   const [fs, setFs] = useState<FeishuStatus | null>(null);
   const [appId, setAppId] = useState("");
@@ -153,8 +264,29 @@ export function AdminSettingsPage() {
         // 所以下面这块面板显示的模型名与实际调用逐字节一致。
         setLlm(s.llm);
         setRoles(s.llm.roles || {});
+        // 已经单独配了网关/协议/钥匙的用途行，默认把那三个框展开 ——
+        // 否则用户看到"这行只有模型名"，会以为自己之前填的网关丢了。
+        setRoleMore(
+          Object.fromEntries(
+            Object.entries(s.llm.roles || {})
+              .filter(
+                ([, r]) =>
+                  !!(r.base_url || "").trim() ||
+                  !!r.api_key_set ||
+                  (!!r.provider && r.provider !== "auto"),
+              )
+              .map(([k]) => [k, true]),
+          ),
+        );
         setTwoTier(!!s.llm.judge_two_tier);
         setPremium(s.llm.premium || emptyPremium());
+        // 高端模型挂在「判定复核」上、但两级判定还关着 ⇒ 直接展开高级区。
+        // 不这样的话下面那句黄色警告会指着"一个收起来的开关"，用户得先猜它在哪。
+        setShowRolesCard(
+          !!s.llm.premium?.usable &&
+            (s.llm.premium.applies_to || []).includes("judge_escalate") &&
+            !s.llm.judge_two_tier,
+        );
         setPremiumKey("");
         setFs(s.feishu);
         setAppId(s.feishu.app_id);
@@ -336,6 +468,77 @@ export function AdminSettingsPage() {
   const premiumConfiguredForReview =
     !!llm?.premium?.usable && (llm.premium.applies_to || []).includes("judge_escalate");
 
+  // 折叠状态下"你错过了什么"要如实报出来：有几个用途被单独指定了模型。
+  // 折叠+不说 = 藏东西，那是另一个问题，不是简化。
+  const rolesConfigured = ROLES.filter((r) => !!(roles[r]?.model || "").trim()).length;
+
+  // 池条目的编辑块。抽成函数是因为它现在出现在两处：默认展开的第 1 套，
+  // 以及折叠区里的第 2 套以后（两处必须长得一模一样，否则用户会以为"兜底的"是另一套东西）。
+  const poolEntry = (row: PoolRow, i: number) => (
+    <div key={i} className="space-y-2 rounded-lg border border-[var(--line)] p-2.5">
+      <div className="flex items-center gap-2">
+        <span className="w-6 text-center font-mono text-xs text-ink-500">{i + 1}</span>
+        <Input
+          value={row.name}
+          onChange={(e) => setPool((pool || []).map((r, j) => (j === i ? { ...r, name: e.target.value } : r)))}
+          placeholder={t("Name")}
+          className="w-40"
+        />
+        <Select
+          value={row.provider || "auto"}
+          onChange={(e) =>
+            setPool((pool || []).map((r, j) => (j === i ? { ...r, provider: e.target.value } : r)))
+          }
+          className="w-44"
+        >
+          {PROVIDERS.map((p) => (
+            <option key={p} value={p}>
+              {t(PROVIDER_LABEL[p])}
+            </option>
+          ))}
+        </Select>
+        {/* 第 1 套不给"移除"：它是 agent 实际在跑的那一套，清掉整池就空了。
+            想换掉它就直接改地址/模型。 */}
+        {i > 0 && (
+          <Button variant="ghost" onClick={() => setPool((pool || []).filter((_r, j) => j !== i))}>
+            {t("Remove")}
+          </Button>
+        )}
+      </div>
+      <Input
+        value={row.base_url}
+        onChange={(e) =>
+          setPool((pool || []).map((r, j) => (j === i ? { ...r, base_url: e.target.value } : r)))
+        }
+        placeholder="https://api.deepseek.com/v1"
+      />
+      <div className="grid grid-cols-3 gap-2">
+        <Input
+          value={row.model}
+          onChange={(e) =>
+            setPool((pool || []).map((r, j) => (j === i ? { ...r, model: e.target.value } : r)))
+          }
+          placeholder={t("Model")}
+        />
+        <Input
+          value={row.agent_model}
+          onChange={(e) =>
+            setPool((pool || []).map((r, j) => (j === i ? { ...r, agent_model: e.target.value } : r)))
+          }
+          placeholder={t("Agent model")}
+        />
+        <Input
+          type="password"
+          value={row.api_key}
+          onChange={(e) =>
+            setPool((pool || []).map((r, j) => (j === i ? { ...r, api_key: e.target.value } : r)))
+          }
+          placeholder={row.api_key_set ? t("•••••••• (kept)") : "sk-…"}
+        />
+      </div>
+    </div>
+  );
+
   return (
     <div className="space-y-6">
       <div>
@@ -349,36 +552,33 @@ export function AdminSettingsPage() {
         </div>
       )}
 
+      {/* 真实生效的那一套（只读）。
+          ★ 2026-10-11 修正：这块面板以前读的是 env / 旧单值字段，而配了池之后
+          它们**完全不参与运行** —— 也就是说它会显示一个没在跑的模型名，且不报错。
+          现在后端直接回解析后的最终结果（把高端模型/按用途覆盖都算进去），并把来源
+          一并回出来，让"我在编辑的那一层是不是生效的那一层"当场可见。
+          2026-10-11 简化：标题从「LLM model」改成「当前生效」—— 原标题和下面那张
+          「模型池」的关系说不清，用户会以为这里也能改。这是只读面板。 */}
       <Card className="max-w-2xl space-y-3 p-4">
-        <div>
-          <div className="text-sm font-medium text-ink-900">{t("LLM model")}</div>
-          <div className="text-xs text-ink-500">
-            {t("The gateway the browser agent actually calls. Edit it in the model pool below — there is exactly one place to set it, so what you save is what runs.")}
-          </div>
-        </div>
+        <CardTitle
+          title={t("Currently in use (agent)")}
+          hint={t("The gateway the browser agent actually calls. Edit it in the model pool below — there is exactly one place to set it, so what you save is what runs.")}
+          right={
+            /* 来源要按**优先级**说，不能只看池：高端模型或某个用途的覆盖一旦接管 agent，
+               实际模型就不是池第 1 套了 —— 那时还说"来自模型池"就成了新的假信息
+               （这正是这一版要消灭的那类错觉）。 */
+            llm?.roles?.agent?.source === "premium"
+              ? t("from the premium model")
+              : llm?.roles?.agent?.source === "override"
+                ? t("from the execution row in “Model per purpose”")
+                : llm?.pool_source === "env"
+                  ? t("from .env — no pool saved yet")
+                  : t("from the pool ({{n}} set(s))", { n: llm?.pool_count ?? 1 })
+          }
+        />
 
-        {/* 真实生效的那一套。
-            ★ 2026-10-11 修正：这块面板以前读的是 env / 旧单值字段，而配了池之后
-            它们**完全不参与运行** —— 也就是说它会显示一个没在跑的模型名，且不报错。
-            现在后端直接回池的第 1 条（agent 每步真正用的那套），并把来源一并回出来，
-            让"我在编辑的那一层是不是生效的那一层"当场可见。 */}
         <div className="rounded-lg bg-[var(--panel2)] px-3 py-2 text-xs text-ink-700">
-          <div className="flex flex-wrap items-baseline justify-between gap-x-3">
-            <div className="font-medium">{t("Currently in use (agent)")}</div>
-            <div className="text-ink-500">
-              {/* 来源要按**优先级**说，不能只看池：高端模型或某个用途的覆盖一旦接管 agent，
-                  实际模型就不是池第 1 套了 —— 那时还说"来自模型池"就成了新的假信息
-                  （这正是这一版要消灭的那类错觉）。 */}
-              {llm?.roles?.agent?.source === "premium"
-                ? t("from the premium model")
-                : llm?.roles?.agent?.source === "override"
-                  ? t("from the execution row in “Model per purpose”")
-                  : llm?.pool_source === "env"
-                    ? t("from .env — no pool saved yet")
-                    : t("from the pool ({{n}} set(s))", { n: llm?.pool_count ?? 1 })}
-            </div>
-          </div>
-          <div className="mt-1 grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5">
+          <div className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5">
             <span className="text-ink-500">{t("Endpoint")}</span>
             <span className="break-all font-mono">{llm?.base_url || t("(not set)")}</span>
             <span className="text-ink-500">{t("Agent model")}</span>
@@ -396,17 +596,15 @@ export function AdminSettingsPage() {
               {llm?.provider === "auto" ? t(" (detected by probe)") : ""}
             </span>
           </div>
-          <div className="mt-1 text-[11px] text-ink-500">
-            {t("Per-purpose models below may override the model for judging, narration, spec generation and the assistant.")}
-          </div>
         </div>
 
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-3">
           <Button variant="ghost" onClick={testLlm} disabled={testingLlm}>
             {testingLlm ? t("Testing…") : t("Test connection")}
           </Button>
-          <span className="text-xs text-ink-500">
+          <span className="inline-flex items-center text-xs text-ink-500">
             {t("Tests the set the agent actually calls — and tells you which one that was.")}
+            <Hint text={t("The judge model needs vision (screenshots are evidence). Values here override .env; key stored encrypted.")} />
           </span>
         </div>
         {llmTest && (
@@ -443,22 +641,24 @@ export function AdminSettingsPage() {
             )}
           </div>
         )}
-        <p className="text-xs text-ink-500">
-          {t("The judge model needs vision (screenshots are evidence). Values here override .env; key stored encrypted.")}
-        </p>
       </Card>
 
       {/* 池：多套网关按顺序兜底。**这里是唯一的网关配置入口** ——
           2026-10-11 起把原来那张"基层模型"卡的输入框合并到这里了：那张卡的字段在池非空时
           完全不生效（load_pool 会整体取代它们），留着只会让人改了模型发现没变。
-          顺序即优先级，429（配额耗尽）自动换下一套。 */}
+          顺序即优先级，429（配额耗尽）自动换下一套。
+          2026-10-11 简化：默认只摊开第 1 套（真正在跑的那一套），第 2 套以后收进折叠区 ——
+          只有一套网关时那部分纯属噪音。 */}
       <Card className="max-w-2xl space-y-3 p-4">
-        <div>
-          <div className="text-sm font-medium text-ink-900">{t("Model pool (fallback order)")}</div>
-          <div className="text-xs text-ink-500">
-            {t("Several gateways tried in order: index 1 is preferred and is what the agent uses by default, the next one takes over when a key is rate-limited (429) or misconfigured. Leave an API key blank to keep the stored one.")}
-          </div>
-        </div>
+        <CardTitle
+          title={t("Model pool (fallback order)")}
+          hint={t("Several gateways tried in order: index 1 is preferred and is what the agent uses by default, the next one takes over when a key is rate-limited (429) or misconfigured. Leave an API key blank to keep the stored one.")}
+          right={
+            pool && pool.length > 1
+              ? t("{{n}} sets configured.", { n: pool.length })
+              : t("One entry = no fallback: this set is used as-is.")
+          }
+        />
 
         {poolSeeded && (
           <div className="tp-alert tp-alert-warn text-[11px]">
@@ -470,99 +670,67 @@ export function AdminSettingsPage() {
           <div className="text-xs text-ink-500">{t("Loading…")}</div>
         ) : (
           <div className="space-y-2">
-            {pool.map((row, i) => (
-              <div key={i} className="rounded-lg border border-[var(--line)] p-2.5 space-y-2">
-                <div className="flex items-center gap-2">
-                  <span className="w-6 text-center text-xs font-mono text-ink-500">{i + 1}</span>
-                  <Input
-                    value={row.name}
-                    onChange={(e) =>
-                      setPool(pool.map((r, j) => (j === i ? { ...r, name: e.target.value } : r)))
-                    }
-                    placeholder={t("Name")}
-                    className="w-40"
-                  />
-                  <Select
-                    value={row.provider || "auto"}
-                    onChange={(e) =>
-                      setPool(pool.map((r, j) => (j === i ? { ...r, provider: e.target.value } : r)))
-                    }
-                    className="w-44"
-                  >
-                    {PROVIDERS.map((p) => (
-                      <option key={p} value={p}>
-                        {t(PROVIDER_LABEL[p])}
-                      </option>
-                    ))}
-                  </Select>
-                  <Button
-                    variant="ghost"
-                    onClick={() => setPool(pool.filter((_r, j) => j !== i))}
-                  >
-                    {t("Remove")}
-                  </Button>
-                </div>
-                <Input
-                  value={row.base_url}
-                  onChange={(e) =>
-                    setPool(pool.map((r, j) => (j === i ? { ...r, base_url: e.target.value } : r)))
-                  }
-                  placeholder="https://api.deepseek.com/v1"
-                />
-                <div className="grid grid-cols-3 gap-2">
-                  <Input
-                    value={row.model}
-                    onChange={(e) =>
-                      setPool(pool.map((r, j) => (j === i ? { ...r, model: e.target.value } : r)))
-                    }
-                    placeholder={t("Model")}
-                  />
-                  <Input
-                    value={row.agent_model}
-                    onChange={(e) =>
-                      setPool(pool.map((r, j) => (j === i ? { ...r, agent_model: e.target.value } : r)))
-                    }
-                    placeholder={t("Agent model")}
-                  />
-                  <Input
-                    type="password"
-                    value={row.api_key}
-                    onChange={(e) =>
-                      setPool(pool.map((r, j) => (j === i ? { ...r, api_key: e.target.value } : r)))
-                    }
-                    placeholder={row.api_key_set ? t("•••••••• (kept)") : "sk-…"}
-                  />
-                </div>
-              </div>
-            ))}
-            <div className="flex items-center gap-3">
-              <Button
-                variant="ghost"
-                onClick={() =>
-                  setPool([
-                    ...pool,
-                    {
-                      name: `llm${pool.length + 1}`,
-                      base_url: "",
-                      model: "",
-                      agent_model: "",
-                      provider: "auto",
-                      api_key_set: false,
-                      api_key: "",
-                    },
-                  ])
-                }
+            {pool.length > 0 && poolEntry(pool[0], 0)}
+
+            {pool.length > 1 ? (
+              <Fold
+                open={showExtraGateways}
+                onToggle={() => setShowExtraGateways((v) => !v)}
+                title={t("Fallback gateways")}
+                hint={t("Only set 1 runs by default — the extras are tried in order when set 1 is rate-limited (429) or misconfigured. Keep them folded if you run a single gateway.")}
+                summary={t("{{n}} extra gateway(s) configured for fallback.", { n: pool.length - 1 })}
               >
-                {t("Add a gateway")}
-              </Button>
+                {pool.map((row, i) => (i > 0 ? poolEntry(row, i) : null))}
+                <Button
+                  variant="ghost"
+                  onClick={() =>
+                    setPool([
+                      ...pool,
+                      {
+                        name: `llm${pool.length + 1}`,
+                        base_url: "",
+                        model: "",
+                        agent_model: "",
+                        provider: "auto",
+                        api_key_set: false,
+                        api_key: "",
+                      },
+                    ])
+                  }
+                >
+                  {t("Add a gateway")}
+                </Button>
+              </Fold>
+            ) : (
+              <div>
+                <Button
+                  variant="ghost"
+                  onClick={() => {
+                    // 点了就直接展开 —— 加完还收着的话，用户会以为没加上。
+                    setPool([
+                      ...pool,
+                      {
+                        name: `llm${pool.length + 1}`,
+                        base_url: "",
+                        model: "",
+                        agent_model: "",
+                        provider: "auto",
+                        api_key_set: false,
+                        api_key: "",
+                      },
+                    ]);
+                    setShowExtraGateways(true);
+                  }}
+                >
+                  {t("Add a gateway")}
+                </Button>
+              </div>
+            )}
+
+            <div className="flex items-center gap-3">
               <Button onClick={savePool} disabled={savingPool}>
                 {savingPool ? t("Saving…") : t("Save pool")}
               </Button>
-              <span className="text-xs text-ink-500">
-                {pool.length <= 1
-                  ? t("One entry = no fallback: this set is used as-is.")
-                  : t("{{n}} sets configured.", { n: pool.length })}
-              </span>
             </div>
           </div>
         )}
@@ -573,17 +741,15 @@ export function AdminSettingsPage() {
           在这一个开关上回答一次，而不是让人去下面六个用途行里各填一遍。
           默认关 = 省钱优先；关着时所有用途都还是池的第 1 套，一分钱不多花。 */}
       <Card className="max-w-2xl space-y-3 p-4">
-        <div className="flex flex-wrap items-baseline justify-between gap-x-3">
-          <div className="text-sm font-medium text-ink-900">{t("Premium model (optional)")}</div>
-          <div className="text-[11px] text-ink-500">
-            {llm?.premium?.usable
+        <CardTitle
+          title={t("Premium model (optional)")}
+          hint={t("Add one expensive, smart model and tick exactly which steps may use it. Off means every step falls back to the pool's set 1 — no extra spend at all.")}
+          right={
+            llm?.premium?.usable
               ? t("In effect: {{roles}}", { roles: premiumLiveRoles || "—" })
-              : t("Not in effect — every step uses the pool's set 1 above.")}
-          </div>
-        </div>
-        <div className="text-xs text-ink-500">
-          {t("Add one expensive, smart model and tick exactly which steps may use it. Off means every step falls back to the pool's set 1 — no extra spend at all.")}
-        </div>
+              : t("Not in effect — every step uses the pool's set 1 above.")
+          }
+        />
 
         <label className="flex cursor-pointer items-center gap-2">
           <Checkbox
@@ -642,7 +808,10 @@ export function AdminSettingsPage() {
             </div>
 
             <div className="space-y-1.5 rounded-lg border border-[var(--line)] p-3">
-              <div className="text-[13px] font-medium text-ink-900">{t("Which steps may use it")}</div>
+              <div className="text-[13px] font-medium text-ink-900">
+                {t("Which steps may use it")}
+                <Hint text={t("Judge escalation is only called when the cheap judge says failed or a gate warns — it can be the priciest model, because a routine pass never calls it.")} />
+              </div>
               <div className="flex flex-wrap gap-x-4 gap-y-2">
                 {PREMIUM_ROLES.map((r) => (
                   <label key={r} className="flex cursor-pointer items-center gap-2">
@@ -660,9 +829,6 @@ export function AdminSettingsPage() {
                     <span className="text-[12px] text-ink-700">{t(ROLE_LABEL[r])}</span>
                   </label>
                 ))}
-              </div>
-              <div className="text-[11px] text-ink-400">
-                {t("Judge escalation is only called when the cheap judge says failed or a gate warns — it can be the priciest model, because a routine pass never calls it.")}
               </div>
             </div>
 
@@ -702,126 +868,146 @@ export function AdminSettingsPage() {
           留空 = 跟随默认；只换模型填模型名就够，换厂商才需要网关/钥匙。
           这是**更具体**的一层：单独指名某个用途，所以它盖过上面的高端模型。 */}
       <Card className="max-w-2xl space-y-3 p-4">
-        <div>
-          <div className="text-sm font-medium text-ink-900">
-            {t("Model per purpose")}
-            <span className="ml-2 text-[11px] font-normal text-ink-400">{t("advanced")}</span>
+        <Fold
+          open={showRolesCard}
+          onToggle={() => setShowRolesCard((v) => !v)}
+          title={t("Model per purpose")}
+          badge={t("advanced")}
+          hint={
+            t("Cheap model for the high-volume execution steps, strong model where quality matters. Blank = follow the default (= set 1 of the pool above).") +
+            " " +
+            t("A value here also wins over the premium model above — this card is the most specific layer.")
+          }
+          summary={
+            rolesConfigured > 0
+              ? t("{{n}} step(s) have their own model.", { n: rolesConfigured })
+              : t("No step is individually set — every step uses the pool's set 1.")
+          }
+        >
+          {/* 优先级说明。两个地方都能表达"执行用哪个模型"（池条目的 Agent model 与
+              这里的「执行」行），不说清楚就会出现"我改了池里的却没生效"。 */}
+          <div className="tp-alert tp-alert-warn text-[11px]">
+            {t("Priority: a value here wins over the pool's Agent model. Leave the execution row blank unless you want a different model than the pool set uses.")}
           </div>
-          <div className="text-xs text-ink-500">
-            {t("Cheap model for the high-volume execution steps, strong model where quality matters. Blank = follow the default (= set 1 of the pool above).")}
-          </div>
-          <div className="mt-1 text-[11px] text-ink-400">
-            {t("A value here also wins over the premium model above — this card is the most specific layer.")}
-          </div>
-        </div>
 
-        {/* 优先级说明。两个地方都能表达"执行用哪个模型"（池条目的 Agent model 与
-            这里的「执行」行），不说清楚就会出现"我改了池里的却没生效"。 */}
-        <div className="tp-alert tp-alert-warn text-[11px]">
-          {t("Priority: a value here wins over the pool's Agent model. Leave the execution row blank unless you want a different model than the pool set uses.")}
-        </div>
-
-        {/* 两级判定总开关。默认关：它确实会多花 token，得由人拍板。
-            右上角直接算出"实际生效的两个模型"是否同一支 —— 同一个模型时后端会跳过
-            复核调用（不做重复劳动），但那也就等于没开，必须当场说清楚，
-            否则用户会以为开了复核却什么都没发生。 */}
-        <div className="space-y-1.5 rounded-lg border border-[var(--line)] p-3">
-          <label className="flex cursor-pointer items-center gap-2">
-            <Checkbox checked={twoTier} onChange={(e) => setTwoTier(e.target.checked)} />
-            <span className="text-[13px] font-medium text-ink-900">
-              {t("Two-tier judging (cheap judge first, escalate on failure)")}
-            </span>
-          </label>
-          <div className="text-[11px] text-ink-400">
-            {t("The cheap judge runs first. Only a failed verdict or a deterministic gate warning spends the escalation model — routine passes never call it. Takes effect after saving.")}
-          </div>
-          {twoTier && judgeEff && judgeEff === escalateEff && (
-            <div className="tp-alert tp-alert-warn text-[11px]">
-              {t("Judging and escalation resolve to the same model ({{model}}), so escalation is skipped. Give the escalation row a different model to get real review.", { model: judgeEff })}
+          {/* 两级判定总开关。默认关：它确实会多花 token，得由人拍板。
+              右上角直接算出"实际生效的两个模型"是否同一支 —— 同一个模型时后端会跳过
+              复核调用（不做重复劳动），但那也就等于没开，必须当场说清楚，
+              否则用户会以为开了复核却什么都没发生。 */}
+          <div className="space-y-1.5 rounded-lg border border-[var(--line)] p-3">
+            <label className="flex cursor-pointer items-center gap-2">
+              <Checkbox checked={twoTier} onChange={(e) => setTwoTier(e.target.checked)} />
+              <span className="text-[13px] font-medium text-ink-900">
+                {t("Two-tier judging (cheap judge first, escalate on failure)")}
+              </span>
+            </label>
+            <div className="text-[11px] text-ink-400">
+              {t("The cheap judge runs first. Only a failed verdict or a deterministic gate warning spends the escalation model — routine passes never call it. Takes effect after saving.")}
             </div>
-          )}
-        </div>
-
-        <div className="space-y-3">
-          {ROLES.map((r) => {
-            const row = roles[r];
-            return (
-              <div key={r} className="space-y-1.5 rounded-lg border border-[var(--line)] p-3">
-                <div className="flex items-baseline justify-between gap-3">
-                  <div className="text-[13px] font-medium text-ink-900">{t(ROLE_LABEL[r])}</div>
-                  <div className="text-[11px] text-ink-400">
-                    {t("now: {{model}}", { model: row?.effective_model || llm?.model || "—" })}
-                  </div>
-                </div>
-                <div className="flex flex-wrap items-center gap-2">
-                  <Input
-                    value={row?.model ?? ""}
-                    onChange={(e) =>
-                      setRoles({
-                        ...roles,
-                        [r]: { ...(row || emptyRole()), model: e.target.value },
-                      })
-                    }
-                    placeholder={t("(inherit default)")}
-                    className="h-9 w-56"
-                  />
-                  <Select
-                    value={row?.provider || "auto"}
-                    onChange={(e) =>
-                      setRoles({
-                        ...roles,
-                        [r]: { ...(row || emptyRole()), provider: e.target.value },
-                      })
-                    }
-                    className="h-9 w-44"
-                  >
-                    {PROVIDERS.map((p) => (
-                      <option key={p} value={p}>
-                        {t(PROVIDER_LABEL[p])}
-                      </option>
-                    ))}
-                  </Select>
-                  <Input
-                    value={row?.base_url ?? ""}
-                    onChange={(e) =>
-                      setRoles({
-                        ...roles,
-                        [r]: { ...(row || emptyRole()), base_url: e.target.value },
-                      })
-                    }
-                    placeholder={t("gateway URL (optional)")}
-                    className="h-9 w-64"
-                  />
-                  <Input
-                    type="password"
-                    value={row?.api_key ?? ""}
-                    onChange={(e) =>
-                      setRoles({
-                        ...roles,
-                        [r]: { ...(row || emptyRole()), api_key: e.target.value },
-                      })
-                    }
-                    placeholder={row?.api_key_set ? t("•••••••• (kept)") : t("api key (optional)")}
-                    className="h-9 w-48"
-                  />
-                </div>
-                <div className="text-[11px] text-ink-400">{t(ROLE_HINT[r])}</div>
+            {twoTier && judgeEff && judgeEff === escalateEff && (
+              <div className="tp-alert tp-alert-warn text-[11px]">
+                {t("Judging and escalation resolve to the same model ({{model}}), so escalation is skipped. Give the escalation row a different model to get real review.", { model: judgeEff })}
               </div>
-            );
-          })}
-        </div>
-        <div className="flex items-center gap-3">
-          <Button onClick={saveRoles} disabled={savingRoles}>
-            {savingRoles ? t("Saving…") : t("Save per-purpose models")}
-          </Button>
-          <Button
-            variant="ghost"
-            onClick={() => setRoles({})}
-            disabled={savingRoles || !Object.keys(roles).length}
-          >
-            {t("Reset all to default")}
-          </Button>
-        </div>
+            )}
+          </div>
+
+          <div className="space-y-3">
+            {ROLES.map((r) => {
+              const row = roles[r];
+              // 每行默认只摊开「模型」一个框：绝大多数情况就是"换个模型名"，
+              // 协议/网关/钥匙是"换到另一家厂商"才需要的，少数行的事。
+              // 已经存过网关/钥匙的行在 load() 里被预置为展开，不会被藏起来。
+              const more = !!roleMore[r];
+              return (
+                <div key={r} className="space-y-1.5 rounded-lg border border-[var(--line)] p-3">
+                  <div className="flex flex-wrap items-baseline justify-between gap-x-3">
+                    <div className="text-[13px] font-medium text-ink-900">{t(ROLE_LABEL[r])}</div>
+                    <div className="text-[11px] text-ink-400">
+                      {t("now: {{model}}", { model: row?.effective_model || llm?.model || "—" })}
+                    </div>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Input
+                      value={row?.model ?? ""}
+                      onChange={(e) =>
+                        setRoles({
+                          ...roles,
+                          [r]: { ...(row || emptyRole()), model: e.target.value },
+                        })
+                      }
+                      placeholder={t("(inherit default)")}
+                      className="h-9 w-56"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setRoleMore({ ...roleMore, [r]: !more })}
+                      className="text-[11px] text-brand-700 outline-none hover:underline focus-visible:ring-2 focus-visible:ring-brand-100"
+                    >
+                      {more ? t("Fewer options") : t("More options")}
+                    </button>
+                    {!more && <Hint text={t("Only the model name is needed to swap models; the gateway, protocol and key are only for switching to a different provider.")} />}
+                  </div>
+                  {more && (
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Select
+                        value={row?.provider || "auto"}
+                        onChange={(e) =>
+                          setRoles({
+                            ...roles,
+                            [r]: { ...(row || emptyRole()), provider: e.target.value },
+                          })
+                        }
+                        className="h-9 w-44"
+                      >
+                        {PROVIDERS.map((p) => (
+                          <option key={p} value={p}>
+                            {t(PROVIDER_LABEL[p])}
+                          </option>
+                        ))}
+                      </Select>
+                      <Input
+                        value={row?.base_url ?? ""}
+                        onChange={(e) =>
+                          setRoles({
+                            ...roles,
+                            [r]: { ...(row || emptyRole()), base_url: e.target.value },
+                          })
+                        }
+                        placeholder={t("gateway URL (optional)")}
+                        className="h-9 w-64"
+                      />
+                      <Input
+                        type="password"
+                        value={row?.api_key ?? ""}
+                        onChange={(e) =>
+                          setRoles({
+                            ...roles,
+                            [r]: { ...(row || emptyRole()), api_key: e.target.value },
+                          })
+                        }
+                        placeholder={row?.api_key_set ? t("•••••••• (kept)") : t("api key (optional)")}
+                        className="h-9 w-48"
+                      />
+                    </div>
+                  )}
+                  <div className="text-[11px] text-ink-400">{t(ROLE_HINT[r])}</div>
+                </div>
+              );
+            })}
+          </div>
+          <div className="flex items-center gap-3">
+            <Button onClick={saveRoles} disabled={savingRoles}>
+              {savingRoles ? t("Saving…") : t("Save per-purpose models")}
+            </Button>
+            <Button
+              variant="ghost"
+              onClick={() => setRoles({})}
+              disabled={savingRoles || !Object.keys(roles).length}
+            >
+              {t("Reset all to default")}
+            </Button>
+          </div>
+        </Fold>
       </Card>
 
       {gitlabEnabled && (

@@ -220,7 +220,6 @@ export function AdminSettingsPage() {
   // 按用途分模型（agent 每步执行 / 判定 / 失败叙述 / 需规生成 / 助手对话）。
   // 空字符串 = 跟随默认配置；界面显示 effective_* 让"这个用途实际用哪个模型"一目了然。
   const [roles, setRoles] = useState<Record<string, RoleRow>>({});
-  const [savingRoles, setSavingRoles] = useState(false);
   // 两级判定（2026-10-11）：便宜模型先判，只有判 failed 或确定性闸门报警时才叫复核层。
   // 默认关 —— 它确实会多花 token，必须由人显式打开。
   const [twoTier, setTwoTier] = useState(false);
@@ -231,7 +230,9 @@ export function AdminSettingsPage() {
   const [premium, setPremium] = useState<LlmPremiumStatus>(emptyPremium);
   // 钥匙是只写的：本地编辑用的输入框（留空 = 保留已存）
   const [premiumKey, setPremiumKey] = useState("");
-  const [savingPremium, setSavingPremium] = useState(false);
+  // 「高端模型 / 逐环节覆盖 / 两级判定」共用一个保存按钮和一个 saving 标记 ——
+  // 它们是一次 PUT 提交的整体，分成两个 loading 态只会让按钮出现"只转一个"的怪现象。
+  const [savingModels, setSavingModels] = useState(false);
 
   // 折叠态（2026-10-11 简化）。默认视图只留"最常用的两件事"，其余收起来：
   //   showExtraGateways —— 模型池里第 2 套以后的兜底网关（只有一套网关时纯噪音）
@@ -339,11 +340,20 @@ export function AdminSettingsPage() {
     }
   };
 
-  // 保存按用途分模型：只发有值的字段，空字符串 = 清除该覆盖（回归"跟随默认"）。
-  const saveRoles = async () => {
-    setSavingRoles(true);
+  // 保存「模型分配」= 高端模型 + 逐环节覆盖 + 两级判定，**一次 PUT**。
+  //
+  // 为什么合成一个保存按钮（2026-10-11 二次简化）：原来这三样各有一个保存按钮，
+  // 页面上等于摆着三份"模型配置 + 保存"，读起来就是三个互相打架的配置。而它们
+  // 其实是同一个问题的两层答案（默认 → 高端接管 → 逐环节指定），本来就该一起
+  // 提交、一起生效。后端 PUT 本来就同时接受这三个字段，合并没有任何语义变化。
+  //
+  // 两块的提交语义不同，这里必须分别构造、不能混用：
+  //   roles   —— 只发有值的行，缺席的行等于"清掉该覆盖"（后端整体替换 kept 字典）。
+  //   premium —— 整体替换，发上去的就是全部；钥匙留空发 undefined = 保留已存的那把。
+  const saveModels = async () => {
+    setSavingModels(true);
     try {
-      const payload: Record<string, { model?: string; base_url?: string; api_key?: string; provider?: string }> = {};
+      const rolePayload: Record<string, { model?: string; base_url?: string; api_key?: string; provider?: string }> = {};
       for (const r of ROLES) {
         const row = roles[r];
         if (!row) continue;
@@ -352,24 +362,11 @@ export function AdminSettingsPage() {
         if (row.base_url.trim()) item.base_url = row.base_url.trim();
         if (row.api_key?.trim()) item.api_key = row.api_key.trim();
         if (row.provider && row.provider !== "auto") item.provider = row.provider;
-        if (Object.keys(item).length) payload[r] = item;
+        if (Object.keys(item).length) rolePayload[r] = item;
       }
-      await api.setLlmSettings({ roles: payload, judge_two_tier: twoTier });
-      await load();
-      toast("success", t("Saved"));
-    } catch (e: any) {
-      fail(e);
-    } finally {
-      setSavingRoles(false);
-    }
-  };
-
-  // 保存平台级「高端模型」。整体替换语义：发上去的就是全部。
-  // 钥匙留空按 undefined 发 —— 后端把它解释成"保留已存的那把"，不是清空。
-  const savePremium = async () => {
-    setSavingPremium(true);
-    try {
       await api.setLlmSettings({
+        roles: rolePayload,
+        judge_two_tier: twoTier,
         premium: {
           enabled: premium.enabled,
           model: premium.model.trim(),
@@ -385,7 +382,7 @@ export function AdminSettingsPage() {
     } catch (e: any) {
       fail(e);
     } finally {
-      setSavingPremium(false);
+      setSavingModels(false);
     }
   };
 
@@ -736,22 +733,56 @@ export function AdminSettingsPage() {
         )}
       </Card>
 
-      {/* 平台级「高端模型」（贵、聪明，可选）—— 2026-10-11。
-          用户的诉求是「可以自己选择是否加高端 LLM」：整个平台"要不要为质量多花钱"
-          在这一个开关上回答一次，而不是让人去下面六个用途行里各填一遍。
-          默认关 = 省钱优先；关着时所有用途都还是池的第 1 套，一分钱不多花。 */}
-      <Card className="max-w-2xl space-y-3 p-4">
+      {/* 「模型分配」一张卡（2026-10-11 二次简化）。
+          用户反馈：「高端模型」和「按用途分模型」这两块**看上去像在冲突**。
+
+          查下来，冲突感来自三个结构信号，跟语义无关：
+            ① 两张同级卡片、各带一套输入框和**各自的保存按钮** —— 读起来就是几份并列的
+               模型配置（算上模型池那张，全页三个"保存"按钮）；
+            ② 两张卡右侧各挂一句几乎同义的现状（"未生效 —— 都用池第 1 套" /
+               "没有任何环节被单独指定 —— 全部用池第 1 套"），像两个对等的开关；
+            ③ 没有任何视觉线索说明"谁盖过谁"，于是只能猜。
+
+          而语义上它们从来不冲突：是**同一个问题的两级答案**（默认 → 高端接管 →
+          逐环节指定，越往下越具体）。所以这里并成一张卡、编上号、连成一条竖线，
+          并且**只留一个保存按钮** —— 一次 PUT 提交全部（后端本来就同时接受这三个
+          字段，合并没有任何语义变化），让"它们是一件事"从结构上就成立，而不是靠
+          再写一句"其实不冲突"去解释。 */}
+      <Card className="max-w-2xl space-y-4 p-4">
         <CardTitle
-          title={t("Premium model (optional)")}
-          hint={t("Add one expensive, smart model and tick exactly which steps may use it. Off means every step falls back to the pool's set 1 — no extra spend at all.")}
-          right={
-            llm?.premium?.usable
-              ? t("In effect: {{roles}}", { roles: premiumLiveRoles || "—" })
-              : t("Not in effect — every step uses the pool's set 1 above.")
-          }
+          title={t("Model assignment")}
+          hint={t("These two are not alternatives — they are two levels of the same answer, and the more specific one wins: step 1 gives some steps a better model, step 2 names one model per step. Whatever step 2 leaves blank still follows the pool's set 1.")}
+          right={t("Now: every step uses {{model}}", { model: llm?.agent_model || llm?.model || "—" })}
         />
 
-        <label className="flex cursor-pointer items-center gap-2">
+        {/* 把"不是二选一"讲在明面上，就放在两块的正上方 —— 结构性消除之外，再给一句话兜底 */}
+        <div className="rounded-lg bg-[var(--panel2)] px-3 py-2 text-[11px] text-ink-600">
+          {t("Not either-or: step 1 is coarse, step 2 is fine-grained, and step 2 overrides step 1 for the steps it names. Leave step 2 empty and step 1 simply applies to everything it ticks.")}
+        </div>
+
+        {/* 竖向连线：把两步在视觉上串成一条"从粗到细"的阶梯。
+            线画在徽标正下方（left-[9px]、徽标 20px 宽居中在 10px），徽标有实底盖住它。 */}
+        <div className="relative space-y-4">
+          <span aria-hidden className="absolute bottom-4 left-[9px] top-3 w-px bg-[var(--line)]" />
+
+          {/* ── 第 1 步：粗粒度 —— 一支贵模型接管若干环节 ── */}
+          <div className="relative pl-7">
+            <span className="absolute left-0 top-0 grid h-5 w-5 place-items-center rounded-full bg-brand-600 text-[11px] font-semibold leading-none text-[var(--on-brand)]">
+              1
+            </span>
+            <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+              <div className="text-[13px] font-medium text-ink-900">
+                {t("Give some steps a better model")}
+                <Hint text={t("Add one expensive, smart model and tick exactly which steps may use it. Off means every step falls back to the pool's set 1 — no extra spend at all.")} />
+              </div>
+              <div className="text-[11px] text-ink-500">
+                {llm?.premium?.usable
+                  ? t("In effect: {{roles}}", { roles: premiumLiveRoles || "—" })
+                  : t("Off — nothing takes over.")}
+              </div>
+            </div>
+
+        <label className="mt-2 flex cursor-pointer items-center gap-2">
           <Checkbox
             checked={premium.enabled}
             onChange={(e) => {
@@ -844,7 +875,7 @@ export function AdminSettingsPage() {
             )}
             {premiumShadowed.length > 0 && (
               <div className="tp-alert tp-alert-warn text-[11px]">
-                {t("These steps also have their own model in “Model per purpose” below, and that one wins: {{roles}}. Clear those rows if you want the premium model to take over.", {
+                {t("These steps also have their own model in step 2 below, and that one wins: {{roles}}. Clear those rows if you want step 1 to take over.", {
                   roles: premiumShadowed.map((r) => t(ROLE_LABEL[r] || r)).join(" / "),
                 })}
               </div>
@@ -856,34 +887,31 @@ export function AdminSettingsPage() {
             )}
           </>
         )}
+          </div>
 
-        <div className="flex items-center gap-3">
-          <Button onClick={savePremium} disabled={savingPremium}>
-            {savingPremium ? t("Saving…") : t("Save premium model")}
-          </Button>
-        </div>
-      </Card>
-
-      {/* 按用途分模型（2026-10-11）：钱花在"量"上，质量保在"判"上。
-          留空 = 跟随默认；只换模型填模型名就够，换厂商才需要网关/钥匙。
-          这是**更具体**的一层：单独指名某个用途，所以它盖过上面的高端模型。 */}
-      <Card className="max-w-2xl space-y-3 p-4">
-        <Fold
-          open={showRolesCard}
-          onToggle={() => setShowRolesCard((v) => !v)}
-          title={t("Model per purpose")}
-          badge={t("advanced")}
-          hint={
-            t("Cheap model for the high-volume execution steps, strong model where quality matters. Blank = follow the default (= set 1 of the pool above).") +
-            " " +
-            t("A value here also wins over the premium model above — this card is the most specific layer.")
-          }
-          summary={
-            rolesConfigured > 0
-              ? t("{{n}} step(s) have their own model.", { n: rolesConfigured })
-              : t("No step is individually set — every step uses the pool's set 1.")
-          }
-        >
+          {/* ── 第 2 步：细粒度 —— 逐个环节指定 ──
+              这一层**更具体**（单独指名某个环节），所以它盖过第 1 步。
+              保留折叠：6 行 × 4 控件占了半页密度，而大多数人只走第 1 步。 */}
+          <div className="relative pl-7">
+            <span className="absolute left-0 top-0 grid h-5 w-5 place-items-center rounded-full border border-[var(--line-strong)] bg-[var(--panel)] text-[11px] font-semibold leading-none text-ink-500">
+              2
+            </span>
+            <Fold
+              open={showRolesCard}
+              onToggle={() => setShowRolesCard((v) => !v)}
+              title={t("Name one model per step")}
+              badge={t("advanced")}
+              hint={
+                t("Cheap model for the high-volume execution steps, strong model where quality matters. Blank = follow the default (= set 1 of the pool above).") +
+                " " +
+                t("A value here also wins over step 1 above — this is the most specific layer.")
+              }
+              summary={
+                rolesConfigured > 0
+                  ? t("{{n}} step(s) have their own model.", { n: rolesConfigured })
+                  : t("All following the default.")
+              }
+            >
           {/* 优先级说明。两个地方都能表达"执行用哪个模型"（池条目的 Agent model 与
               这里的「执行」行），不说清楚就会出现"我改了池里的却没生效"。 */}
           <div className="tp-alert tp-alert-warn text-[11px]">
@@ -995,19 +1023,27 @@ export function AdminSettingsPage() {
               );
             })}
           </div>
-          <div className="flex items-center gap-3">
-            <Button onClick={saveRoles} disabled={savingRoles}>
-              {savingRoles ? t("Saving…") : t("Save per-purpose models")}
-            </Button>
-            <Button
-              variant="ghost"
-              onClick={() => setRoles({})}
-              disabled={savingRoles || !Object.keys(roles).length}
-            >
-              {t("Reset all to default")}
-            </Button>
+            </Fold>
           </div>
-        </Fold>
+        </div>
+
+        {/* 整张卡只有一个保存按钮 —— 这是"它们是一件事"最直接的表达。
+            以前是三份配置配三个保存，用户只能靠猜它们的关系。 */}
+        <div className="flex flex-wrap items-center gap-3 border-t border-[var(--line)] pt-3">
+          <Button onClick={saveModels} disabled={savingModels}>
+            {savingModels ? t("Saving…") : t("Save model assignment")}
+          </Button>
+          <Button
+            variant="ghost"
+            onClick={() => setRoles({})}
+            disabled={savingModels || !Object.keys(roles).length}
+          >
+            {t("Clear all per-step models")}
+          </Button>
+          <span className="text-[11px] text-ink-500">
+            {t("One save submits steps 1 and 2 together — they are the same setting, applied by priority.")}
+          </span>
+        </div>
       </Card>
 
       {gitlabEnabled && (

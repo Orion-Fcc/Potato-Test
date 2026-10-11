@@ -396,6 +396,28 @@ const zh: Record<string, string> = {
     "只想换个模型，填「模型」这一个框就够。「协议 / 网关 / 钥匙」是换到另一家厂商时才需要的。",
   "More options": "更多设置",
   "Fewer options": "收起设置",
+  // 「模型分配」并卡（2026-10-11 二次简化）：用户看完截图说「高端模型」和
+  // 「按用途分模型」这两块"看上去感觉冲突"。查下来冲突感来自结构（两张同级卡片、
+  // 各一个保存按钮、两句近义现状），不是语义 —— 它们是同一问题的两级答案。
+  // 所以并成一张卡 + 编号 + 竖向连线 + **一个保存按钮**，用结构消掉"二选一"的暗示。
+  "Model assignment": "模型分配",
+  "These two are not alternatives — they are two levels of the same answer, and the more specific one wins: step 1 gives some steps a better model, step 2 names one model per step. Whatever step 2 leaves blank still follows the pool's set 1.":
+    "这两步不是二选一，而是同一个问题的两级答案，越具体越优先：第 1 步让部分环节改用一支更好的模型，第 2 步逐行点名。第 2 步留空的环节，仍然跟模型池的第 1 套。",
+  "Now: every step uses {{model}}": "现在：所有环节都用 {{model}}",
+  "Not either-or: step 1 is coarse, step 2 is fine-grained, and step 2 overrides step 1 for the steps it names. Leave step 2 empty and step 1 simply applies to everything it ticks.":
+    "不是二选一：第 1 步粗、第 2 步细，第 2 步点名的环节以它为准；第 2 步整个留空时，第 1 步勾了哪些环节就管哪些环节。",
+  "Give some steps a better model": "让部分环节用更好的模型",
+  "Off — nothing takes over.": "未启用 —— 没有任何环节被接管。",
+  "These steps also have their own model in step 2 below, and that one wins: {{roles}}. Clear those rows if you want step 1 to take over.":
+    "这几个环节在下面的第 2 步里也单独指定了模型，以那边为准：{{roles}}。想让第 1 步接管，请把那几行清空。",
+  "Name one model per step": "逐个环节指定模型",
+  "A value here also wins over step 1 above — this is the most specific layer.":
+    "这里填的值同样盖过上面的第 1 步 —— 这是最具体的一层。",
+  "All following the default.": "全部跟随默认。",
+  "Save model assignment": "保存模型分配",
+  "Clear all per-step models": "清空所有逐环节指定",
+  "One save submits steps 1 and 2 together — they are the same setting, applied by priority.":
+    "一个保存按钮同时提交第 1、2 步 —— 它们本来就是同一项设置，只是按优先级生效。",
   "Reviewed by the escalation model (initial verdict: {{from}})": "由复核模型给出（初判：{{from}}）",
   reviewed: "已复核",
   // 「这一轮的钱花在哪儿」（2026-10-11）。刻意把**往返次数**摆在最显眼处：

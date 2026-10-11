@@ -2423,6 +2423,23 @@ async def assistant_turn(pid: int, message: str, history: list[dict] | None = No
             result = await _run_tool(tc.function.name, args, pid)
             actions.append({"tool": tc.function.name, "args": args, "ok": "error" not in result})
             messages.append({"role": "tool", "tool_call_id": tc.id, "content": _dump(result)})
+            # ★ ask_user 要**中断本轮**（2026-10-09）。
+            #
+            # 用户的需求是"agent 可以询问我需要一些信息"。如果问完继续往下跑，
+            # 模型几乎必然用自己猜的答案把剩下的做完 —— 那就等于没问。
+            # 所以一遇到它就把问题交回去、结束这一轮，等下一轮用户回答了再继续。
+            #
+            # 注意：这里只记**第一个**问题就停。一次问多个会让用户不知道该先答哪个，
+            # 而模型一次只该问最关键的 1~3 个（提示词里已经这么要求）。
+            if result.get("asked"):
+                return {
+                    "reply": _asked_reply(result),
+                    "actions": actions,
+                    "awaiting_user": True,
+                    "question": result.get("question") or "",
+                    "options": result.get("options") or [],
+                    "why": result.get("why") or "",
+                }
     else:
         # Ran out of ROUNDS (not budget) with the model still calling tools. Ask once
         # more with tools disabled, so the turn still ends in prose.
@@ -2440,4 +2457,25 @@ async def assistant_turn(pid: int, message: str, history: list[dict] | None = No
             log.warning("assistant: final forced answer failed: %s", exc)
 
     reply = _guard_identity(message, reply, project_name)
-    return {"reply": reply or "（无回复）", "actions": actions}
+    # 没问问题就照常返回；awaiting_user 只在 ask_user 那条路径上出现，
+    # 所以前端可以只判断这一个字段来决定"要不要弹一个回答框"。
+    return {"reply": reply or "（无回复）", "actions": actions, "awaiting_user": False}
+
+
+def _asked_reply(result: dict) -> str:
+    """把 ask_user 的结构化问题渲染成一段给用户看的文字。
+
+    ★ 为什么不让模型自己组织这段文字：那样模型就有机会"顺手"把自己猜的答案
+    写进问题里（"我按 30 天算，对吗？"这种引导式提问会把用户带偏）。
+    这里直接由参数拼出中立的问题，模型只负责提供问题内容。
+    """
+    q = (result.get("question") or "").strip()
+    why = (result.get("why") or "").strip()
+    opts = result.get("options") or []
+    parts = [f"❓ {q}" if q else "❓ （模型提出了一个空问题）"]
+    if why:
+        parts.append(f"为什么需要：{why}")
+    if opts:
+        parts.append("可选：\n" + "\n".join(f"  - {o}" for o in opts))
+    parts.append("请回答后我再继续。")
+    return "\n\n".join(parts)

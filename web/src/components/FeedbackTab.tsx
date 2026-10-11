@@ -63,38 +63,38 @@ export function FeedbackTab({ pid }: { pid: number }) {
       </div>
 
       <div className="rounded-lg border border-[var(--line)]">
-        <table className="w-full text-sm">
+        <table className="w-full text-sm tp-table">
           <thead className="tp-thead text-xs text-ink-500">
             <tr>
-              <th className="px-4 py-2">{t("Problem")}</th>
-              <th className="px-4 py-2">{t("Category")}</th>
-              <th className="px-4 py-2">{t("Severity")}</th>
-              <th className="px-4 py-2">{t("From")}</th>
-              <th className="px-4 py-2">{t("When")}</th>
-              <th className="px-4 py-2 text-right">{t("Issue")}</th>
+              <th>{t("Problem")}</th>
+              <th>{t("Category")}</th>
+              <th>{t("Severity")}</th>
+              <th>{t("From")}</th>
+              <th>{t("When")}</th>
+              <th className="text-right">{t("Issue")}</th>
             </tr>
           </thead>
           <tbody>
             {items.map((f) => (
               <tr key={f.id} className="tp-divide-row align-top">
-                <td className="max-w-[26rem] px-4 py-2">
+                <td className="max-w-[26rem]">
                   <div className="font-medium text-ink-900">{f.title ?? f.content.slice(0, 40)}</div>
                   <div className="mt-0.5 line-clamp-2 text-xs text-ink-500">{f.content}</div>
                   {f.answer && (
                     <div className="mt-1 line-clamp-2 text-xs text-brand-700">↳ {f.answer}</div>
                   )}
                 </td>
-                <td className="px-4 py-2">
+                <td>
                   <Badge status={CATEGORY_BADGE[f.category] ?? "pending"}>{f.category}</Badge>
                 </td>
-                <td className="px-4 py-2">
+                <td>
                   <Badge status={SEVERITY_BADGE[f.severity] ?? "pending"}>{f.severity}</Badge>
                 </td>
-                <td className="px-4 py-2 text-xs text-ink-500">{f.sender_name ?? f.sender_id ?? "—"}</td>
-                <td className="whitespace-nowrap px-4 py-2 text-xs text-ink-500">
+                <td className="text-xs text-ink-500">{f.sender_name ?? f.sender_id ?? "—"}</td>
+                <td className="whitespace-nowrap text-xs text-ink-500">
                   {relTime(f.created_at)}
                 </td>
-                <td className="px-4 py-2 text-right">
+                <td className="text-right">
                   {f.issue_id != null ? (
                     <span className="text-xs text-ink-500">#{f.issue_id}</span>
                   ) : (
@@ -112,7 +112,7 @@ export function FeedbackTab({ pid }: { pid: number }) {
             ))}
             {items.length === 0 && (
               <tr>
-                <td colSpan={6} className="px-4 py-10 text-center text-sm text-ink-500">
+                <td colSpan={6} className="tp-empty-row">
                   {t("No feedback yet.")}
                 </td>
               </tr>

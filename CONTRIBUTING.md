@@ -34,6 +34,77 @@ python -m pytest tests/      # 快，不需要浏览器和 LLM
 cd web && npm run build      # 类型检查 + 构建前端
 ```
 
+带覆盖率跑（门槛写在 `pyproject.toml` 的 `fail_under`，当前 54%）：
+
+```bash
+python -m pytest tests/ --cov=app --cov-report=term
+```
+
+### ★ 前端依赖：两份锁文件，改依赖要同时更新
+
+`web/` 下同时存在 `package-lock.json`（npm）和 `pnpm-lock.yaml`（pnpm），
+**两个都入库、都会被用到**：
+
+| 谁用 | 用哪份 |
+|---|---|
+| CI 的 web job（`npm ci`） | `package-lock.json` |
+| `scripts/deploy.*`、README 的构建说明（`pnpm install`） | `pnpm-lock.yaml` |
+
+**踩过的坑（2026-10-09）**：只用 pnpm 执行 `pnpm add/remove` 时，`package-lock.json`
+不会跟着变 —— 于是 `npm ci` 直接以 `EUSAGE` 失败：*"can only install packages when your
+package.json and package-lock.json are in sync"*。**本地 `pnpm build` 全绿，CI 却红**，
+而且报错完全不提"你少更新了另一份锁文件"。
+
+所以改前端依赖后两份都要更新：
+
+```bash
+cd web
+pnpm add -D <pkg>                              # 更新 pnpm-lock.yaml
+npm install --package-lock-only --no-audit     # 同步 package-lock.json
+npm ci --dry-run                               # 自证 CI 不会因锁文件失败
+```
+
+前端还有一道死代码门禁（CI 里跑，本地也可跑）：
+
+```bash
+cd web && npx knip          # 无人引用的文件 / 导出 / 依赖
+```
+
+### 要在**真实数据库**上测（`real_db`）
+
+默认测试跑在临时库上，所以"临时库通过"不等于"真库上通过"。真数据有自己的形状
+（1203 条用例、多角色、多环境、各种 NULL/空 JSON 列），要覆盖这些边界就用 `real_db`：
+
+```python
+def test_reads_real_data(real_db):
+    n = real_db.run(_count_cases())      # 读的是真 potato.db
+    assert n > 0
+```
+
+**写入会被回滚**，不是放开写：fixture 开一个外层事务，用
+`join_transaction_mode="rollback_only"` 把 session 绑上去，结束时无条件 rollback。
+所以测试里 `await s.commit()` 看着成功、事务内也读得到，但永远不落盘。
+
+⚠️ 改这个 fixture 前先读 [PROJECT_ISOLATION.md 第 7.1 节](docs/PROJECT_ISOLATION.md)：
+用错 `join_transaction_mode`（例如 `create_savepoint`）会**真的写脏真库**，这是实际踩过的坑。
+`tests/test_real_db_mode.py` 就是这条的回归防线。
+
+### 如果 `tmp_path` 报 PermissionError
+
+某些受限环境（例如 DSH 沙箱）会把系统 `%TEMP%` 指到一个**新建子目录立刻不可读**的
+位置。表现是十几条与产品无关的测试红在
+`PermissionError: [WinError 5] ...\pytest-of-<user>`，而真正的失败被淹在里面。
+
+这不是代码缺陷，绕法是把临时目录放到工作区里（`.tmp/` 已在 `.gitignore` 里）：
+
+```powershell
+$env:TEMP = "$PWD\.tmp"; $env:TMP = $env:TEMP
+python -m pytest tests/ --basetemp="$PWD\.tmp\pytest"
+```
+
+判断依据很简单：**同一条测试单独跑或换到不受限环境下能过**，就是环境问题，
+不要去改产品代码。
+
 ## 约定
 
 - **测试保持"不需要浏览器"**：engine / judge / 解析逻辑用纯函数测；真正的浏览器行为交给

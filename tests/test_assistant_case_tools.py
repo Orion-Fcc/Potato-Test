@@ -76,8 +76,15 @@ def test_set_case_status_declares_both_directions():
     the tool has to be able to undo it too.
     """
     params = _tool("set_case_status")["parameters"]
-    assert set(params["properties"]["status"]["enum"]) == {"active", "deprecated"}
+    enum = set(params["properties"]["status"]["enum"])
+    # 2026-10-09: `blocked` 加进来 —— 用户明确要求"人可以变更用例状态，
+    # 因为有些用例 agent 可能执行不了"。它和 deprecated 的区别见
+    # app/schemas.py::CaseStatus：deprecated 是"不要了"，blocked 是"有效但跑不了"。
+    assert enum == {"active", "deprecated", "blocked"}
     assert params["required"] == ["case_id", "status"]
+    # blocked 必须能带原因 —— 这个状态的**全部价值**就是那个原因，
+    # 没有它，下一个人只能重新试一遍才知道为什么跑不了。
+    assert "reason" in params["properties"]
 
 
 def test_set_case_status_rejects_a_missing_case_id():

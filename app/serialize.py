@@ -314,6 +314,11 @@ def _result(x: RunResult) -> dict:
         # 2026-10-08 耗时分解（5 段墙钟 + 步数）。NULL = 埋点上线前的历史行，
         # 前端要显示"无数据"而不是画一条 0s 的柱子 —— 那会让人以为用例瞬间跑完了。
         "timing": x.timing or None,
+        # 2026-10-09 token 账本，取自 timing["usage"]（见 executor._usage_payload）。
+        # 单独提一个键出来，是因为前端要按它排序/汇总"哪条用例最贵"，
+        # 埋在 timing 里就得处处先判 None 再取 key。
+        # None = 埋点前的历史行，或这次执行没拿到 usage（网关不回 usage 时）。
+        "usage": (x.timing or {}).get("usage") or None,
         "error": x.error,
         # 2026-10-06 人工改判痕迹。前端据此把"人改的"和"AI 判的"区分开 ——
         # 混在一起的话，通过率/真缺陷率这些数字就没有可信度了。

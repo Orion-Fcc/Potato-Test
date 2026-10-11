@@ -14,26 +14,29 @@ import os
 
 import pytest
 
+from tests.conftest import bind_temp_db, restore_db
+
 pytest.importorskip("aiosqlite")
 
 
 def _stats(tmp_db: str) -> list[dict]:
     """Drive the real ASGI app against a throwaway sqlite file; return three snapshots."""
-    os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///{tmp_db}"
     os.environ.setdefault("POTATO_SECRET_KEY", "x" * 32)
 
     # imported here so the env vars above are in place before settings are read
     import app.db as db
-    from app.config import get_settings
     from app.main import create_app
     from app.models import Credential, Issue, Project, TestCase
     from httpx import ASGITransport, AsyncClient
 
-    get_settings.cache_clear()  # settings are lru_cached; pick up the DATABASE_URL above
-    db._engine = db._Session = None  # drop any engine bound to another DATABASE_URL
+    # ★ 直接构造 engine（见 conftest.bind_temp_db 的说明）。
+    # 原写法是 `os.environ['DATABASE_URL']=... + get_settings.cache_clear()
+    # + db._engine = db._Session = None + await db.init_db()`，而那一串在本项目里
+    # 会**静默连到真库**（settings 读 .env，环境变量优先级在 pytest 下不可靠）——
+    # 真库里因此出现过 9 个测试项目。这里连表都一起建好了，不需要再 init_db()。
+    eng, prev = bind_temp_db(tmp_db)
 
     async def main() -> list[dict]:
-        await db.init_db()
         snaps = []
         transport = ASGITransport(app=create_app())
         async with AsyncClient(transport=transport, base_url="http://t") as ac:
@@ -62,25 +65,28 @@ def _stats(tmp_db: str) -> list[dict]:
             snaps.append((await ac.get("/api/projects/1/stats")).json())
         return snaps
 
-    return asyncio.run(main())
+    try:
+        return asyncio.run(main())
+    finally:
+        restore_db(*prev)
+        try:
+            asyncio.run(eng.dispose())
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def _wizard(tmp_db: str) -> dict:
     """Replay exactly the HTTP calls NewProjectWizard makes on its happy path, and
     return the resulting stats — i.e. what the Overview checklist would then show."""
-    os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///{tmp_db}"
     os.environ.setdefault("POTATO_SECRET_KEY", "x" * 32)
 
-    import app.db as db
-    from app.config import get_settings
     from app.main import create_app
     from httpx import ASGITransport, AsyncClient
 
-    get_settings.cache_clear()
-    db._engine = db._Session = None
+    # 同 _stats：直接构造 engine，不要用环境变量 + 置 None 那套（会连到真库）。
+    eng, prev = bind_temp_db(tmp_db)
 
     async def main() -> dict:
-        await db.init_db()
         transport = ASGITransport(app=create_app())
         async with AsyncClient(transport=transport, base_url="http://t") as ac:
             # step 1 — create the project
@@ -109,7 +115,14 @@ def _wizard(tmp_db: str) -> dict:
 
             return (await ac.get(f"/api/projects/{pid}/stats")).json()
 
-    return asyncio.run(main())
+    try:
+        return asyncio.run(main())
+    finally:
+        restore_db(*prev)
+        try:
+            asyncio.run(eng.dispose())
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def test_wizard_happy_path_leaves_two_items_ticked(tmp_path) -> None:

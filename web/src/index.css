@@ -326,6 +326,46 @@ button, a, input, textarea, [role="button"] {
   background: var(--hover);
 }
 
+/* 表头 / 表体单元格的统一内边距（2026-10-09 收敛）。
+   8 张表原来各自在 <th>/<td> 上写内边距：实测 115 个单元格里有 6 种组合
+   （纵向 py-2 / py-2.5 / py-3 / py-1，横向 px-4 / px-3 / px-2），
+   同一个应用里表头高度因此有两三种 —— 纯属抄来抄去抄歪了。
+   这里取**出现最多的那一组**（py-2 + px-4，48 / 63 处），而不是拍一个"更好看"的值：
+   收敛的目的是消除漂移，顺手把整站表格间距改一遍不是。
+   --tp-cell-x 让列很挤的表仍能只调横向留白，纵向高度保持一致。 */
+.tp-thead th,
+.tp-table td {
+  padding: 0.5rem var(--tp-cell-x, 1rem);
+}
+
+/* 「没有数据」的整行占位。5 个页面原来各写一遍
+   `colSpan=N className="px-4 py-6..12 text-center text-ink-500"`，
+   差别只在 py-6 / py-8 / py-10 / py-12 —— 同一件事四种高度。
+   !important 是故意的：这条要盖掉 .tp-table td 的 padding，
+   而迁移脚本已经把那些单元格上的内边距类删掉了，这里的优先级之争只发生在共享规则之间。 */
+.tp-empty-row {
+  padding: 2.5rem 1rem !important;
+  text-align: center;
+  color: var(--ink-500);
+  font-size: 0.8125rem;
+}
+
+/* 表格里的「分组标题行」：RunsPage 按今天/本周分组、ComparePage 按模块分组。
+   它是**标题**不是数据行，所以纵向必须比 .tp-table td 更紧（8px 而不是 8px），
+   否则读起来只是"一行普通数据"。底色留在各自的 <tr> 上（两种表用的深浅不同）。 */
+.tp-group-row {
+  padding: 0.5rem 1rem !important;
+}
+
+/* 表格里的「行内操作行」（如 CasesPage / RunsPage 的分组折叠按钮）。
+   同一套紧凑内边距 + 交互态高亮，避免每处各写一遍 hover。 */
+.tp-toggle-row {
+  padding: 0.5rem 0.75rem !important;
+}
+.tp-toggle-row:hover {
+  background: var(--hover);
+}
+
 /* ============================================================================
    Inline alerts
    Shared by error/warning banners in drawers, settings sections and pages.

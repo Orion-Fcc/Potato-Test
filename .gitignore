@@ -87,6 +87,19 @@ scripts/desktop/_superseded/
 htmlcov/
 coverage.xml
 
+# 在工作区里跑测试时用的临时目录（2026-10-09 起显式忽略）。
+#
+# 为什么会有这个目录：某些受限环境（例如 DSH 沙箱）会把系统 %TEMP% 指到一个
+# 新建子目录立刻不可读的位置，于是 pytest 的 tmp_path 全部报 PermissionError ——
+# 那种红与产品代码无关，却会淹掉真正的失败。绕法是把临时目录指到工作区内，见
+# CONTRIBUTING.md「提交前自检」。里面装的是临时库、覆盖率 JSON、一次性诊断脚本。
+# 注意 `/_*`（见下）匹配的是**下划线**开头，`.tmp` 是点开头，两者不重叠。
+.tmp/
+
+# token 测量产物（`_measure_tokens.py --tag <name>` 写出来的）。
+# 每跑一次就覆盖，属于本机实测数据，入库只会是噪音。
+.tok_*.json
+
 # 本项目在 WorkBuddy 里工作时留下的数据目录（项目备份、临时文件）。
 # 里面有导出的用例 JSON，含被测系统的内网地址，而本仓库是**公开**的 —— 不入库。
 .workbuddy/

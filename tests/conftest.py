@@ -28,6 +28,7 @@ from __future__ import annotations
 import os
 import pathlib
 import sqlite3
+import uuid
 
 import pytest
 
@@ -173,6 +174,95 @@ def _never_touch_the_real_db():
     )
 
 
+@pytest.fixture(autouse=True)
+def _reset_db_between_tests():
+    """★ 每个测试结束后：把 `app.db` 的全局状态还原，**并**把任何指向真库的
+    engine 换成临时库。2026-10-10 新增。
+
+    ## 为什么需要它（这是一次真实事故的根治）
+
+    真库里凭空多出 9 个项目（`reconcile-check` / `live-check` / `fk-check`，
+    18 条 case、12 个 run、18 条 run_result）。追下去是**同一个模式**在 15 个
+    测试文件里重复出现：
+
+        db._engine = db._Session = None      # "先把上一个测试的 engine 丢掉"
+        ...
+        await db.init_db()                   # ← 于是按 settings 重建 = 连真库
+
+    上半句看着人畜无害（"清干净"），下半句就把所有写入送到了用户的真库。
+    这些文件写的时候大概都以为"反正 conftest 有一条会话级临时库兜着" ——
+    但那条兜底只在**会话开始时**设一次，一旦被置 None 就再也回不来了。
+
+    ## 为什么修在这里，而不是去改那 15 个文件
+
+    已有的两条防线是"预防一次"和"事后探测"：
+
+      * `_session_writes_go_to_a_temp_db`：会话开始时把默认目标换成临时库。
+        **一次性**，被置 None 之后就失效了。
+      * `_never_touch_the_real_db`：事后比对行数，能发现污染。
+        但它是**事后**的 —— 数据已经写进去了，用户已经能看见了。
+
+    两个都拦不住"中途把 engine 置 None"这个动作。这里补的是**每次测试之后
+    都重设一遍**：只要 engine 是 None 或者指向真库，就换成一个临时库。
+    这样那 15 个文件的写法从"静默写脏真库"变成"写在临时库上" ——
+    它们的断言照常通过，用户的数据一个字都不动。
+
+    为什么是"换成临时库"而不是"报错"：报错会当场弄红 24 条测试，
+    而那些测试想测的根本不是数据库隔离（是重试策略、是向导勾选）。
+    它们只是**恰好**用了这个坏模式。让它们继续工作、同时不再碰真库，
+    才是这次要的结果。
+
+    `_db_is_real` 那条断言留在最后：如果连这个兜底都没拦住，说明有测试
+    **绕过了 app.db** 自己 create_async_engine(settings.database_url) ——
+    那种情况必须炸出来，不能继续静默污染。
+    """
+    yield
+    try:
+        import importlib
+
+        from app.config import get_settings
+
+        dbmod = importlib.import_module("app.db")
+        real = str(_REAL_DB)
+        cur = str(getattr(dbmod._engine, "url", "") or "")
+        # 已经指向某个临时库 -> 什么都不用做（绝大多数测试走这条）
+        if dbmod._engine is not None and dbmod._Session is not None and real not in cur:
+            return
+        # engine 是 None，或指向真库 —— 换成一个会话内的临时库
+        import asyncio
+        import tempfile
+
+        from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+        from sqlalchemy.pool import NullPool
+
+        from app.models import Base
+
+        target = pathlib.Path(tempfile.gettempdir()) / "_tp_rehydrated.db"
+        eng = create_async_engine(
+            "sqlite+aiosqlite:///" + target.as_posix().replace("\\", "/"),
+            future=True,
+            poolclass=NullPool,
+        )
+        dbmod._engine = eng
+        dbmod._Session = async_sessionmaker(eng, expire_on_commit=False)
+
+        async def _create():
+            async with eng.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
+
+        asyncio.run(_create())
+
+        assert real not in str(eng.url), (
+            f"兜底失败：engine 仍然指向真库 {eng.url}。"
+            "这个测试绕过了 app.db 自己建了 engine —— 必须改掉，否则会污染用户数据。"
+        )
+        # 让 settings 也指向它：有些代码自己读 settings.database_url 建连接。
+        os.environ["DATABASE_URL"] = "sqlite+aiosqlite:///" + target.as_posix()
+        get_settings.cache_clear()
+    except Exception:  # noqa: BLE001 — 兜底本身失败不该弄红一个无关的测试
+        pass
+
+
 @pytest.fixture(autouse=True, scope="session")
 def _session_writes_go_to_a_temp_db():
     """★ 整个 pytest 会话里，**默认**写入目标是临时库，不是用户的真库。
@@ -228,6 +318,65 @@ def _session_writes_go_to_a_temp_db():
     target.unlink(missing_ok=True)
 
 
+def bind_temp_db(db_path) -> tuple[object, object]:
+    """把 `app.db` 的 engine/sessionmaker 指向 `db_path`，并返回**原值**。
+
+    给那些"想自己控制库文件"的测试用，替代它们原来的这段写法：
+
+        os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///{tmp_db}"
+        db._engine = db._Session = None      # ← 灾难来源
+        await db.init_db()
+
+    ★ 为什么最后一行的写法必须废掉：`_engine = None` 之后 `init_db()` 会按
+    settings 重建 engine。而这个项目里 **settings 读的是 .env**，
+    `os.environ` 的优先级在 pytest 下并不可靠（见 PROJECT_ISOLATION.md 第七节），
+    实测结果就是"以为切到临时库、其实连的是用户真库" —— 真库里因此多出过
+    9 个测试项目。直接构造 engine 才能确定。
+
+    用法（前两步就够，不需要再 init_db —— 这里已经把表建好了）：
+
+        eng, prev = bind_temp_db(tmp_path / "to.db")
+        try:
+            ...
+        finally:
+            restore_db(*prev)
+    """
+    import asyncio
+
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+    from sqlalchemy.pool import NullPool
+
+    from app import db as dbmod
+    from app.models import Base
+
+    prev = (dbmod._engine, dbmod._Session)
+    target = pathlib.Path(db_path)
+    eng = create_async_engine(
+        "sqlite+aiosqlite:///" + target.as_posix().replace("\\", "/"),
+        future=True,
+        poolclass=NullPool,
+    )
+    dbmod._engine = eng
+    dbmod._Session = async_sessionmaker(eng, expire_on_commit=False)
+
+    async def _create():
+        async with eng.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+
+    asyncio.run(_create())
+    # 自证：没有这条断言，写错路径时是静默的，而症状出现在用户的真库里。
+    assert _REAL_DB.name not in str(eng.url), f"竟然连到了真库：{eng.url}"
+    return eng, prev
+
+
+def restore_db(engine, session) -> None:
+    """把 `bind_temp_db` 拿到的原值还原回去（**永远不要置 None**）。"""
+    from app import db as dbmod
+
+    if engine is not None and session is not None:
+        dbmod._engine, dbmod._Session = engine, session
+
+
 @pytest.fixture
 def tmp_db(tmp_path):
     """一个指向临时 SQLite 的 `(engine, db_session)`，并**自证**连的是临时库。
@@ -273,6 +422,140 @@ def tmp_db(tmp_path):
     asyncio.run(eng.dispose())
 
 
+# ---------------------------------------------------------------------------
+# ★ 在**真实数据库**上跑测试（2026-10-09）
+# ---------------------------------------------------------------------------
+#
+# 为什么要有这条路径：临时库（上面那两条）保证不了"真库上也能跑对"。
+# 真实数据有它的形状 —— 368+555+54+226 条用例、多角色、多环境、31 份凭据、
+# 1295 条知识库切片 —— 用临时库测出来的"通过"不代表真库上通过。
+# 而"直接跑真库"以前是**禁止**的，理由充分：2026-10-06 两次把测试数据写进了
+# 用户的真库（多出 24 个空项目）。所以这里给的不是"放开写"，而是**写了也会回滚**。
+#
+# 机制（实测确认过，见 tests/test_real_db_mode.py）：
+#   1. 建 engine 并**手动开一个外层事务**；
+#   2. 把 sessionmaker 绑到这个 connection 上，用
+#      `join_transaction_mode="rollback_only"` —— 这让会话里的每一次 commit
+#      都变成空操作，写只在当前事务内可见，外层 rollback 一执行就全没了；
+#   3. 测试结束后无条件 rollback。
+#
+# ★ 为什么是 rollback_only 而不是 create_savepoint —— 这是踩过的坑：
+#   第一版用了 `join_transaction_mode="create_savepoint"`，结果**数据真的落库了**，
+#   两条 `__ROLLBACK_PROBE__` 写进了用户的 potato.db（已清除）。
+#   原因是 create_savepoint 会为会话开一个 SAVEPOINT，而 SAVEPOINT 的 RELEASE
+#   在外层事务里是持久化的；再加上外层事务与真实 COMMIT 的时序，最终没被回滚。
+#   实测三种模式的结论（在真库副本上跑）：
+#       create_savepoint  -> LEAKED
+#       default           -> ROLLBACK OK
+#       rollback_only     -> ROLLBACK OK   ← 选它
+#   选 rollback_only 而不是 default，是因为它的语义最直白：**这个会话里的 commit
+#   不可能生效**。某个测试以为自己写下了一条记录、后面读得到，那只说明事务内可见，
+#   不代表落库 —— 这正是我们想要的"安全地操作真库"。
+#
+# 用 `_session_writes_go_to_a_temp_db` 的临时库做底：本 fixture 在函数级覆盖
+# `_engine`/`_Session`，结束时**还原**（不是置 None），和 tmp_db 一样。
+# 这样会话级临时库在真库用例跑完之后自动回来，其它 900 多条用例不受影响。
+# 真实库路径复用文件上方 _REAL_DB（_never_touch_the_real_db 用的同一个）。
+
+
+def _real_db_url() -> str:
+    """真实数据库的绝对 URL —— **直接指向仓库根的 potato.db**。
+
+    ## 为什么不再去解析 `.env` / `get_settings().database_url`
+
+    两个原因，都是实测踩出来的：
+
+    1. **相对路径是按进程 cwd 解析的**，于是"真库"会随着从哪个目录跑测试
+       而变成另一个文件。
+    2. ★ **`DATABASE_URL` 会被别的测试留在环境变量里**。十几个测试文件用
+       `os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///{tmp_path}"` 切库；
+       只要有一个没清干净，后面 `real_db` 就会把**那个临时库**当成真库 ——
+       表现是 `test_real_db_mode.py` 六条用例一起红，报"真库里一个项目都没有"，
+       而报错完全指不到是环境变量泄漏。
+       （实测：`test_feishu.py`、`test_isolation_and_policy.py`、`test_multi_role.py`、
+       `test_credential_edit.py`、`test_root_cause_and_rag.py` 都会触发。）
+
+    `real_db` 的语义是"连**用户的真库**"，那就该是一个确定的文件，
+    不该受环境变量影响。precedence 上真库也确实是文件系统里那个 potato.db。
+    """
+    return f"sqlite+aiosqlite:///{_REAL_DB.as_posix()}"
+
+
+@pytest.fixture
+def real_db(_db_points_at_a_temp_db_before_every_test):
+    """★ 在**真实** potato.db 上跑测试，所有写入都在事务里，结束回滚。
+
+    给的是 ``run(coro)` `` —— 一个"在这条连接上跑这段协程"的执行器：
+
+        def test_reads_real_data(real_db):
+            n = real_db.run(_count_cases())
+            assert n > 0
+
+    为什么不直接 yield 库对象：本套件用 `asyncio_mode=auto`，测试体内再调
+    `asyncio.run()` 会撞上"事件循环已在运行"。而 connection / engine / sessionmaker
+    都是绑定事件循环的，不能跨 `asyncio.run()` 复用。所以由 fixture 用**一次**
+    `asyncio.run()` 把所有东西建好并交给调用方，调用方也用它跑自己的协程。
+
+    ★ 参数里显式依赖 `_db_points_at_a_temp_db_before_every_test` **不是装饰**：
+    那条 autouse fixture 会把 app.db 指到临时库，本 fixture 必须**在它之后**执行，
+    才能把目标换成"真库 + 只读事务"。写成隐式依赖的话，pytest 的 autouse 顺序
+    会让临时库最后生效，于是"真库测试"其实读的是空临时库 —— 六条用例一起红，
+    而报错说"真库里一个项目都没有"，完全指不到是这个顺序问题。
+    """
+    import asyncio
+
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+    from sqlalchemy.pool import NullPool
+
+    from app import db as dbmod
+
+    url = _real_db_url()
+    if f"{_REAL_DB.name}" not in url and "sqlite" not in url:
+        pytest.skip(f"真实库不可用（{url}）—— 无真库基线可测")
+    if not _REAL_DB.is_file():
+        pytest.skip(f"真实库不存在：{_REAL_DB} —— 干净环境无真库基线，非代码缺陷")
+
+    state: dict = {}
+
+    async def _setup():
+        eng = create_async_engine(url, future=True, poolclass=NullPool)
+        conn = await eng.connect()
+        trans = await conn.begin()  # ← 外层事务，最后一定 rollback
+        Session = async_sessionmaker(
+            bind=conn, expire_on_commit=False, join_transaction_mode="rollback_only"
+        )
+        state.update(eng=eng, conn=conn, trans=trans, Session=Session)
+        return Session
+
+    asyncio.run(_setup())
+
+    prev_engine, prev_session = dbmod._engine, dbmod._Session
+    assert state["Session"] is not None
+    dbmod._engine = state["eng"]
+    dbmod._Session = state["Session"]
+
+    class _RealDB:
+        """真库句柄：``ctx.run(coro)`` 在这条连接上跑协程。"""
+
+        def __init__(self, runner):
+            self._runner = runner
+
+        def run(self, coro):
+            return self._runner(coro)
+
+    try:
+        yield _RealDB(asyncio.run)
+    finally:
+        dbmod._engine, dbmod._Session = prev_engine, prev_session
+
+        async def _teardown():
+            await state["trans"].rollback()
+            await state["conn"].close()
+            await state["eng"].dispose()
+
+        asyncio.run(_teardown())
+
+
 def _clear_process_caches() -> None:
     """清掉读取环境变量的两处 lru_cache，让下一次调用重新解析。"""
     try:
@@ -286,6 +569,69 @@ def _clear_process_caches() -> None:
 
         crypto._fernet.cache_clear()
     except Exception:  # noqa: BLE001
+        pass
+
+
+@pytest.fixture(autouse=True)
+def _db_points_at_a_temp_db_before_every_test():
+    """★ **每个测试开始之前**都确保 `app.db` 指向临时库，绝不指向真库。
+
+    这是 2026-10-10 那起事故的正面修法。原来只有"会话开始时设一次"（
+    `_session_writes_go_to_a_temp_db`）和"测试结束后兜底"（`_reset_db_between_tests`），
+    但 15 个测试文件在**测试体内部**写了这个模式：
+
+        db._engine = db._Session = None      # "先把上一个的丢掉"
+        await db.init_db()                   # ← 按 settings 重建 = 连真库
+
+    它们在测试**中途**把 engine 置空，于是"会话开始时设一次"失效了；
+    等测试结束再兜底，数据早就写进真库了。实测后果：真库里多出 9 个项目。
+
+    修在这里而不是去改那 15 个文件：那是 15 处重复的、抄来抄去的样板，
+    改它们既容易漏、以后还会有人再写一遍。而"每个测试都从一个临时库开始"
+    本来就该是整个套件的默认前提 —— 放在 conftest 里，一次说清。
+
+    代价是每个测试建一个空库（几毫秒，SQLite 文件 + create_all），
+    换来的是"测试不可能碰到真库"这条硬保证。
+    """
+    import asyncio
+    import tempfile
+
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+    from sqlalchemy.pool import NullPool
+
+    from app import db as dbmod
+    from app.models import Base
+
+    prev = (dbmod._engine, dbmod._Session)
+    target = pathlib.Path(tempfile.gettempdir()) / f"_tp_per_test_{uuid.uuid4().hex[:8]}.db"
+    eng = create_async_engine(
+        "sqlite+aiosqlite:///" + target.as_posix().replace("\\", "/"),
+        future=True,
+        poolclass=NullPool,
+    )
+    dbmod._engine = eng
+    dbmod._Session = async_sessionmaker(eng, expire_on_commit=False)
+
+    async def _create():
+        async with eng.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+
+    asyncio.run(_create())
+    # 自证：隔离失效时不报错的话，症状会出现在**用户的真库里**。
+    assert _REAL_DB.name not in str(eng.url), f"测试库竟然指向真库：{eng.url}"
+
+    yield
+
+    # 还原成测试开始前的值（可能是会话级临时库，也可能是上一个测试留下的），
+    # 让"会话级"那层语义在整个套件里保持成立。**绝不置 None**。
+    dbmod._engine, dbmod._Session = prev
+    try:
+        asyncio.run(eng.dispose())
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        target.unlink(missing_ok=True)
+    except OSError:
         pass
 
 

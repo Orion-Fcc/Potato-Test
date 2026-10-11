@@ -3,9 +3,11 @@ import { useTranslation } from "react-i18next";
 import { api, type AdminUser, type Project } from "../lib/api";
 import { Badge, Button, Card, Checkbox, Field, Input, Select } from "../components/ui";
 import { useToast, useErrorToast } from "../components/toast";
+import { titleCase } from "../lib/labels";
 
 const ROLES = ["owner", "editor", "viewer"] as const;
-const roleLabel = (r: string) => r.charAt(0).toUpperCase() + r.slice(1);
+// 原先这里和 MembersPage 各抄了一份一模一样的实现，已收敛到 lib/labels::titleCase。
+const roleLabel = titleCase;
 
 export function AdminUsersPage() {
   const { t } = useTranslation();
@@ -106,28 +108,28 @@ export function AdminUsersPage() {
       </Card>
 
       <Card>
-        <table className="w-full text-sm">
+        <table className="w-full text-sm tp-table">
           <thead className="tp-thead text-xs text-ink-500">
             <tr>
-              <th className="px-4 py-2">{t("Email")}</th>
-              <th className="px-4 py-2">{t("Name")}</th>
-              <th className="px-4 py-2">{t("Role")}</th>
-              <th className="px-4 py-2">{t("Status")}</th>
-              <th className="px-4 py-2" />
+              <th>{t("Email")}</th>
+              <th>{t("Name")}</th>
+              <th>{t("Role")}</th>
+              <th>{t("Status")}</th>
+              <th />
             </tr>
           </thead>
           <tbody>
             {users.map((u) => (
               <tr key={u.id} className="tp-row">
-                <td className="px-4 py-2 text-ink-900">{u.email}</td>
-                <td className="px-4 py-2 text-ink-700">{u.name ?? "—"}</td>
-                <td className="px-4 py-2">
+                <td className="text-ink-900">{u.email}</td>
+                <td className="text-ink-700">{u.name ?? "—"}</td>
+                <td>
                   {u.is_admin ? <Badge status="running">{t("Admin")}</Badge> : <span className="text-ink-500">{t("Member")}</span>}
                 </td>
-                <td className="px-4 py-2">
+                <td>
                   {u.is_active ? <Badge status="passed">{t("Active")}</Badge> : <Badge status="cancelled">{t("Disabled")}</Badge>}
                 </td>
-                <td className="px-4 py-2 text-right">
+                <td className="text-right">
                   <div className="flex justify-end gap-1">
                     <Button size="sm" variant="outline" disabled={!u.is_active} onClick={() => resetPassword(u)}>
                       {t("Reset password")}

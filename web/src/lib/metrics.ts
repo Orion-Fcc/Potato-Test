@@ -11,9 +11,9 @@
 /** Tone names understood by <Stat tone=…> and the --ok/--warn/--bad tokens. */
 export type Tone = "ok" | "warn" | "bad";
 
-/** Pass-rate thresholds, in ONE place. 0-1 unit. */
-export const PASS_GOOD = 0.9;
-export const PASS_FAIR = 0.6;
+/** Pass-rate thresholds, in ONE place. 0-1 unit. 只在 rateTone 内用，故不导出。 */
+const PASS_GOOD = 0.9;
+const PASS_FAIR = 0.6;
 
 /**
  * Map a pass rate to a tone.

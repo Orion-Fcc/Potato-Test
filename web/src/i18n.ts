@@ -622,6 +622,96 @@ const zh: Record<string, string> = {
     "裁判模型需要视觉能力（截图是判定证据）。此处的值覆盖 .env；密钥加密存储。",
   "Test connection": "测试连通性",
   "Testing…": "测试中…",
+  // token 账本（2026-10-09）。加这一列的目的就是让"烧在哪"可见 ——
+  // 在这之前没有任何地方记录一条用例花了多少 token。
+  "Tokens": "Token",
+  "LLM tokens consumed by this case (agent + judge). Hover for the cache-hit share — cached input is billed far cheaper.":
+    "这条用例消耗的 LLM token（agent + 判定器）。悬停可看缓存命中占比 —— 命中缓存的那部分计价便宜得多。",
+  "{{total}} tokens in {{calls}} LLM calls · {{pct}}% of input served from cache":
+    "共 {{total}} token，{{calls}} 次 LLM 调用 · 输入有 {{pct}}% 命中缓存",
+  "not measured (no usage in the response)": "未测量（网关响应里没有 usage）",
+  // 从需规文档生成用例（2026-10-09）
+  "Generate from spec": "从需规生成",
+  "{{n}} drafts awaiting review": "{{n}} 条草稿待审阅",
+  "Cases generated from a spec that nobody has activated yet":
+    "从需规生成、但还没人启用的用例（草稿不会进全量回归）",
+  "Generate cases from a spec document": "从需规文档生成用例",
+  "Pick a module, review what the model wrote, then save it — as drafts by default.":
+    "选一个模块，审一遍模型写的内容，再决定怎么存 —— 默认存成草稿。",
+  "Reading the document…": "正在读取文档…",
+  "No spec uploaded yet": "还没有上传需规",
+  "Go to this project's Settings → 需规 / 资料 and upload the document (Word / PDF / Excel / Markdown / txt), then come back.":
+    "到本项目的「设置 → 需规 / 资料」上传文档（支持 Word / PDF / Excel / Markdown / txt），然后回到这里。",
+  Modules: "模块",
+  "Re-plan": "重新分批",
+  "Grouping failed — fell back to one module per heading.":
+    "归并失败，已退回到「一个标题一个模块」（分批更碎，但功能可用）。",
+  "Not testable end-to-end in a browser": "在浏览器里端到端测不了",
+  "Not testable in a browser — skipped": "浏览器里测不了 —— 已跳过",
+  "Pick a module on the left — the model will draft cases from just that section.":
+    "从左边的模块里选一个 —— 模型只会根据那一节的正文起草用例。",
+  "Generating from «{{m}}»…": "正在从「{{m}}」生成…",
+  "{{n}} drafted · {{sel}} selected": "起草 {{n}} 条 · 已选 {{sel}} 条",
+  "Select none": "全不选",
+  "{{n}} case(s) were rejected while parsing:": "有 {{n}} 条在解析阶段被丢弃：",
+  "The model decided this section has nothing worth testing end-to-end. That is a valid answer — it did not pad the list.":
+    "模型认为这一节没有值得端到端验证的内容。这是合法结果 —— 它没有为了凑数编用例。",
+  "What the agent should do": "让 agent 做什么（操作指令）",
+  "Decidable expected result": "可判定的预期结果",
+  Drop: "丢弃",
+  "Drafts do not run in a run-all until you activate them.":
+    "草稿不会被「运行全部启用用例」跑到，直到你启用它们。",
+  "Save {{n}} as draft": "存 {{n}} 条为草稿",
+  "Save {{n}} and activate": "存 {{n}} 条并启用",
+  "Saved {{n}} cases as active — they will run in the next run-all":
+    "已存 {{n}} 条并启用 —— 下一轮全量运行会跑到它们",
+  "Saved {{n}} cases as draft — they will NOT run until you activate them":
+    "已存 {{n}} 条为草稿 —— 在你启用之前不会被跑到",
+  // 后端接口探索（2026-10-09）
+  "Backend API discovered from page traffic": "从页面流量里学到的后端接口",
+  "Learned by watching what the page actually calls — nothing is scanned or guessed.":
+    "靠观察页面实际发出的请求学来的 —— 不扫描、不猜路径。",
+  "Run some cases first — the page's own requests are how this list gets built.":
+    "先跑几轮用例 —— 这个清单是靠页面自己发出的请求攒出来的。",
+  "{{n}} endpoints observed": "已观察到 {{n}} 个接口",
+  "{{r}} readable · {{w}} writable (view only)": "{{r}} 个可读 · {{w}} 个写接口（只能看）",
+  "Read data": "读数据",
+  "view only": "只能看",
+  "Write endpoints can be observed but never called by tests.":
+    "写接口可以被观察到，但用例永远不会调用它们。",
+  "This is a write endpoint. Exploration is read-only — tests must change data through the UI, not by calling this.":
+    "这是写接口。探索阶段只读 —— 测试必须通过界面改数据，不能直接调它。",
+  "Only the shape is stored — never the value.": "只存形状，不存值。",
+  "body fields": "请求体字段",
+  "sample": "样例",
+  "params": "参数",
+  // 人来变更用例状态（2026-10-09）
+  "Enable ({{n}})": "启用（{{n}} 条）",
+  "Mark blocked ({{n}})": "标为受阻（{{n}} 条）",
+  "Enable {{n}} cases": "启用 {{n}} 条用例",
+  "Mark {{n}} cases as blocked": "把 {{n}} 条用例标为受阻",
+  "A blocked case stays in the list with its history — it just leaves the regression set until the reason is resolved.":
+    "受阻的用例仍留在列表里、历史结果也保留 —— 只是在原因解决之前不再进回归集。",
+  "Enabled cases join the next run-all. Blocked reasons are cleared.":
+    "启用的用例会进下一轮全量运行；原有的受阻原因会被清掉。",
+  "Why can the agent not run these?": "为什么 agent 跑不了这些用例？",
+  "e.g. needs a human to create the approval record in another system first":
+    "例如：需要人工先在另一个系统里建好审批单",
+  "Updated {{n}} cases": "已更新 {{n}} 条用例",
+  Confirm: "确认",
+  // 直接上传需规文档（2026-10-09）
+  "Upload a spec document": "上传需规文档",
+  "{{n}} sections found": "识别到 {{n}} 个小节",
+  "truncated — long document, only the beginning was indexed":
+    "已截断 —— 文档太长，只把开头部分入库了",
+  "grouping fell back to one module per section": "模型归并不可用，已退回「一个小节一个模块」",
+  // 长文档分批（2026-10-09）
+  "Planned {{done}} of {{total}} sections — {{left}} still unplanned.":
+    "已规划 {{done}} / {{total}} 个小节 —— 还有 {{left}} 个没规划。",
+  "Plan the next batch": "规划下一批",
+  "All {{n}} sections are planned.": "全部 {{n}} 个小节都已规划。",
+  "Planning this batch failed.": "这一批规划失败。",
+  "That batch failed — nothing was added.": "这一批失败了，没有新增模块：",
   "Connected.": "连接成功。",
   "Model": "模型",
   "Connection failed.": "连接失败。",
@@ -903,7 +993,8 @@ const zh: Record<string, string> = {
     "当前编辑框只载入了前 20 万字符的预览。若直接保存，超出的部分会被删除。确定要保存吗？",
 };
 
-export const LANG_KEY = "tp_lang";
+// 只在本文件里读写（init 与 setLang），故不导出。
+const LANG_KEY = "tp_lang";
 
 i18n.use(initReactI18next).init({
   resources: { zh: { translation: zh } },

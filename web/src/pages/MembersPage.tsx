@@ -6,9 +6,11 @@ import { useAbortSignal } from "../lib/hooks";
 import { Button, Card, Field, PageHeader, Select } from "../components/ui";
 import { useErrorToast } from "../components/toast";
 import { useAuth } from "../lib/auth";
+import { titleCase } from "../lib/labels";
 
 const ROLES = ["owner", "editor", "viewer"] as const;
-const roleLabel = (r: string) => r.charAt(0).toUpperCase() + r.slice(1);
+// 与 AdminUsersPage 共用同一个实现，别再各抄一份
+const roleLabel = titleCase;
 
 type Candidate = { id: number; email: string; name: string | null };
 
@@ -162,21 +164,21 @@ export function MembersPage() {
           </Card>
 
           <Card>
-            <table className="w-full text-sm">
+            <table className="w-full text-sm tp-table">
               <thead className="tp-thead text-xs text-ink-500">
                 <tr>
-                  <th className="px-4 py-2">{t("Email")}</th>
-                  <th className="px-4 py-2">{t("Name")}</th>
-                  <th className="px-4 py-2">{t("Role")}</th>
-                  <th className="px-4 py-2" />
+                  <th>{t("Email")}</th>
+                  <th>{t("Name")}</th>
+                  <th>{t("Role")}</th>
+                  <th />
                 </tr>
               </thead>
               <tbody>
                 {members.map((m) => (
                   <tr key={m.user_id} className="tp-row">
-                    <td className="px-4 py-2 text-ink-900">{m.email}</td>
-                    <td className="px-4 py-2 text-ink-700">{m.name ?? "—"}</td>
-                    <td className="px-4 py-2">
+                    <td className="text-ink-900">{m.email}</td>
+                    <td className="text-ink-700">{m.name ?? "—"}</td>
+                    <td>
                       <Select
                         value={m.role}
                         className="h-8 w-auto"
@@ -194,7 +196,7 @@ export function MembersPage() {
                         ))}
                       </Select>
                     </td>
-                    <td className="px-4 py-2 text-right">
+                    <td className="text-right">
                       <Button
                         size="sm"
                         variant="danger"
@@ -209,7 +211,7 @@ export function MembersPage() {
                 ))}
                 {members.length === 0 && (
                   <tr>
-                    <td colSpan={4} className="px-4 py-8 text-center text-ink-500">
+                    <td colSpan={4} className="tp-empty-row">
                       {t("No members yet.")}
                     </td>
                   </tr>

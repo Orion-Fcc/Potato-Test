@@ -17,12 +17,41 @@ log = logging.getLogger("potato-test.config")
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
-    database_url: str = "sqlite+aiosqlite:///./potato-test.db"
+    # ★ 默认必须是**真库** potato.db（2026-10-09 改）。
+    #
+    # 原默认是 `./potato-test.db` —— 一个测试遗留的名字。后果不只是"名字难听"：
+    # 任何**没有 .env** 的入口（脚本、CI、别人 clone 下来直接跑、容器里没挂 .env）
+    # 都会静默连到另一个空库上，看到"没有任何项目"却完全不报错；
+    # 而 `.env` 里写的是 `./potato.db`，于是"我明明有数据"和"程序说没有"
+    # 指向两个不同的文件。默认值应当就是那个唯一的真库。
+    database_url: str = "sqlite+aiosqlite:///./potato.db"
 
     gateway_base_url: str = "https://api.openai.com/v1"
     gateway_api_key: str = ""
     gateway_model: str = "gpt-4o"  # shared default; the judge always uses this
     agent_model: str = ""  # browser-use agent model; empty falls back to gateway_model
+    # --- agent vision: how the browser agent "sees" the screen ---
+    # 两种开关，组合出三种"看得多少"：
+    #
+    # ① agent_use_vision（每步都喂整屏截图给模型，最像人、也最慢）
+    #   True  = 每一步都把截图发进模型 —— 模型全程"盯屏幕"，纯文本快照漏掉的
+    #           "画了但没渲染进文本"的世界它都看得到。代价：每步多一次带图调用，
+    #           全量回归显著变慢（视觉 token + 截图上传）。
+    #   False = 平时只喂无障碍树/DOM 文本，不传截图 —— 快，但看不见。
+    #
+    # ② agent_vision_tool（注册一个按需工具 `look_at_screen`，把"开不开视觉"的选择权
+    #   交给 agent 自己）
+    #   True  = agent 手里有个 `look_at_screen` 工具：平时走文本快照，一旦它觉得
+    #           "文本对不上 / 要确认画面上到底有没有这行、这个颜色、表格是否真渲染了"，
+    #           就**自己**调这个工具截当前屏喂多模态模型、把"看到的"以文字还回来。
+    #   默认组合（①False + ②True）= 快路径默认开，视觉只在 agent 需要时按需触发，
+    #   既保住速度，又不"看不见"。2026-10-09 用 example-model 这类真视觉模型实测过，
+    #   它能读出截图里的红框/颜色/表格内容，这条工具链路成立。
+    #
+    # 要"全程盯屏幕"（最像人）：设 AGENT_USE_VISION=true（此时工具其实冗余，可一并关）。
+    # 要"纯提速"（回到旧行为）：设 AGENT_USE_VISION=false 且 AGENT_VISION_TOOL=false。
+    agent_use_vision: bool = False
+    agent_vision_tool: bool = True
     gateway_verify_ssl: bool = True
     # Ignore HTTP(S)_PROXY / NO_PROXY from the environment when calling the gateway and
     # the loopback API. httpx defaults to trust_env=True, which means a proxy var that is
@@ -121,7 +150,27 @@ class Settings(BaseSettings):
     # 2026-10-04 改：从 160 提到 600。理由同上 —— 160 秒对多角色切换、
     # 长表单填报这类用例根本不够，中途被砍会被误判成缺陷。600 秒只用来兜住
     # "页面卡死/无限重试"这类异常，正常用例根本碰不到它。
-    case_timeout_s: int = 600  # per-case wall-clock safety net; per-project override wins
+    case_timeout_s: int = 600  # per-case wall-clock **floor**; per-project override wins
+    # 跑之外的开销余量（启动 + 收尾 + 等录像），加在"每步预算"之上。
+    #
+    # 为什么要单独一项、而不是并进 per_step 或并进 case_timeout_s：
+    # 实测这部分的 p50 是 3.5s、p90 是 18s，而且**不随步数增长**。
+    # 并进 per_step 会让长用例的安全网被无谓放大；并进 case_timeout_s 就又回到
+    # "所有用例共用一个固定秒数"的老问题。60s 足够覆盖实测尾部（最大 24s + 录像 1s）。
+    case_setup_allowance_s: int = 60
+    # --- 后端接口探索（2026-10-09）-----------------------------------------------
+    # 用户的需求：「这个系统也要有探索后端的能力……去拿到这个菜单或者相关的数据」。
+    #
+    # 做法是**从页面实际发出的流量里学**（用户选定），不是主动扫描：
+    # 页面为了渲染必然要调后端，那些请求就是权威答案 —— 不用猜路径、不用撞目录，
+    # 也不会朝服务器发它没被设计来处理的请求。
+    #
+    # 实现挂在已有的 CDP 请求拦截（app/browser_hygiene）上，所以开着它**零额外开销**：
+    # 那个钩子本来就在拦全部请求，我们只是多看两眼。
+    #
+    # 关掉它时观察路径完全不执行，行为与加这个功能之前逐字节一致。
+    # （重放/只读探查是独立的 app/api_probe，有自己的只读白名单，不受这个开关影响。）
+    network_capture: bool = True
     # 登录态捕获（capture_session）自己的预算 —— **必须比用例小得多**。
     #
     # 2026-10-05 新增。此前它直接复用 case_max_steps(当时 80) / case_timeout_s(600)，
@@ -407,9 +456,18 @@ class Settings(BaseSettings):
     # app/failure_narrative.py). Costs one extra model call per failing case only —
     # passed cases are skipped. Turn off to keep the report strictly verdict-only.
     failure_narrative_enabled: bool = True
-    # Per-step model call is the dominant cost and was unbounded; a wall-clock guard
-    # keeps one slow step from eating the whole case budget.
-    step_timeout_s: int = 45
+    # ★ 单步墙钟上限（browser-use 的 step_timeout，超时即取消该步并记为一次失败）。
+    #
+    # 2026-10-09 从 45 提到 120，依据是真库的实测分布：
+    #   每步耗时 p50 = 11s，p90 = 19s，**但有 3 条用例的单步达到 271s**。
+    # 45s 会把这些步全部掐掉。而一步被掐掉不是"省时间"，是**白烧**：
+    # 该步已经付掉的模型调用与页面加载都作废，而且 consecutive_failures 会累加。
+    # 用户的原话也是这个意思：「每个用例的执行时间不一样，那个限制比较不靠谱」。
+    #
+    # 为什么是 120 而不是干脆不限制：一步 15.7k token（实测），一次真正的挂起
+    # （页面死等 / 网关不响应）会一直占着并发位。120s 给了 p90 六倍余量，
+    # 又能在真正卡死时止损。**主控制仍然是步数**（case_max_steps），不是这个。
+    step_timeout_s: int = 120
     # How many independent actions the agent may batch into ONE model round-trip.
     # Step count is the cost of a case, and form-filling steps are naturally batchable.
     max_actions_per_step: int = 5
@@ -443,6 +501,25 @@ class Settings(BaseSettings):
     # `scroll` / `navigate` / `click` / `input` / `send_keys` 等**保留**——那些真人真的会做。
     # `extract` 也保留：它是从页面**已渲染的文本**里归纳，不执行脚本。
     excluded_agent_actions: list[str] = ["wait", "search_page", "evaluate", "find_elements"]
+    # ★ 2026-10-09 再排除三个"文件工具"，理由是**实测没人用 + 每步都要付费**。
+    #
+    # 为什么要单独一组并写清依据：这几个工具的 schema 会出现在**每一次** LLM 调用里
+    # （browser-use 把全部工具的 JSON schema 一起发给模型），实测 23 个工具合计约
+    # 2482 token/次调用。所以排除一个用不到的工具，省的不只是一次调用，而是每一步。
+    #
+    # 依据（对着真库 1203 条用例的 prompt/expected/preconditions/test_data/name 检索）：
+    #   write_file / read_file / replace_file  —— 命中 **0 条**。
+    # 这三个是给 agent 自己写/读工作区文件的，而测试用例要的是"在界面上操作"，
+    # 没有一条用例要求它动工作区里的文件。
+    #
+    # ⚠️ 刻意**保留**的（有真实用例依赖，别顺手删）：
+    #   upload_file —— 38 条用例要靠它把测试数据文件传进被测系统（见 app/testdata.py）。
+    #   save_as_pdf —— 检索到 94 条命中"PDF/打印"，逐条看上下文后确认它们测的是
+    #     **被测系统自己的** PDF 功能（"打开PDF""PDF 排版""PDF A4 格式""跨部门打印"），
+    #     而且"打印/导出为"最终就会走到浏览器 PDF 查看器 —— 这个工具可能是查看证据的
+    #     唯一途径。删它换来的 token 远不值当丢掉这类用例的验证能力。
+    #   extract —— 从**已渲染文本**里归纳，不执行脚本，属于真人会做的事（保留）。
+    excluded_file_tools: list[str] = ["write_file", "read_file", "replace_file"]
     # --- workspace-scoped persistent browser profile -------------------------------
     # Keep ONE Chromium user-data-dir per project between cases and between runs, so
     # cookies / localStorage / sessionStorage / IndexedDB (and the app's own HTTP cache)

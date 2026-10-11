@@ -183,9 +183,24 @@ def test_attach_branch_skips_beacon_and_sprite_injection():
     也拦一遍；sprite 裁剪是往页面注入 JS 改 DOM —— 等于在用户窗口里改用户的页面。
     两者都只对"我们自己拉起的浏览器"有意义。
     """
-    src = _src(executor.execute_case)
-    assert "if not _attach_ep:\n                await _block_third_party_beacons(browser)" in src, (
+    src = _code_only(executor.execute_case)
+    # ★ 断言**行为**（"在 attach 分支里被调用"），不再逐字匹配那一行的写法。
+    #
+    # 2026-10-09 改：这原来匹配的是完整字面量
+    # `await _block_third_party_beacons(browser)`，而接口观察功能给这个调用
+    # 加了一个 recorder 参数，于是源码断言立刻假红 —— 而它想守的东西
+    # （"attach 模式必须跳过这两件事"）根本没被破坏。
+    #
+    # 这类"把实现写法钉死"的断言有个共同毛病：改动代码的人为了让它变绿，
+    # 最省事的做法是把断言改宽（而不是想清楚行为有没有变），护栏就这样一点点失效。
+    # 所以这里改成检查真正的语义：调用必须**出现在** `if not _attach_ep:` 块里。
+    assert "if not _attach_ep:" in src, "attach 分支消失了？"
+    attach_block = src.split("if not _attach_ep:", 1)[1]
+    # 块只到下一个同级语句为止；这里用一个宽松边界：块的开头若干行。
+    head = "\n".join(attach_block.splitlines()[:8])
+    assert "_block_third_party_beacons(" in head, (
         "_block_third_party_beacons 必须在 attach 模式下被跳过"
+        "（它装的是浏览器级 Fetch 拦截，会连带拦用户正在看的页面）"
     )
     assert "if not _attach_ep:\n                await _install_sprite_pruner(browser)" in src, (
         "_install_sprite_pruner 必须在 attach 模式下被跳过"

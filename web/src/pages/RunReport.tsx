@@ -47,6 +47,15 @@ const FILTERS = [
   { key: "error", label: "error" },
 ] as const;
 
+/** token 数的可读格式：12345 -> "12.3k"。表格里不需要精确到个位，
+ *  但量级必须一眼看出来（"这条 40k" 和 "这条 4k" 是两种不同的问题）。 */
+function fmtTokens(n: number): string {
+  if (!n) return "—";
+  if (n < 1000) return String(n);
+  if (n < 1_000_000) return `${(n / 1000).toFixed(n < 10_000 ? 1 : 0)}k`;
+  return `${(n / 1_000_000).toFixed(2)}M`;
+}
+
 export function RunReport() {
   const { rid, pid } = useParams();
   const runId = Number(rid);
@@ -172,6 +181,7 @@ export function RunReport() {
       }),
     [rows, filter, q, caseById],
   );
+
   const latencyData = results
     .filter((r) => r.status === "passed" || r.status === "failed" || r.status === "error")
     .map((r) => ({
@@ -507,17 +517,20 @@ export function RunReport() {
               </div>
             </div>
           </div>
-          <table className="w-full text-sm">
+          <table className="w-full text-sm tp-table">
             <thead className="border-y border-[var(--line)] text-left text-xs text-ink-500">
               <tr>
-                <th className="px-4 py-2">{t("Case")}</th>
-                <th className="px-3 py-2">{t("Module")}</th>
-                <th className="px-3 py-2">{t("Priority")}</th>
-                <th className="px-3 py-2">{t("Status")}</th>
-                <th className="px-3 py-2">{t("Attempts")}</th>
-                <th className="px-3 py-2">{t("Latency")}</th>
-                <th className="px-4 py-2">{t("Judge")}</th>
-                <th className="px-4 py-2" />
+                <th>{t("Case")}</th>
+                <th>{t("Module")}</th>
+                <th>{t("Priority")}</th>
+                <th>{t("Status")}</th>
+                <th>{t("Attempts")}</th>
+                <th>{t("Latency")}</th>
+                <th title={t("LLM tokens consumed by this case (agent + judge). Hover for the cache-hit share — cached input is billed far cheaper.")}>
+                  {t("Tokens")}
+                </th>
+                <th>{t("Judge")}</th>
+                <th />
               </tr>
             </thead>
             <tbody>
@@ -527,7 +540,7 @@ export function RunReport() {
                 const c = caseById.get(x.case_id);
                 return (
                   <tr key={x.case_id} className="tp-row hover:bg-brand-50/40">
-                    <td className="max-w-[300px] px-4 py-2">
+                    <td className="max-w-[300px]">
                       <div className="truncate font-medium text-ink-900" title={c?.name ?? ""}>
                         {c?.name ?? `#${x.case_id}`}
                       </div>
@@ -536,10 +549,10 @@ export function RunReport() {
                         <div className="mt-0.5 text-[11px] text-brand-700">👤 {r.account_label}</div>
                       )}
                     </td>
-                    <td className="max-w-[110px] truncate px-3 py-2 text-ink-500" title={c?.module ?? ""}>
+                    <td className="max-w-[110px] truncate text-ink-500" title={c?.module ?? ""}>
                       {c?.module ?? "—"}
                     </td>
-                    <td className="px-3 py-2">
+                    <td>
                       {c ? (
                         <span
                           className={"inline-flex rounded px-1.5 py-0.5 text-[11px] font-semibold " + (PRIORITY_STYLE[c.priority] ?? "")}
@@ -550,7 +563,7 @@ export function RunReport() {
                         "—"
                       )}
                     </td>
-                    <td className="space-x-1 px-3 py-2">
+                    <td className="space-x-1">
                       {/* 结论可点 —— 点开就是改判弹窗。
                           为什么要能改：AI 判定会不准（用户实测反馈），
                           没有改判入口的话，一条误判会一直挂在报告里，
@@ -590,12 +603,31 @@ export function RunReport() {
                       )}
                       {r?.flaky && <Badge status="flaky">flaky</Badge>}
                     </td>
-                    <td className="px-3 py-2 text-ink-700">{done ? (r!.flaky ? `×${r!.attempts}` : r!.attempts) : "—"}</td>
-                    <td className="px-3 py-2 text-ink-700">{done ? `${(r!.latency_ms / 1000).toFixed(1)}s` : "—"}</td>
-                    <td className="max-w-[160px] truncate px-4 py-2 text-ink-700" title={r?.judge_reason ?? r?.error ?? ""}>
+                    <td className="text-ink-700">{done ? (r!.flaky ? `×${r!.attempts}` : r!.attempts) : "—"}</td>
+                    <td className="text-ink-700">{done ? `${(r!.latency_ms / 1000).toFixed(1)}s` : "—"}</td>
+                    {/* token 消耗（2026-10-09）。显示"—"而不是 0：把"没测到"画成"零消耗"
+                        会让人低估真实成本，也会让"这条便宜"和"这条没测"混为一谈。
+                        title 里给缓存命中率 —— 它是唯一能解释"为什么这条贵"的可操作数字。 */}
+                    <td
+                      className="whitespace-nowrap tabular-nums text-ink-700"
+                      title={
+                        r?.usage
+                          ? t("{{total}} tokens in {{calls}} LLM calls · {{pct}}% of input served from cache", {
+                              total: r.usage.total.toLocaleString(),
+                              calls: r.usage.calls,
+                              pct: r.usage.prompt
+                                ? Math.round((r.usage.cached / r.usage.prompt) * 100)
+                                : 0,
+                            })
+                          : t("not measured (no usage in the response)")
+                      }
+                    >
+                      {r?.usage ? fmtTokens(r.usage.total) : "—"}
+                    </td>
+                    <td className="max-w-[160px] truncate text-ink-700" title={r?.judge_reason ?? r?.error ?? ""}>
                       {done ? (r!.judge_reason ?? r!.error ?? "—") : x.status === "running" ? t("executing…") : "—"}
                     </td>
-                    <td className="px-4 py-2 text-right">
+                    <td className="text-right">
                       <div className="flex justify-end gap-1">
                         {/* 查看/编辑用例本身。刻意放在 done 判断**之外**：
                             用例写错了跟它跑没跑完无关，未跑的用例同样需要能改。 */}
@@ -628,7 +660,7 @@ export function RunReport() {
               })}
               {filtered.length === 0 && (
                 <tr>
-                  <td colSpan={8} className="px-4 py-6 text-center text-ink-500">
+                  <td colSpan={8} className="tp-empty-row">
                     {run?.status === "running" ? t("executing…") : t("no results")}
                   </td>
                 </tr>

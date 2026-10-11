@@ -120,33 +120,33 @@ export function SuitesPage() {
       />
 
       <Card className="overflow-x-auto">
-        <table className="w-full text-[13px]">
+        <table className="w-full text-[13px] tp-table">
           <thead className="tp-thead">
             <tr>
-              <th className="px-4 py-2.5">{t("Name")}</th>
-              <th className="px-4 py-2.5">{t("Owner")}</th>
-              <th className="px-4 py-2.5">{t("Runner")}</th>
-              <th className="px-4 py-2.5">{t("Cadence")}</th>
-              <th className="px-4 py-2.5">{t("Next due")}</th>
-              <th className="px-4 py-2.5">{t("Last")}</th>
-              <th className="px-4 py-2.5" />
+              <th>{t("Name")}</th>
+              <th>{t("Owner")}</th>
+              <th>{t("Runner")}</th>
+              <th>{t("Cadence")}</th>
+              <th>{t("Next due")}</th>
+              <th>{t("Last")}</th>
+              <th />
             </tr>
           </thead>
           <tbody>
             {suites.map((s) => (
               <tr key={s.id} className="tp-row">
-                <td className="px-4 py-3 font-medium text-ink-900">
+                <td className="font-medium text-ink-900">
                   {s.name}
                   <span className="ml-2 text-xs text-ink-500">{s.case_ids.length} 用例</span>
                 </td>
-                <td className="px-4 py-3 text-ink-700">{s.owner_label ?? "—"}</td>
-                <td className="px-4 py-3 text-ink-700">{s.runner_label ?? "—"}</td>
-                <td className="px-4 py-3 text-ink-700">{label(CADENCE_LABELS, s.cadence, lang)}</td>
-                <td className="px-4 py-3 text-ink-700">{s.cadence === "none" ? "—" : relDue(s.due_at)}</td>
-                <td className="px-4 py-3">
+                <td className="text-ink-700">{s.owner_label ?? "—"}</td>
+                <td className="text-ink-700">{s.runner_label ?? "—"}</td>
+                <td className="text-ink-700">{label(CADENCE_LABELS, s.cadence, lang)}</td>
+                <td className="text-ink-700">{s.cadence === "none" ? "—" : relDue(s.due_at)}</td>
+                <td>
                   {s.last_status ? <Badge status={s.last_status}>{s.last_status}</Badge> : <span className="text-ink-400">—</span>}
                 </td>
-                <td className="px-4 py-3">
+                <td>
                   <div className="flex justify-end gap-1">
                     <Button size="sm" onClick={() => run(s)}>{t("Run")}</Button>
                     <Button size="sm" variant="outline" onClick={() => setDraft({ ...s })}>{t("Edit")}</Button>
@@ -157,7 +157,7 @@ export function SuitesPage() {
             ))}
             {suites.length === 0 && (
               <tr>
-                <td colSpan={7} className="px-4 py-12 text-center text-ink-500">
+                <td colSpan={7} className="tp-empty-row">
                   {t("No suites yet. A suite is a saved set of cases with an owner and a schedule — use it for recurring regression runs.")}
                 </td>
               </tr>

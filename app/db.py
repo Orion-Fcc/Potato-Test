@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -10,6 +12,8 @@ from sqlalchemy.pool import NullPool
 
 from app.config import get_settings
 from app.models import Base
+
+log = logging.getLogger("potato-test.db")
 
 _engine = None
 _Session: async_sessionmaker[AsyncSession] | None = None
@@ -22,7 +26,37 @@ def _ensure() -> async_sessionmaker[AsyncSession]:
         # fresh loop via asyncio.run(), and pooled asyncpg connections bound to a prior
         # loop raise "another operation is in progress". A fresh connection per session is
         # cheap enough for this internal tool and kills that whole bug class.
-        _engine = create_async_engine(get_settings().database_url, future=True, poolclass=NullPool)
+        url = get_settings().database_url
+        if url is None:
+            url = ""
+        # ★ 2026-10-10 哨兵：pytest 里重新按 settings 建 engine 时，**只允许连临时库**。
+        #
+        # 为什么要它（这是一次真实事故）：测试会在函数级把 `_engine`/`_Session` 换成
+        # 自己的库，**结束时置 None**（而不是还原）。于是下一个用到 db 的测试走到这里，
+        # 按 settings（= .env 里的 potato.db）重建 engine —— 测试数据直接写进用户的真库。
+        # 实测后果：真库多出 9 个项目（reconcile-check / live-check / fk-check，
+        # 18 条 case、12 个 run、18 条 run_result），而症状是**另一个文件里的测试报错**，
+        # 完全指不到成因。
+        #
+        # 注意这里**不是**"pytest 里禁止重建"：确实有测试（如 test_run_concurrency）
+        # 故意把自己的 tmp_path 库写进 os.environ["DATABASE_URL"] 再重建，那是对的、
+        # 也必须允许。所以判据是**目标 URL**：只有它指着真库才拒绝。
+        # 用 potato.db 的文件名判断有点粗，但在本项目里够准 —— 真库就叫 potato.db，
+        # 而临时库一律带 _tp_ / tmp_path 前缀。
+        if (os.environ.get("PYTEST_CURRENT_TEST") or os.environ.get("PYTEST_VERSION")) and (
+            "potato.db" in url
+        ):
+            raise RuntimeError(
+                "pytest 环境里 app.db 正准备重建 engine 并连上**真实数据库**："
+                f"{url}\n"
+                "这通常意味着某个测试把 db._engine / db._Session 置成了 None，"
+                "于是这里按 settings（.env）重建 —— 那会把测试数据写进用户的数据。\n"
+                "正确写法：直接构造 engine 并赋值给 db._engine / db._Session，"
+                "结束时**还原**（不要置 None）。见 docs/PROJECT_ISOLATION.md 第七节、"
+                "tests/conftest.py 的 bind_temp_db / tmp_db。\n"
+                "拒绝继续：再走下去就会污染用户的真实数据库。"
+            )
+        _engine = create_async_engine(url, future=True, poolclass=NullPool)
         _Session = async_sessionmaker(_engine, expire_on_commit=False)
     return _Session
 

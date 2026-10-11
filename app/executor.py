@@ -77,8 +77,7 @@ re-reading a page you have already read.
 1. CONFIRM ONCE. If a page state already tells you the answer (a validation message is
    visible, a field shows an error, a row is present or absent), that is your evidence —
    finish and report it. Do NOT re-run a search to double-check the same text, and do not
-   search twice with slightly different keywords for the same fact. If you already found
-   "请选择审批节点", searching for "必填|请选择|审批节点" adds nothing.
+   search twice with slightly different keywords for the same fact.
 2. NEVER WAIT BLINDLY. "Wait a few seconds to see if it loads" is a wasted step: the next
    snapshot you get is taken anyway after your action, so waiting changes nothing you
    would not already see. Only wait if you have a specific reason (e.g. you were told a
@@ -98,25 +97,22 @@ re-reading a page you have already read.
 6. BATCH INDEPENDENT ACTIONS. You may emit several actions in ONE step. When the actions
    do not depend on each other's result — filling several separate form fields, ticking
    several checkboxes, clicking through a fixed sequence of menus — put them in the SAME
-   step instead of one per step. This is the single biggest saving available: measured on
-   this project, 67% of steps carried only one action, so each step paid a full
-   think-and-observe round-trip to do one small thing.
+   step instead of one per step. This is the single biggest saving available: most steps
+   otherwise carry only one action and pay a full think-and-observe round-trip for it.
    The one exception is opening a popover (see the dropdown rule above): that must end
    its step, so the next state can be read before choosing from it.
-7. STOP THRASHING. If the SAME interaction fails twice, stop attempting it. Concretely:
-   a button that stays disabled, a click that keeps landing on the wrong element, an
-   option that will not select, a field that keeps rejecting a value — trying a third,
-   fourth, tenth time with slightly different wording will not make the UI cooperate.
-   On the second failure you already have your evidence: the UI does not behave as the
-   case expects. Report exactly what you observed (that IS the defect) and call `done`.
-   This is measured, not theoretical: on this project the most expensive cases (44 and
-   55 steps) were each ONE interaction retried a dozen times — and not one of those
-   retries ever succeeded. They only consumed the budget that a clear, early failure
-   report would have cost a fraction of. A promptly-reported failure is a good result;
-   a long thrash that ends in the same failure is a bad one.
-   What you MAY still do: try ONE genuinely different route to the same goal (a different
-   wording, a different entry point, satisfying a prerequisite you just discovered — see the
-   adaptation rule). "Different route" and "same click again" are not the same thing.
+7. STOP THRASHING. If the SAME interaction fails twice, stop attempting it: a button that
+   stays disabled, a click that keeps landing on the wrong element, an option that will
+   not select, a field that keeps rejecting a value. A third or tenth attempt with
+   slightly different wording will not make the UI cooperate — on the second failure you
+   already have your evidence: the UI does not behave as the case expects. Report exactly
+   what you observed (that IS the defect) and call `done`. Retrying never succeeds; it only
+   burns the budget that a clear, early failure report would have cost a fraction of. A
+   promptly-reported failure is a good result; a long thrash ending in the same failure is
+   a bad one. What you MAY still do: try ONE genuinely different route to the same goal
+   (different wording, different entry point, satisfying a prerequisite you just
+   discovered — see the adaptation rule). "Different route" and "same click again" are not
+   the same thing.
 """.strip()
 
 # 2026-10-04 用户要求：「直接告诉 agent 使用最少的步数和最快的时间去完成，
@@ -350,6 +346,20 @@ Deliberately NOT taught here, and why:
   * `screenshot` — redundant. We capture a screenshot every single step ourselves.
   * `read_file` / `write_file` — for working with local files, not for driving a web UI.
   * `save_as_pdf` — nothing in a test verdict needs a PDF; it would add time and file churn.
+""".strip()
+
+
+_VISION_TOOL_HINT = """
+Seeing the screen: you normally act from the fast text snapshot, which is correct for most
+steps. But the text snapshot can miss what the pixels actually show — a row that is on screen
+but not yet in the text, a table still loading, a colour or border, a value that the snapshot
+truncated. When the text does not match what you expect, or when you must confirm something
+visual before you decide (is this row really there? is that value really 0? did the list
+finish rendering?), call `look_at_screen`: it shows the current screen and returns a plain
+description of what is actually visible. Do NOT call it every step — it costs an extra model
+call; call it only when the text alone is not enough to decide. Pass the specific thing you
+want confirmed as the `question` argument. If `look_at_screen` is not in your tool list, fall
+back to the text and say so in your final answer.
 """.strip()
 
 
@@ -1099,26 +1109,86 @@ def browser_state_info(project_id: int) -> dict:
 
 
 def effective_case_timeout(configured_s: int, max_steps: int, s=None) -> int:
-    """Wall-clock safety net for one case, scaled to the work it is allowed to do.
+    """单条用例的墙钟安全网 —— **只拦卡死，不当预算**。
 
-    A fixed cap is the wrong shape: steps do not take equal time (a navigate is ~2s, a
-    model round-trip on a heavy page is 10-20s), so any constant either aborts slow-but-
-    healthy cases or is so large it never protects anything. Budget the STEPS and derive
-    the clock from that: time = configured net, further widened by per_step_timeout_s for
-    every step beyond what the configured net already covers.
+    ## 为什么不能是一个固定值（2026-10-09 用真数据重新定的）
 
-    The result is always at least the configured value, so a per-project override still
-    means what its author intended (it is a floor here, not a ceiling).
+    实测 133 条带耗时分解的历史结果：
+
+        分段          p50      p90      max
+        agent(真正跑) 102s     300s     548s
+        browser_up    2.5s     17.6s    24s
+        judge         3.6s     11.5s    84s
+        步数            6        —       47
+        每步耗时       11s      19s     271s   ← 关键
+
+    **每步耗时跨度 0.1s~271s**。所以任何"固定秒数"要么砍掉正常用例，
+    要么大到拦不住任何东西 —— 时间不是这条用例的固有属性，**步数才是**。
+
+    ## 现在的形状：时间跟着"允许做多少事"走
+
+        net = per_step_timeout_s × 允许的步数 + 一点固定的启动余量
+
+    120 步、每步 12s 的默认配置约得 1440s+；10 步约 120s+。
+    也就是说**墙钟永远不该先于步数用尽而触发**：真触发到它，只可能是
+    "某一步卡死了"，而那正是我们唯一想拦的情况（那种时候重试也没用）。
+
+    `configured_s` 只作为**下限**（per-project 覆盖仍然按作者意图生效），
+    但不再作为上限基线 —— 那正是"10 步的用例和 120 步的用例拿同一个 600s"的来源。
     """
     s = s or get_settings()
-    base = max(1, int(configured_s or 0))
+    floor = max(1, int(configured_s or 0))
     per_step = max(0, int(getattr(s, "per_step_timeout_s", 0) or 0))
     if per_step <= 0:
-        return base
-    # Steps the base net already pays for at the per-step rate; anything above that adds time.
-    steps_covered = base // per_step
-    extra = max(0, int(max_steps or 0) - steps_covered) * per_step
-    return base + extra
+        return floor
+    steps = max(0, int(max_steps or 0))
+    # 启动/收尾/录像这些"跑之外"的开销：实测 p90 约 18s，给 60s 余量足够，
+    # 而且它**不随步数增长** —— 混进 per_step 里会让长用例的网越放越大。
+    setup_allowance = int(getattr(s, "case_setup_allowance_s", 60) or 60)
+    return max(floor, steps * per_step + setup_allowance)
+
+
+def base_url_of(spec) -> str:
+    """用例会被送到的那个页面的 origin（用来判断"哪些请求属于本项目后端"）。
+
+    为什么需要它：接口观察要区分"被测系统自己的后端"和"页面顺带调的第三方"
+    （统计、CDN、字体）。判据就是 origin 是否与页面一致。
+
+    取不到就返回空串：`Recorder` 在空 origin 下会退化成"只按路径特征判断"
+    （见 api_discovery.looks_like_api），仍然能用，只是可能多收几条 ——
+    比因为取不到 URL 就完全不记录要好。**不抛异常**：这是附加能力。
+    """
+    try:
+        from urllib.parse import urlparse
+
+        p = urlparse(spec.start_url or "")
+        return f"{p.scheme}://{p.netloc}" if p.scheme and p.netloc else ""
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _usage_payload(summary) -> dict:
+    """把 browser-use 的 UsageSummary 折成一个紧凑的 token 账本。
+
+    ★ 为什么要落库（2026-10-09）：在这之前，**没有任何地方记录一条用例花了多少 token**。
+    用户唯一的感受是"这个系统很烧 token"，而"烧在哪"完全靠猜 —— 是步数太多？是每步的
+    页面快照太大？是系统提示词太长？是没有缓存？这几个方向的优化手段完全不同，猜错就白干。
+    所以先让消耗可见，再谈优化：看不见的东西没法优化，也没法证明优化有效。
+
+    字段刻意取短名：这一份要跟着每条 run_result 落库，长键名（total_prompt_tokens）
+    在 1200+ 条结果上是纯粹的存储浪费。calls = entry_count = LLM 往返次数，
+    它和 tokens 一起看才有意义 —— 大量小调用和少量大调用的优化方向不一样。
+    """
+    if summary is None:
+        return {}
+    g = lambda name: int(getattr(summary, name, 0) or 0)  # noqa: E731
+    return {
+        "prompt": g("total_prompt_tokens"),
+        "completion": g("total_completion_tokens"),
+        "cached": g("total_prompt_cached_tokens"),
+        "total": g("total_tokens"),
+        "calls": g("entry_count"),
+    }
 
 
 def _timing_payload(stage: dict, t0: float, total: float, steps: int) -> dict:
@@ -1235,6 +1305,10 @@ class ResultSpec:
     #   judge_ms      判定 + 失败叙述
     # 另附 total_ms / steps / per_step_ms，让"慢在哪"一眼可见。
     timing: dict = field(default_factory=dict)
+    # LLM token 账本（2026-10-09）：{"prompt","completion","cached","total","calls"}。
+    # 由 executor 从 agent 侧采集、judge 侧再叠加，最后并入 timing["usage"] 落库 ——
+    # 借 timing 那一列（JSON）走，不用加列也不用迁移。
+    usage: dict = field(default_factory=dict)
     error: str | None = None
     auth_failed: bool = False  # restored session was dead (ended on a login page) → self-heal
     timed_out: bool = False  # hit the wall-clock cap → a re-attempt cannot change the outcome
@@ -1421,7 +1495,13 @@ def _build_tools(s, spec: "CaseSpec | None" = None):
 
         tools = Tools()
         excluded = []
-        for name in (getattr(s, "excluded_agent_actions", None) or []):
+        # 两组排除项合并：excluded_agent_actions（低价值动作）+
+        # excluded_file_tools（没人用的文件工具）。两组的依据不同，所以在 config 里
+        # 分开写、在这里并起来 —— 见 config.py 里各自的注释。
+        names = list(getattr(s, "excluded_agent_actions", None) or []) + list(
+            getattr(s, "excluded_file_tools", None) or []
+        )
+        for name in names:
             try:
                 tools.exclude_action(name)
                 excluded.append(name)
@@ -1430,6 +1510,7 @@ def _build_tools(s, spec: "CaseSpec | None" = None):
         if excluded:
             log.info("executor: 已禁用低价值动作 %s（每步都是完整模型回合）", ", ".join(excluded))
         _add_switch_account(tools, spec)
+        _add_look_at_screen(tools, s)
         return tools
     except Exception as exc:  # noqa: BLE001 — never fail a case over a speed tweak
         log.warning("executor: 精简动作集失败，改用默认动作集：%s", exc)
@@ -1478,7 +1559,13 @@ def _add_switch_account(tools, spec: CaseSpec) -> None:
                     f"角色「{r['role']}」没有可用的已捕获会话（它的账号需要交互式登录，"
                     "当前无法自动切换）。请改用当前身份完成任务，并在结果里说明这一点。"
                 )
-            ok, err = await _switch_identity(_ACTIVE_BROWSER.get(), bundle)
+            browser = _ACTIVE_BROWSER.get("browser")
+            if browser is None:
+                return (
+                    "切换身份失败：当前没有活动浏览器（_ACTIVE_BROWSER 未挂载）。"
+                    "请改用当前身份完成任务，并在结果里说明这一点。"
+                )
+            ok, err = await _switch_identity(browser, bundle)
             if not ok:
                 return f"切换到「{r['role']}」失败：{err}。请继续用当前身份，或先刷新页面重试一次。"
             log.info("executor: 已切换身份 -> %s", r.get("label") or r["role"])
@@ -1489,6 +1576,79 @@ def _add_switch_account(tools, spec: CaseSpec) -> None:
 
     except Exception as exc:  # noqa: BLE001 — a missing tool must not fail the case
         log.warning("executor: switch_account 工具注册失败（多角色用例将无法切换身份）：%s", exc)
+
+
+def _add_look_at_screen(tools, s) -> None:
+    """注册按需视觉工具 `look_at_screen`（2026-10-09）—— 把"开不开视觉"交给 agent 自己选。
+
+    平时 agent 走文本快照（快）；当它判断"文本和预期对不上 / 要确认画面上到底有没有
+    这行、这个颜色、表格是否真渲染了"时，**自己**调这个工具：截当前屏，喂给多模态模型，
+    把"看到的"以文字还回来。选择权在 agent 手里，不是一刀切。
+
+    只在 `s.agent_vision_tool` 开时注册 —— 纯文本提速模式下不注入它，557 条单角色用例的
+    动作集保持逐字节不变（和 switch_account 同一条理由）。
+
+    读屏走自建 180s 超时的 client，不复用 judge 那个 60s 的：多模态首调（传 8~90KB PNG）
+    实测可能 >60s，60s 天花板会误报"读屏失败"。max_retries=0：429 退避只会把一次失败
+    拖成五次等待，由 agent 按语义决定是否重试（见 app/llm.py 同名注释）。
+    """
+    if not getattr(s, "agent_vision_tool", False):
+        return
+    try:
+
+        @tools.action(
+            "Look at the current screen the way a person would. Call this ONLY when the "
+            "text snapshot does not match what you expect — e.g. a row/value you are "
+            "looking for is not in the text, a table may still be loading, or you need to "
+            "confirm a colour, a border, or whether content actually rendered. It returns "
+            "a plain-text description of what is actually visible right now. It costs an "
+            "extra model call, so do NOT use it every step — use it only when the text "
+            "alone is not enough to decide. In `question`, put the specific thing you want "
+            "confirmed (or leave it empty for a general read of the screen)."
+        )
+        async def look_at_screen(question: str = "") -> str:
+            from app.llm import chat
+
+            browser = _ACTIVE_BROWSER.get("browser")
+            if browser is None:
+                return (
+                    "没有活动浏览器可截图（_ACTIVE_BROWSER 未挂载）。请基于现有文本继续，"
+                    "并在结果里说明此刻无法看画面。"
+                )
+            png = await _safe_async(lambda: browser.take_screenshot())
+            if not png:
+                return "截图失败（此刻拿不到画面）。请基于现有文本继续，不要反复重试本工具。"
+            data = png if isinstance(png, bytes) else base64.b64decode(png)
+            b64 = base64.b64encode(data).decode()
+            prompt = (
+                "下面是一张 Web 应用当前画面的截图。请像真人一样仔细看，用中文简短列出"
+                "「画面上现在实际看得见的东西」：可见标题、表格大约几行、关键数值/状态词、"
+                "任何颜色或边框（如红色/绿色）、是否还在加载中（转圈/骨架屏）。"
+                "只描述确实看得见的，看不出的就明说看不出，不要猜测。\n"
+            )
+            if question and question.strip():
+                prompt += f"另外请特别回答：{question.strip()}\n"
+            try:
+                # 协议无关门面：图片 part 会被翻译成 Anthropic image block / Gemini
+                # Part.from_bytes，所以"看屏"这个工具在换厂商后依旧可用。
+                res = await chat(
+                    content=[
+                        {"type": "text", "text": prompt},
+                        {"type": "image_url",
+                         "image_url": {"url": f"data:image/png;base64,{b64}"}},
+                    ],
+                    temperature=0,
+                    timeout=180.0,
+                )
+                text = (res.text or "").strip()
+                log.info("executor: look_at_screen 读屏 -> %s", text[:120])
+                return text or "（模型没有返回可见内容）"
+            except Exception as exc:  # noqa: BLE001 — 看屏失败绝不能搞死用例
+                log.warning("executor: look_at_screen 读屏失败：%s", exc)
+                return f"读屏失败（{type(exc).__name__}）。请基于现有文本继续，不要反复重试本工具。"
+
+    except Exception as exc:  # noqa: BLE001 — 工具注册失败不能搞死用例
+        log.warning("executor: look_at_screen 工具注册失败（agent 将无法按需看画面）：%s", exc)
 
 
 # The live browser for the case currently executing. Set in execute_case before the agent
@@ -2235,9 +2395,27 @@ async def execute_case(spec: CaseSpec, on_step=None, should_abort=None) -> Resul
                 except Exception:  # noqa: BLE001 — 停止判定绝不能反过来搞死用例
                     return False
 
+            # 视觉指引：只在"按需工具真的注册、且没有每步喂图"时注入 —— 否则提示词
+            # 会提到一个不存在的工具（幽灵工具），或每步喂图时工具本就冗余。
+            _vision_hint = (
+                f"\n\n{_VISION_TOOL_HINT}"
+                if getattr(s, "agent_vision_tool", False) and not s.agent_use_vision
+                else ""
+            )
+
+            # 开跑前探活选路（多套 LLM 池）：池>1 时逐套 1-token 探测，
+            # 选第一个 200 的作为本用例的执行 profile。池=1 时短路不探活，行为与改前完全一致。
+            # 2026-10-09 现场：run10 的 105 条失败全是主 key 429 打爆免费额度。
+            _active_profile, _pool = await pick_active_profile()
+            if len(_pool) > 1:
+                _agent_llm = await agent_llm_for(_active_profile)
+                log.info("executor: 探活选路 -> %s（池 %d 套）", _active_profile.name, len(_pool))
+            else:
+                _agent_llm = await browser_use_llm()
+
             agent = Agent(
                 task=task,
-                llm=await browser_use_llm(),
+                llm=_agent_llm,
                 browser=browser,
                 register_new_step_callback=_step_cb,
                 register_should_stop_callback=_should_stop,
@@ -2254,10 +2432,10 @@ async def execute_case(spec: CaseSpec, on_step=None, should_abort=None) -> Resul
                 extend_system_message=(
                     f"{_SCOPE_RULE}\n\n{_TOOLKIT_RULE}\n\n{_POPUP_RULE}\n\n"
                     f"{_ANTI_WASTE_RULE}\n\n{_EFFICIENCY_RULE}\n\n{_ADAPT_RULE}\n\n"
-                    f"{_PERSIST_RULE}\n\n"
+                    f"{_PERSIST_RULE}{_vision_hint}\n\n"
                     f"{_SELF_CHECK_RULE}{_memory_note}"
                 ),
-                use_vision=False,  # 提速：不每步发整屏截图，改用无障碍树/DOM 文本
+                use_vision=s.agent_use_vision,  # 视觉开关（config.agent_use_vision）：True 时 agent 每步"盯屏幕"
                 # Speed: batch independent actions (e.g. several form fills) into one
                 # model round-trip instead of one round-trip per action. This is the
                 # single biggest lever on step count, and step count is the cost.
@@ -2315,6 +2493,9 @@ async def execute_case(spec: CaseSpec, on_step=None, should_abort=None) -> Resul
         # history adds each step's result/error, which we merge in by index.
         history = getattr(agent, "history", None) if agent is not None else None
         if history is not None:
+            # token 账本：agent 这一次的所有 LLM 往返。
+            # 放在 final_result 之前采集 —— 它和结果无关，晚取反而可能因为异常拿不到。
+            res.usage = safe(lambda: _usage_payload(getattr(history, "usage", None))) or {}
             res.final_answer = safe(lambda: history.final_result()) or ""
             res.steps = safe(lambda: history.action_names()) or []
             # P3: we restored a session but the agent ended on a login page → session dead.
@@ -2548,6 +2729,15 @@ async def execute_case(spec: CaseSpec, on_step=None, should_abort=None) -> Resul
             res.evidence_gap = verdict.evidence_gap
             res.root_cause = verdict.root_cause
             res.verdict_evidence = list(verdict.evidence)
+            # 判定器的 token 并进本条用例的账（agent 侧已在上面采集过）。
+            # 两个来源分开累加、键名一致，报告里可以一眼看出"贵在跑还是在判"。
+            _ju = getattr(verdict, "usage", None) or {}
+            if _ju:
+                _au = res.usage or {}
+                res.usage = {
+                    k: int(_au.get(k, 0)) + int(_ju.get(k, 0))
+                    for k in ("prompt", "completion", "cached", "total", "calls")
+                }
 
     # Bug description for anything that did not pass. "error" counts: an errored case is
     # still a case the tester has to look at, and a narrative is what they read first.
@@ -2614,6 +2804,10 @@ async def execute_case(spec: CaseSpec, on_step=None, should_abort=None) -> Resul
     try:
         total = time.monotonic() - t0
         payload = _timing_payload(_stage, t0, total, len(res.diagnostics or []))
+        # token 账本并进同一列：两者一起看才有意义（"这一步很慢" vs "这一步很贵"
+        # 是两种不同的病，处置方式也不同）。timing 是 JSON 列，加键不用迁移。
+        if res.usage:
+            payload["usage"] = res.usage
         res.timing = payload
         # 日志与落库共用同一份数字，避免两处各算一遍后悄悄漂移。
         seg = {
@@ -2962,6 +3156,10 @@ async def capture_session(
             task=task,
             llm=await browser_use_llm(),
             browser=browser,
+            # 登录捕获是纯机械流程（填账号密码 + 过验证码 + 到达登录后页面），
+            # DOM/无障碍文本足以定位控件；这里**故意**不走视觉，省一次带图调用，
+            # 且它用的是独立小预算（login_capture_*），开视觉只会拖慢捕获。
+            # 用例正文的操作才是"像人一样盯屏幕"，走上面的 s.agent_use_vision。
             use_vision=False,
             register_new_step_callback=_capture_step_cb,
         )

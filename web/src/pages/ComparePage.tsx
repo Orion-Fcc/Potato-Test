@@ -46,11 +46,11 @@ function RunPicker({ pid, onCompare }: { pid: number; onCompare: (ids: number[])
             {t("Compare ({{n}})", { n: sel.size })}
           </Button>
         </div>
-        <table className="w-full text-[13px]">
+        <table className="w-full text-[13px] tp-table">
           <tbody>
             {runs.map((r) => (
               <tr key={r.id} className="tp-row">
-                <td className="w-10 px-4 py-2.5">
+                <td className="w-10">
                   <Checkbox
                     checked={sel.has(r.id)}
                     onChange={() =>
@@ -63,11 +63,11 @@ function RunPicker({ pid, onCompare }: { pid: number; onCompare: (ids: number[])
                     }
                   />
                 </td>
-                <td className="px-4 py-2.5 font-medium text-ink-900">{r.name}</td>
-                <td className="px-4 py-2.5">
+                <td className="font-medium text-ink-900">{r.name}</td>
+                <td>
                   <Badge status={r.status} />
                 </td>
-                <td className="px-4 py-2.5 text-ink-500">{relTime(r.started_at)}</td>
+                <td className="text-ink-500">{relTime(r.started_at)}</td>
               </tr>
             ))}
           </tbody>
@@ -250,13 +250,13 @@ function Matrix({ pid, runIds }: { pid: number; runIds: number[] }) {
             ))}
           </div>
         </div>
-        <table className="w-full text-sm">
+        <table className="w-full text-sm tp-table">
           <thead className="tp-thead">
             <tr>
-              <th className="px-4 py-2.5">{t("Case")}</th>
-              <th className="px-3 py-2.5">{t("Priority")}</th>
+              <th>{t("Case")}</th>
+              <th>{t("Priority")}</th>
               {data.map((d) => (
-                <th key={d.run.id} className="px-3 py-2.5">
+                <th key={d.run.id}>
                   <Link to={`/projects/${pid}/runs/${d.run.id}`} className="text-ink-900 hover:text-brand-700">
                     #{d.run.id}
                   </Link>
@@ -266,14 +266,14 @@ function Matrix({ pid, runIds }: { pid: number; runIds: number[] }) {
                   </div>
                 </th>
               ))}
-              <th className="px-3 py-2.5">{t("Trend")}</th>
+              <th>{t("Trend")}</th>
             </tr>
           </thead>
           <tbody>
             {groups.map(([module, rrows]) => (
               <Fragment key={module}>
                 <tr className="bg-[color-mix(in_oklch,var(--panel2)_62%,transparent)]">
-                  <td colSpan={data.length + 3} className="px-4 py-2 text-xs font-semibold text-ink-900">
+                  <td colSpan={data.length + 3} className="tp-group-row text-xs font-semibold text-ink-900">
                     {module}
                     <span className="ml-2 font-normal tabular-nums text-ink-500">{rrows.length}</span>
                   </td>
@@ -288,11 +288,11 @@ function Matrix({ pid, runIds }: { pid: number; runIds: number[] }) {
                         : "hover:bg-[var(--hover)]")
                     }
                   >
-                    <td className="px-4 py-2.5">
+                    <td>
                       <div className="font-medium text-ink-900">{r.c?.name ?? `#${r.cid}`}</div>
                       <div className="font-mono text-[11px] text-ink-500">{r.c?.case_key ?? `#${r.cid}`}</div>
                     </td>
-                    <td className="px-3 py-2.5">
+                    <td>
                       {r.c ? (
                         <span
                           className={"inline-flex rounded px-1.5 py-0.5 text-[11px] font-semibold " + (PRIORITY_STYLE[r.c.priority] ?? "")}
@@ -304,11 +304,11 @@ function Matrix({ pid, runIds }: { pid: number; runIds: number[] }) {
                       )}
                     </td>
                     {r.statuses.map((st, i) => (
-                      <td key={i} className="px-3 py-2.5">
+                      <td key={i}>
                         <StatusPill st={st} />
                       </td>
                     ))}
-                    <td className="px-3 py-2.5 text-xs">{trendLabel(r.trend)}</td>
+                    <td className="text-xs">{trendLabel(r.trend)}</td>
                   </tr>
                 ))}
               </Fragment>

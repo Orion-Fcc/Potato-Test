@@ -1,7 +1,9 @@
 import clsx from "clsx";
 import type { ReactNode } from "react";
 
-export function Skeleton({ className }: { className?: string }) {
+// 只在本文件里用（PageSkeleton 内部拼装），所以**不导出** ——
+// knip 报它 unused export 时说明外部没有消费点，多一个导出就多一个别人以为能依赖的面。
+function Skeleton({ className }: { className?: string }) {
   return <div className={clsx("animate-pulse rounded-md bg-[var(--panel2)]", className)} />;
 }
 

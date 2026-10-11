@@ -81,7 +81,7 @@ def _is_blocked_url(url: str) -> bool:
     return any(host in u for host in _BLOCKED_HOSTS)
 
 
-async def _block_third_party_beacons(browser) -> None:
+async def _block_third_party_beacons(browser, recorder=None) -> None:
     """Fail analytics/ad requests fast via CDP instead of letting them hang.
 
     The app under test is on a private network; its page also embeds third-party
@@ -92,6 +92,12 @@ async def _block_third_party_beacons(browser) -> None:
 
     Failing the request at the network layer lets the page's own error path run so it
     renders. Best-effort: if interception can't be installed we lose speed, not the run.
+
+    ``recorder`` (2026-10-09) — 可选的接口观察器（app/api_discovery.Recorder）。
+    ★ 为什么挂在这里：这个函数已经为了拦 beacon 而**拦截了全部请求**，
+    借同一个钩子观察后端接口是零额外开销的；另外再注册一个 CDP 拦截只会有两份
+    逻辑要同步（而且 Fetch.enable 重复开启的行为依版本而变）。
+    传入 None 时行为与以前完全一致。
     """
     try:
         await browser.start()
@@ -107,6 +113,18 @@ async def _block_third_party_beacons(browser) -> None:
             rid = evt.get("requestId")
             if not rid:
                 return
+            # 观察（只读、无副作用）。放在 continue/fail 之前：
+            # 被拦掉的第三方请求也会被 looks_like_api 过滤掉，不必特殊处理。
+            if recorder is not None:
+                recorder.observe(
+                    url,
+                    method=req.get("method", "GET"),
+                    resource_type=evt.get("resourceType", ""),
+                    post_data=req.get("postData"),
+                    content_type=(req.get("headers") or {}).get("Content-Type", "")
+                    if isinstance(req.get("headers"), dict)
+                    else "",
+                )
             if not _is_blocked_url(url):
                 asyncio.create_task(
                     lib.send.Fetch.continueRequest(params={"requestId": rid}, session_id=cdp.session_id)

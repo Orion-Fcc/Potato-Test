@@ -817,6 +817,72 @@ async def remove_member(pid: int, uid: int, request: Request) -> dict:
 
 
 # ---- projects ----
+async def _project_with_counts(s, p) -> dict:
+    """`_project(p)` + 列表页需要的两个派生字段（用例数 / 最近一次运行）。
+
+    2026-10-09 抽出来：原先这段只长在 `list_projects` 里，于是新加的
+    `GET /projects/{pid}` 如果直接用 `_project()`，同一个项目在"列表里"和
+    "单取时"会返回**不同形状** —— 前端只好写两套解析。派生字段只算一次、两处共用。
+
+    `has_login_state` 的补算（storage_state 凭据也算登录态）保持原样。
+    """
+    d = _project(p)
+    if not d["has_login_state"]:
+        d["has_login_state"] = bool(
+            (
+                await s.execute(
+                    select(func.count())
+                    .select_from(Credential)
+                    .where(
+                        Credential.project_id == p.id,
+                        Credential.is_active == True,  # noqa: E712
+                        Credential.type == "storage_state",
+                    )
+                )
+            ).scalar_one()
+        )
+    d["case_count"] = (
+        await s.execute(
+            select(func.count()).select_from(TestCase).where(TestCase.project_id == p.id)
+        )
+    ).scalar_one()
+    last = (
+        await s.execute(
+            select(Run).where(Run.project_id == p.id).order_by(Run.id.desc()).limit(1)
+        )
+    ).scalar_one_or_none()
+    d["last_run"] = (
+        {
+            "id": last.id,
+            "status": last.status,
+            "pass_rate": (last.summary or {}).get("pass_rate") if last.summary else None,
+            "finished_at": _iso(last.finished_at),
+        }
+        if last
+        else None
+    )
+    return d
+
+
+@router.get("/projects/{pid}")
+async def get_project(pid: int, request: Request) -> dict:
+    """单个项目的详情（2026-10-09 新增）。
+
+    为什么加：此前只有 `GET /projects`（整个列表），前端想刷新"当前这一个项目"
+    只能把列表拉下来再自己筛，或者干脆不发请求。于是 `/api/projects/{pid}` 这个
+    看起来理所当然的路径**没有路由**，未匹配的 GET 会被 SPA 兜底接走并回 HTML ——
+    调用方拿到 200 + `<html>`，然后在 JSON 解析处报一个与原因无关的错。
+    （兜底那条已在 app/main.py 里对 /api 前缀回 404，但"端点不存在"本身也该补上。）
+
+    返回形状与列表**逐字段一致**（同一个 `_project_with_counts`），
+    权限口径也一致：viewer 即可读，非成员在非共享工作区下 404。
+    """
+    await _project_access(request, pid, "viewer")
+    async with db_session() as s:
+        p = await _get_project_or_404(s, pid)
+        return await _project_with_counts(s, p)
+
+
 @router.get("/projects")
 async def list_projects(request: Request) -> list[dict]:
     async with db_session() as s:
@@ -838,45 +904,8 @@ async def list_projects(request: Request) -> list[dict]:
                 return []
             q = q.where(Project.id.in_(member_ids))
         rows = (await s.execute(q)).scalars().all()
-        out = []
-        for p in rows:
-            d = _project(p)
-            if not d["has_login_state"]:
-                d["has_login_state"] = bool(
-                    (
-                        await s.execute(
-                            select(func.count())
-                            .select_from(Credential)
-                            .where(
-                                Credential.project_id == p.id,
-                                Credential.is_active == True,
-                                Credential.type == "storage_state",
-                            )
-                        )
-                    ).scalar_one()
-                )
-            d["case_count"] = (
-                await s.execute(
-                    select(func.count()).select_from(TestCase).where(TestCase.project_id == p.id)
-                )
-            ).scalar_one()
-            last = (
-                await s.execute(
-                    select(Run).where(Run.project_id == p.id).order_by(Run.id.desc()).limit(1)
-                )
-            ).scalar_one_or_none()
-            d["last_run"] = (
-                {
-                    "id": last.id,
-                    "status": last.status,
-                    "pass_rate": (last.summary or {}).get("pass_rate") if last.summary else None,
-                    "finished_at": _iso(last.finished_at),
-                }
-                if last
-                else None
-            )
-            out.append(d)
-        return out
+        # 派生字段的算法与 GET /projects/{pid} 共用同一个函数，两个端点不会漂。
+        return [await _project_with_counts(s, p) for p in rows]
 
 
 @router.post("/projects")
@@ -892,7 +921,10 @@ async def create_project(body: ProjectIn, request: Request) -> dict:
         # A project can still blank any field to go back to "follow the default".
         _s = get_settings()
         p = Project(
-            name=body.name,
+            # 名字必须 strip：`" 训练资源 "` 和 `"训练资源"` 在列表里长得一模一样，
+            # 用户会以为是自己看错了，然后对着两条"同一个"项目反复改。同项目的
+            # set_roles 早就这么做了（第 949 行），项目名以前漏了。
+            name=body.name.strip(),
             base_url=body.base_url,
             login_state=body.login_state,
             case_timeout_s=_s.case_timeout_s,
@@ -914,6 +946,9 @@ async def update_project(pid: int, body: ProjectPatch, request: Request) -> dict
     async with db_session() as s:
         p = await _get_project_or_404(s, pid)
         data = body.model_dump(exclude_none=True)
+        # 同 create_project：改名也要 strip，否则"改完看不出区别"。
+        if "name" in data and data["name"] is not None:
+            data["name"] = str(data["name"]).strip()
         # 这两个证据开关的 null **有语义**（= 改回"跟随服务器默认"），而 exclude_none
         # 会把 null 直接丢掉，于是"恢复默认"这个操作永远表达不出来。所以单独按
         # model_fields_set 判断"调用方到底有没有传这个键"：传了就照传的值设（哪怕是 None），
@@ -2887,6 +2922,32 @@ async def get_run(rid: int, request: Request) -> dict:
             # 明细只在详情给：这是「停下来改文档」的入口，列表页不展开。
             "drift_signals": r.drift_signals,
         }
+
+
+@router.get("/runs/{rid}/perf")
+async def run_perf_report(rid: int, request: Request) -> dict:
+    """这一轮的性能异常分析（2026-10-09）。
+
+    存在的理由：判定器只回答"结果对不对"，看不到"这条用例本不该花这么久"。
+    实测真库里就有 3 条用例**单步耗时 271s**（同轮中位数 11.4s，23 倍）——
+    它们的结果可能是对的，但那本身就是要报出去的信号。
+
+    纯计算、不调模型：性能结论不该再花一次 LLM 往返，而且确定性规则比
+    "让模型看数字下判断"更稳定、可复现、可单测。见 app/perf_analysis.py。
+    """
+    from app.perf_analysis import analyse_run
+
+    async with db_session() as s:
+        run = await s.get(Run, rid)
+        if run is None:
+            raise HTTPException(404, "run not found")
+        await _project_access(request, run.project_id, "viewer")
+        rows = (
+            await s.execute(
+                select(RunResult.case_id, RunResult.timing).where(RunResult.run_id == rid)
+            )
+        ).all()
+    return analyse_run([{"case_id": c, "timing": t} for c, t in rows]).as_dict()
 
 
 @router.get("/runs/{rid}/results")

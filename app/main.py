@@ -6,7 +6,7 @@ import asyncio
 import os
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -224,12 +224,25 @@ def create_app() -> FastAPI:
     # index.html for client-side routing.
     if s.web_dist and os.path.isdir(s.web_dist):
         index = os.path.join(s.web_dist, "index.html")
+        _index_real = os.path.realpath(index)
 
         @app.get("/{full_path:path}")
         async def spa(full_path: str) -> FileResponse:
+            # ★ /api 命名空间**专属后端**，绝不回 index.html。
+            #
+            # 为什么必须显式拦：兜底路由会接走所有未匹配的 GET，包括拼错的
+            # /api 路径。于是调用方拿到 **200 + HTML**，以为请求成功了，然后在
+            # `res.json()` 上炸出 "Unexpected token '<'" —— 一个完全不指向
+            # 真实原因的报错，排查得从"为什么 JSON 解析失败"一路倒推回"路由拼错了"。
+            # 2026-10-09 实测：`GET /api/projects/999999`（该端点根本不存在）
+            # 返回的就是 index.html + 200。
+            # 前端没有任何客户端路由以 /api 开头，所以这里 404 不会误伤 SPA。
+            if full_path == "api" or full_path.startswith("api/"):
+                raise HTTPException(status_code=404, detail="no such API endpoint")
+
             candidate = os.path.join(s.web_dist, full_path)
             if full_path and os.path.isfile(candidate):
-                if os.path.realpath(candidate) == os.path.realpath(index):
+                if os.path.realpath(candidate) == _index_real:
                     # index.html 每次 rebuild 引用的 chunk 名都会变，必须 no-cache 让
                     # 浏览器重新验证；否则它拿旧 index.html 去取已改名的 chunk →
                     # "Failed to fetch dynamically imported module"（404）。

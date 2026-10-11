@@ -24,7 +24,7 @@ export interface Project {
   } | null;
 }
 
-export interface BrowserStateSlot {
+interface BrowserStateSlot {
   slot: string;
   path: string;
   bytes: number;
@@ -44,7 +44,7 @@ export interface BrowserState {
 }
 
 /** 失败清单里的一条用例（同一用例多次失败只出现一次，fail_count 是次数）。 */
-export interface DigestCase {
+interface DigestCase {
   case_id: number | null;
   case_key: string;
   name: string;
@@ -64,7 +64,7 @@ export interface DigestCase {
  *
  * ★ report_to_dev 的条目绝不能去改 expected —— 那是真缺陷，改预期等于掩盖它。
  */
-export interface DigestGroup {
+interface DigestGroup {
   signal: string;
   summary: string;
   action: string;
@@ -156,7 +156,7 @@ export interface Credential {
   created_at: string | null;
 }
 
-export type IssueStatus = "open" | "in_progress" | "fixed" | "verified" | "closed";
+type IssueStatus = "open" | "in_progress" | "fixed" | "verified" | "closed";
 export type Severity = "low" | "medium" | "high" | "critical";
 
 export interface IssueComment {
@@ -186,7 +186,7 @@ export interface Issue {
   comments?: IssueComment[];
 }
 
-export type FeedbackCategory = "bug" | "question" | "feature" | "other";
+type FeedbackCategory = "bug" | "question" | "feature" | "other";
 
 export interface FeedbackItem {
   id: number;
@@ -375,7 +375,7 @@ export interface TestCase {
   memory_stale?: boolean;
 }
 
-export interface RunSummary {
+interface RunSummary {
   total: number;
   passed: number;
   failed: number;
@@ -480,6 +480,9 @@ export interface RunResult {
   failure_narrative?: FailureNarrative | null;
   account_label?: string | null;
   latency_ms: number;
+  /** LLM token 账本（2026-10-09）。null/缺失 = 没测到（网关不回 usage，或埋点前的历史行），
+   *  界面要显示"—"而不是 0 —— 把"未测量"画成"零消耗"会让人低估真实成本。 */
+  usage?: TokenUsage | null;
   error: string | null;
   // 2026-10-06 人工改判。verdict_override 非空 => 这条结论是人改的，不是 AI 判的。
   // 界面必须把两者区分开，否则通过率/真缺陷率这些数字没法信。
@@ -489,6 +492,20 @@ export interface RunResult {
   override_at?: string | null;
   /** 改判前 AI 的原始结论（撤销改判时用来还原）。 */
   original_status?: string | null;
+}
+
+/** LLM token 消耗（2026-10-09）。键名刻意取短：它跟着每条结果落库。
+ *  只被 RunResult.usage 引用，故不导出（多一个导出就多一个别人以为能依赖的面）。 */
+interface TokenUsage {
+  /** 输入 token（含缓存命中的部分）。 */
+  prompt: number;
+  /** 输出 token。 */
+  completion: number;
+  /** 其中命中 prompt 缓存的部分 —— 缓存命中的计价通常远低于新输入。 */
+  cached: number;
+  total: number;
+  /** LLM 往返次数。与 tokens 一起看才有意义：少量大调用和大量小调用的优化方向不同。 */
+  calls: number;
 }
 
 /** The 操作步骤/实际结果/预期结果 bug description produced for failed cases. */
@@ -516,7 +533,11 @@ export interface DiagStep {
  *  pass their own value via `init.timeoutMs`. */
 const DEFAULT_TIMEOUT_MS = 30_000;
 
-export class ApiError extends Error {
+/** 请求失败时抛出的错误。**故意不导出**：它是本模块的内部实现细节，
+ *  外部只需要 `catch (e) { e.message }`（见 lib/errors.ts 的 messageOf）。
+ *  导出它只会诱使别处写 `instanceof ApiError` —— 而"超时/断网/4xx"抛的都是它，
+ *  靠类型区分不出"该不该重试"。 */
+class ApiError extends Error {
   readonly status: number;
   constructor(status: number, message: string) {
     super(message);

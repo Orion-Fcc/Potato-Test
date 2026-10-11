@@ -17,6 +17,8 @@ import os
 
 import pytest
 
+from tests.conftest import bind_temp_db, restore_db
+
 pytest.importorskip("aiosqlite")
 
 
@@ -25,19 +27,29 @@ def _run(tmp_db: str, timed_out: bool) -> dict:
     (so the self-heal wants to fire) and, per the flag, a timeout."""
     from cryptography.fernet import Fernet
 
-    os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///{tmp_db}"
+    _teardown: list = []
+
     os.environ["POTATO_SECRET_KEY"] = Fernet.generate_key().decode()
     os.environ.pop("AUTH_ENABLED", None)
 
     import app.db as db
     import app.engine as engine
     import app.executor as executor
-    from app.config import get_settings
     from app.crypto import encrypt
     from app.models import Credential, Environment, Project, Run, RunResult, TestCase
 
-    get_settings.cache_clear()
-    db._engine = db._Session = None
+    # ★ 用 bind_temp_db 而不是 `os.environ['DATABASE_URL'] = ...` + `_engine = None`。
+    #
+    # 原写法（2026-10-10 之前）是：
+    #     os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///{tmp_db}"
+    #     get_settings.cache_clear(); db._engine = db._Session = None
+    #     await db.init_db()
+    # 它在本项目里**不可靠**：settings 读 .env，环境变量的优先级在 pytest 下
+    # 并不稳定（PROJECT_ISOLATION.md 第七节），于是 init_db() 会连到用户的真库 ——
+    # 真库里因此出现过 9 个测试项目。bind_temp_db 直接构造 engine，
+    # 并且自带"没连真库"的自证。
+    eng, prev = bind_temp_db(tmp_db)
+    _teardown.append((eng, prev))
 
     calls: list[str] = []
 
@@ -107,7 +119,16 @@ def _run(tmp_db: str, timed_out: bool) -> dict:
             )
             return {"final": final, "attempts": row.attempts, "calls": list(calls)}
 
-    return asyncio.run(main())
+    try:
+        return asyncio.run(main())
+    finally:
+        # 还原成会话级的库，并释放这次建的临时 engine —— 不能留着不换回去。
+        for eng, prev in _teardown:
+            restore_db(*prev)
+            try:
+                asyncio.run(eng.dispose())
+            except Exception:  # noqa: BLE001
+                pass
 
 
 # the leading "heal" in both is the pre-run capture for a password role account, not a

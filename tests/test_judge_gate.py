@@ -99,12 +99,36 @@ def _load_real_results() -> list[dict]:
 # 闸门存在的意义就是抓它们。真正要守的是"闸门不许杀那些**确实做对了**的用例"，
 # 而"是否确实做对了"正是 187 这条误判本身无法自证的地方 ——
 # 所以名单要显式维护，每条都写清为什么。
-_KNOWN_FALSE_PASSES: dict[int, str] = {
-    116: "agent 报告 ERR_EMPTY_RESPONSE /『无法访问此网站』，判定器却称"
+# ★ 为什么按**内容片段**找而不是按 id 找（2026-10-09 改）：
+#   原先写死 {116: …, 187: …}，结果真库一重跑就失效 —— `run_result.id` 虽是主键，
+#   但重跑会**删掉旧结果再插入新结果**，SQLite 会把空出来的 id 回收复用。实测：
+#   id=116 现在装的是另一次运行（final_answer 只有 `Clicked button "确认"`，
+#   status=failed），而 .backups/potato-before-junk-cleanup-20261006-151243.db 里的
+#   id=116 才是这里要校验的那条 passed 假通过；id=187 则已完全不存在。
+#   按 id 断言 = 断言"用户真库的第 116 行永远是这个内容"，可真库本来就会变。
+#   那种红是**假红**，只会训练人忽略红灯 —— 和本文件"干净环境该 skip"同一条边界。
+#   按内容片段定位则与 id 无关：样本还在就校验，样本真被覆盖了就 skip 并说明。
+_KNOWN_FALSE_PASS_SIGNATURES: dict[str, str] = {
+    "ERR_EMPTY_RESPONSE": "agent 报告 ERR_EMPTY_RESPONSE /『无法访问此网站』，判定器却称"
         "『截图显示已成功进入…列表展示 9 条数据』—— 与 agent 自述直接矛盾",
-    187: "run 10：agent 明确说『无法完成核对，页面只有加载占位、0 可交互元素』，"
-        "判定器却判 passed 并称『截图显示已到达列表』—— 截图里没有列表",
+    "0 links, 0 interactive": "run 10：agent 明确说『无法完成核对，页面只有加载占位、"
+        "0 可交互元素』，判定器却判 passed 并称『截图显示已到达列表』—— 截图里没有列表",
 }
+
+
+def _find_false_pass_sample(results: list[dict]) -> tuple[dict, str] | None:
+    """真库里还留着的历史误判样本 —— 按内容找，不按 id 找（理由见上面）。
+
+    返回 (row, 为什么算误判)。找不到返回 None：样本已被重跑覆盖，属环境差异。
+    """
+    for frag, why in _KNOWN_FALSE_PASS_SIGNATURES.items():
+        for r in results:
+            blob = f"{r['final_answer'] or ''}\n" + "\n".join(
+                str(x) for x in (r["evidence"] or [])
+            )
+            if frag in blob:
+                return r, why
+    return None
 
 
 def test_no_false_block_on_real_history():
@@ -116,6 +140,10 @@ def test_no_false_block_on_real_history():
     if not results:
         pytest.skip("真库里没有 run_result 记录")
 
+    # 名单按**内容**认，不按 id 认 —— 见 _KNOWN_FALSE_PASS_SIGNATURES 的长注释。
+    # 样本万一真被重跑覆盖了，跳过而不是误伤，否则就是拿假红骗人。
+    sample = _find_false_pass_sample(results)
+
     false_blocks: list[tuple[int, str]] = []
     blocked_ids: list[tuple[int, str]] = []
     for r in results:
@@ -123,7 +151,8 @@ def test_no_false_block_on_real_history():
         if not g.blocked:
             continue
         blocked_ids.append((r["id"], g.gate))
-        if r["status"] == "passed" and r["id"] not in _KNOWN_FALSE_PASSES:
+        is_known = sample is not None and r["id"] == sample[0]["id"]
+        if r["status"] == "passed" and not is_known:
             false_blocks.append((r["id"], g.gate))
 
     assert not false_blocks, (
@@ -134,20 +163,23 @@ def test_no_false_block_on_real_history():
 
 
 def test_known_false_passes_are_actually_blocked():
-    """名单上的历史误判必须仍然被拦 —— 否则闸门退化成了摆设。"""
-    results = {r["id"]: r for r in _load_real_results()}
-    for rid, why in _KNOWN_FALSE_PASSES.items():
-        if rid not in results:
-            continue
-        g = check_gates(
-            results[rid]["final_answer"],
-            results[rid]["steps"],
-            results[rid]["evidence"],
+    """库里的历史误判样本必须仍然被拦 —— 否则闸门退化成了摆设。
+
+    样本按内容定位（不是 id，理由见 _KNOWN_FALSE_PASS_SIGNATURES）。真库里已经
+    找不到这个样本时 skip：那说明它被重跑覆盖了，不是闸门失效。
+    """
+    results = _load_real_results()
+    found = _find_false_pass_sample(results)
+    if found is None:
+        pytest.skip(
+            "真库里已经没有这份历史误判样本（已被重跑覆盖）—— 无样本可校验，非代码缺陷"
         )
-        assert g.blocked, (
-            f"已知的假通过 {rid} 没被拦下（{why}）。"
-            f"闸门一旦对这类样本失效，就回到了「只信模型」的老问题。"
-        )
+    row, why = found
+    g = check_gates(row["final_answer"], row["steps"], row["evidence"])
+    assert g.blocked, (
+        f"已知的假通过（id={row['id']}）没被拦下（{why}）。"
+        f"闸门一旦对这类样本失效，就回到了「只信模型」的老问题。"
+    )
 
 
 def test_real_history_baseline_is_meaningful():

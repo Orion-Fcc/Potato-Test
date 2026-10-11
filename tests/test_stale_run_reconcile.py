@@ -13,9 +13,36 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 from app.engine import hold_limit, reconcile_stale_runs, stall_limit
+from tests.conftest import bind_temp_db, restore_db
 
 CASE_TIMEOUT = 600  # project 6 (VRS)
+
+
+@pytest.fixture(autouse=True)
+def _own_temp_db(tmp_path):
+    """★ 这个文件里的用例会**真的写库**（建 project/run/run_result），必须自带隔离。
+
+    没有它的时候，写入目标是 `app.db` 的全局 engine —— 而那个 globals 可能被
+    别的测试置成了 None，于是 `init_db()` 按 settings 重建 = 连用户的真库。
+    实测后果：真库里多出 3 组 `reconcile-check` / `live-check` / `fk-check`
+    项目（18 条 case、12 个 run、18 条 run_result），而且症状是**别的文件报错**。
+
+    conftest 的 `_reset_db_between_tests` 已经会在每个测试之后兜底，
+    但这里主动给出自己的库更明确：这个文件的用例需要"空库 + 干净起点"，
+    而不是"上一个测试剩下的临时库"。
+    """
+    eng, prev = bind_temp_db(tmp_path / "_tp_reconcile.db")
+    try:
+        yield
+    finally:
+        restore_db(*prev)
+        try:
+            asyncio.run(eng.dispose())
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def test_a_silent_run_is_only_declared_dead_after_a_full_case_budget() -> None:

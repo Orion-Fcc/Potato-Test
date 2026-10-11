@@ -75,3 +75,11 @@ jobs:
       - name: Build (typecheck + bundle)
         working-directory: web
         run: npm run build
+      # 死代码门禁（2026-10-09 加）。
+      # 为什么需要它：`tsc` 的 noUnusedLocals 只抓"文件内没用到的变量"，
+      # **抓不到**"整个文件 / 整个导出没有任何消费点"。实测就漏掉了 4 个纯文本残留、
+      # 1 个没人再引用的依赖（papaparse）、9 个无人使用的导出、6 个只在本模块内用的类型。
+      # 这些不会让构建失败，只会一直躺在仓库里，让下一个读代码的人以为它们是 API 的一部分。
+      - name: Dead code check (knip)
+        working-directory: web
+        run: npx knip --no-progress

@@ -325,7 +325,7 @@ export function RunsPage() {
             column gets a min-width and the whole card scrolls below ~1080px
             instead of squeezing the buttons onto a second line.
           */}
-          <table className="w-full min-w-[1080px] table-fixed text-[13px]">
+          <table className="w-full min-w-[1080px] table-fixed text-[13px] tp-table">
             <colgroup>
               <col className="w-9" />
               <col />
@@ -339,15 +339,15 @@ export function RunsPage() {
             </colgroup>
             <thead className="tp-thead">
               <tr>
-                <th className="px-3 py-2.5" />
-                <th className="px-4 py-2.5">{t("Run")}</th>
-                <th className="whitespace-nowrap px-2 py-2.5">{t("Status")}</th>
-                <th className="whitespace-nowrap px-2 py-2.5">{t("Progress")}</th>
-                <th className="whitespace-nowrap px-2 py-2.5">{t("Result")}</th>
-                <th className="whitespace-nowrap px-2 py-2.5">{t("Cases")}</th>
-                <th className="whitespace-nowrap px-2 py-2.5">{t("Duration")}</th>
-                <th className="whitespace-nowrap px-2 py-2.5">{t("Started")}</th>
-                <th className="px-2 py-2.5" />
+                <th />
+                <th>{t("Run")}</th>
+                <th className="whitespace-nowrap">{t("Status")}</th>
+                <th className="whitespace-nowrap">{t("Progress")}</th>
+                <th className="whitespace-nowrap">{t("Result")}</th>
+                <th className="whitespace-nowrap">{t("Cases")}</th>
+                <th className="whitespace-nowrap">{t("Duration")}</th>
+                <th className="whitespace-nowrap">{t("Started")}</th>
+                <th />
               </tr>
             </thead>
             <tbody>
@@ -356,7 +356,7 @@ export function RunsPage() {
                 return (
                   <Fragment key={bucket}>
                     <tr className="border-b border-[var(--line)] bg-[color-mix(in_oklch,var(--panel2)_58%,transparent)]">
-                      <td colSpan={9} className="px-3 py-2">
+                      <td colSpan={9} className="tp-toggle-row">
                         <button
                           onClick={() => toggleGroup(bucket)}
                           className="flex items-center gap-2 text-[12px] font-semibold text-ink-900 outline-none"
@@ -382,10 +382,10 @@ export function RunsPage() {
                         const pct = r.total_count ? (r.processed_count / r.total_count) * 100 : 0;
                         return (
                           <tr key={r.id} className="tp-row">
-                            <td className="px-3 py-2.5">
+                            <td>
                               <Checkbox checked={sel.has(r.id)} onChange={() => toggle(r.id)} />
                             </td>
-                            <td className="px-4 py-3">
+                            <td>
                               <div className="flex items-start gap-1.5">
                                 <Link
                                   to={`/projects/${pid}/runs/${r.id}`}
@@ -407,14 +407,14 @@ export function RunsPage() {
                                 {r.created_by ? ` · ${r.created_by}` : ""}
                               </div>
                             </td>
-                            <td className="whitespace-nowrap px-2 py-3">
+                            <td className="whitespace-nowrap">
                               {running ? (
                                 <Badge status="running">{t(r.status)}</Badge>
                               ) : (
                                 <Badge status={r.status} />
                               )}
                             </td>
-                            <td className="px-2 py-3">
+                            <td>
                               <div className="flex items-center gap-2">
                                 <span className="inline-block h-1.5 w-[64px] shrink-0 overflow-hidden rounded-full bg-[var(--panel3)]">
                                   <span
@@ -427,15 +427,15 @@ export function RunsPage() {
                                 </span>
                               </div>
                             </td>
-                            <td className="whitespace-nowrap px-2 py-3">
+                            <td className="whitespace-nowrap">
                               <ResultChips run={r} />
                             </td>
-                            <td className="whitespace-nowrap px-2 py-3 tabular-nums text-ink-700">{r.total_count}</td>
-                            <td className="whitespace-nowrap px-2 py-3 tabular-nums text-ink-700">{fmtDuration(r)}</td>
-                            <td className="whitespace-nowrap px-2 py-3 text-ink-500">
+                            <td className="whitespace-nowrap tabular-nums text-ink-700">{r.total_count}</td>
+                            <td className="whitespace-nowrap tabular-nums text-ink-700">{fmtDuration(r)}</td>
+                            <td className="whitespace-nowrap text-ink-500">
                               {relTime(r.started_at ?? r.created_at)}
                             </td>
-                            <td className="px-2 py-3 text-right">
+                            <td className="text-right">
                               <div className="flex items-center justify-end gap-1 whitespace-nowrap">
                                 <Button
                                   size="sm"

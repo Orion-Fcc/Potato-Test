@@ -2,7 +2,7 @@ import { Check, Loader2 } from "lucide-react";
 import { useRef, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { api, type Project } from "../../lib/api";
-import { Button, Checkbox, Field, Input } from "../ui";
+import { Checkbox, Field, Input } from "../ui";
 import { CaptureProgressModal } from "../CaptureProgressModal";
 import { useToast, useErrorToast } from "../toast";
 
@@ -325,5 +325,3 @@ export function Spinner() {
 export function Foot({ children }: { children: ReactNode }) {
   return <div className="flex justify-end gap-2 pt-1">{children}</div>;
 }
-
-export { Button };

@@ -130,48 +130,45 @@ def test_unattributed_narrative_is_not_fileable():
 # ── describe_failure passes it through, including its failure paths ─────────────────
 
 
-class _FakeCompletions:
-    def __init__(self, sink: dict):
-        self._sink = sink
+class _FakeChatResult:
+    """门面返回的形状（app.llm_chat.ChatResult 的最小替身）。"""
 
-    async def create(self, **kwargs):
-        self._sink["messages"] = kwargs["messages"]
-        content = json.dumps(
+    def __init__(self, text: str):
+        self.text = text
+        self.usage = {"prompt": 1, "completion": 1, "cached": 0, "total": 2, "calls": 1}
+        self.model = "stub"
+        self.protocol = "openai"
+        self.raw = None
+
+
+@pytest.fixture
+def fake_llm(monkeypatch):
+    """Stub the LLM plumbing describe_failure reaches for; record what it was sent.
+
+    打桩点是统一门面 `app.failure_narrative.chat`（2026-10-10 起所有调用都走它）。
+    打桩在门面这一层比打在 `openai_client` 更贴近真实：它既能断言"提示词里带了什么"，
+    又不绑定某一家协议 —— 换厂商时这个测试仍然有效。
+    """
+    from app import failure_narrative as fn
+
+    sink: dict = {}
+
+    async def _chat(*, system=None, user=None, content=None, **kwargs):
+        sink["system"] = system
+        sink["content"] = content if content is not None else user
+        sink["kwargs"] = kwargs
+        return _FakeChatResult(json.dumps(
             {
                 "steps": "导入数据->查看列表",
                 "actual": "列表未显示新导入的数据",
                 "expected": "列表可见",
                 "title": "导入后列表查不到数据",
                 "severity": "严重",
-            }
-        )
-        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=content))])
+            },
+            ensure_ascii=False,
+        ))
 
-
-class _FakeOpenAI:
-    def __init__(self, sink: dict):
-        self.chat = SimpleNamespace(completions=_FakeCompletions(sink))
-        self.closed = False
-
-    async def close(self):
-        self.closed = True
-
-
-@pytest.fixture
-def fake_llm(monkeypatch):
-    """Stub the LLM plumbing describe_failure reaches for; record what it was sent."""
-    from app import failure_narrative as fn
-
-    sink: dict = {}
-
-    async def _openai_client():
-        return _FakeOpenAI(sink)
-
-    async def _llm_config():
-        return SimpleNamespace(model="stub")
-
-    monkeypatch.setattr(fn, "openai_client", _openai_client, raising=False)
-    monkeypatch.setattr(fn, "llm_config", _llm_config, raising=False)
+    monkeypatch.setattr(fn, "chat", _chat, raising=False)
     monkeypatch.setattr(fn, "get_settings", lambda: SimpleNamespace(failure_narrative_enabled=True))
     return sink
 
@@ -191,7 +188,10 @@ def test_describe_failure_echoes_attribution_back(fake_llm, verdict):
     )
     assert nar.attribution == verdict
     # And it must have reached the model, not merely been stamped on afterwards.
-    assert prompt_hint(verdict) in fake_llm["messages"][1]["content"]
+    user_content = fake_llm["content"]
+    if isinstance(user_content, list):  # 带截图时是 OpenAI 风格 part 列表
+        user_content = "".join(p.get("text", "") for p in user_content if isinstance(p, dict))
+    assert prompt_hint(verdict) in user_content
 
 
 def test_describe_failure_keeps_attribution_when_the_llm_explodes(monkeypatch):
@@ -202,14 +202,10 @@ def test_describe_failure_keeps_attribution_when_the_llm_explodes(monkeypatch):
     """
     from app import failure_narrative as fn
 
-    async def _boom():
+    async def _boom(*args, **kwargs):
         raise RuntimeError("gateway down")
 
-    async def _cfg():
-        return SimpleNamespace(model="stub")
-
-    monkeypatch.setattr(fn, "openai_client", _boom, raising=False)
-    monkeypatch.setattr(fn, "llm_config", _cfg, raising=False)
+    monkeypatch.setattr(fn, "chat", _boom, raising=False)
     monkeypatch.setattr(fn, "get_settings", lambda: SimpleNamespace(failure_narrative_enabled=True))
 
     nar = asyncio.run(

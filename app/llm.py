@@ -21,7 +21,8 @@ LLM_BASE_URL_KEY = "llm_base_url"
 LLM_API_KEY_KEY = "llm_api_key"  # stored encrypted
 LLM_MODEL_KEY = "llm_model"
 LLM_AGENT_MODEL_KEY = "llm_agent_model"
-_KEYS = (LLM_BASE_URL_KEY, LLM_API_KEY_KEY, LLM_MODEL_KEY, LLM_AGENT_MODEL_KEY)
+LLM_PROVIDER_SETTING_KEY = "llm_provider"
+_KEYS = (LLM_BASE_URL_KEY, LLM_API_KEY_KEY, LLM_MODEL_KEY, LLM_AGENT_MODEL_KEY, LLM_PROVIDER_SETTING_KEY)
 
 
 @dataclass(frozen=True)
@@ -30,6 +31,40 @@ class LLMConfig:
     api_key: str
     model: str  # judge + default agent model
     agent_model: str  # "" => use model
+    provider: str = "auto"  # auto | openai | anthropic | google | ollama (见 llm_protocol)
+
+
+@dataclass(frozen=True)
+class LLMProfile:
+    """One concrete LLM gateway in the pool (a "set of credentials").
+
+    The pool lets an operator configure several gateways (or several keys of the
+    same gateway) and have the runner fall over to the next one when the active
+    key is rate-limited / exhausted — the exact failure that tanked a 226-case
+    full run on 2026-10-09 (quota ceiling hit, 429 across the board).
+
+    provider 决定"用什么协议说话"，默认 auto（自动识别，见 app/llm_protocol.py）：
+    绝大多数网关是 OpenAI 兼容，填 base_url/key/model 就够；Claude/Gemini/Ollama
+    写清 provider 即可，调用方代码不需要为换厂商改一行。
+    """
+
+    name: str
+    base_url: str
+    api_key: str
+    model: str
+    agent_model: str = ""  # "" => use model
+    provider: str = "auto"
+
+    @property
+    def effective_model(self) -> str:
+        return self.agent_model or self.model
+
+
+# AppSetting key holding the pool. A single encrypted blob: a JSON array where each
+# element is {"name","base_url","api_key","model","agent_model","provider"}. The whole
+# blob is stored secret=True so every api_key inside it is encrypted at rest.
+LLM_POOL_KEY = "llm_pool"
+LLM_PROVIDER_KEY = "llm_provider"  # legacy single-profile protocol (admin-overridable)
 
 
 _cached: LLMConfig | None = None
@@ -38,9 +73,16 @@ _TTL_S = 30.0  # ponytail: pull-based refresh; push invalidation across processe
 
 
 def invalidate_llm_cache() -> None:
-    """Drop this process's cache (called after an admin update)."""
+    """Drop this process's cache (called after an admin update).
+
+    协议/能力探测结果一起清掉：换了 base_url 或模型之后，"旧端点支持什么"
+    对新端点毫无参考价值，留着只会让新配置静默继承旧结论。
+    """
     global _cached
     _cached = None
+    from app.llm_protocol import invalidate_capabilities
+
+    invalidate_capabilities()
 
 
 async def llm_config() -> LLMConfig:
@@ -64,9 +106,358 @@ async def llm_config() -> LLMConfig:
         api_key=over.get(LLM_API_KEY_KEY) or s.gateway_api_key,
         model=over.get(LLM_MODEL_KEY) or s.gateway_model,
         agent_model=over.get(LLM_AGENT_MODEL_KEY) or s.agent_model,
+        provider=over.get(LLM_PROVIDER_SETTING_KEY) or s.gateway_provider,
     )
     _cached_at = time.monotonic()
     return _cached
+
+
+async def active_profile() -> LLMProfile:
+    """当前生效配置对应的 profile（legacy 单套：AppSetting 覆盖 > env）。
+
+    给门面 `llm_chat.chat()` 在没传 profile 时使用 —— 也就是"平台默认模型"。
+    """
+    cfg = await llm_config()
+    return LLMProfile(
+        name="legacy",
+        base_url=cfg.base_url,
+        api_key=cfg.api_key,
+        model=cfg.model,
+        agent_model=cfg.agent_model,
+        provider=cfg.provider,
+    )
+
+
+async def load_pool() -> list[LLMProfile]:
+    """The active LLM pool, ordered by priority (first = preferred).
+
+    Source of truth is the encrypted `llm_pool` AppSetting blob. When it is absent
+    or empty, fall back to the legacy single-value keys so a pre-existing install
+    keeps working with one implicit profile. Never raises: a bad blob degrades to
+    the legacy profile rather than breaking every LLM call.
+    """
+    import json
+
+    # Legacy single profile (also the fallback shape).
+    cfg = await llm_config()
+    legacy = LLMProfile(
+        name="legacy",
+        base_url=cfg.base_url,
+        api_key=cfg.api_key,
+        model=cfg.model,
+        agent_model=cfg.agent_model,
+        provider=cfg.provider,
+    )
+    try:
+        from app.db import db_session
+        from app.settings_store import get_setting
+
+        async with db_session() as sess:
+            raw = await get_setting(sess, LLM_POOL_KEY)
+    except Exception:  # DB unavailable (early boot / bare test) -> legacy only
+        raw = None
+    if not raw:
+        return [legacy]
+    try:
+        items = json.loads(raw)
+        profiles: list[LLMProfile] = []
+        for i, it in enumerate(items or []):
+            if not isinstance(it, dict):
+                continue
+            bu = (it.get("base_url") or "").strip()
+            key = (it.get("api_key") or "").strip()
+            model = (it.get("model") or "").strip()
+            if not bu or not model or not key:
+                continue  # an incomplete entry is useless, skip it
+            profiles.append(
+                LLMProfile(
+                    name=(it.get("name") or f"llm{i + 1}").strip(),
+                    base_url=bu,
+                    api_key=key,
+                    model=model,
+                    agent_model=(it.get("agent_model") or "").strip(),
+                    provider=(it.get("provider") or "auto").strip() or "auto",
+                )
+            )
+        if profiles:
+            return profiles
+    except Exception:  # malformed JSON -> don't take the whole platform down
+        pass
+    return [legacy]
+
+
+def _is_rate_limited(exc: BaseException) -> bool:
+    """True when the exception is an HTTP 429 from the gateway (any provider wording).
+
+    Both openai-python's RateLimitError and a raw 404/429 status qualify. We only
+    match the rate-limit class or a response whose status_code == 429; anything else
+    (401 bad key, 404 wrong model) is NOT a quota issue and must NOT trigger a
+    fall-over — those are misconfiguration, and rotating to the next key will just
+    fail the same way.
+    """
+    code = getattr(exc, "status_code", None)
+    if code == 429:
+        return True
+    name = type(exc).__name__
+    return name in ("RateLimitError", "RateLimit")
+
+
+async def probe_profile(profile: LLMProfile) -> bool:
+    """One 1-token completion against a single profile; True iff it succeeds (200).
+
+    This is the liveness check used both by the "which key do I start this case
+    with" pre-flight and by judge's fall-over. Mirrors the real client's proxy and
+    TLS policy exactly, otherwise the probe says OK while the actual call still
+    fails — the most misleading outcome for a probe. A 429 means "this key is
+    exhausted, try the next"; any other error means "this entry is broken, try
+    the next." Either way a failed probe just moves on.
+
+    协议无关：先读（带缓存的）能力结论拿到协议，再按该协议发最小存活请求。
+    能力探测本身不在每个用例上重跑 —— 它被 TTL 缓存，这里的开销仍然是 1 次调用。
+    """
+    from app.llm_protocol import capabilities_for
+
+    s = get_settings()
+    if not profile.base_url or not profile.model:
+        return False
+    caps = await capabilities_for(profile)
+    http = httpx.AsyncClient(
+        verify=s.gateway_verify_ssl,
+        timeout=httpx.Timeout(30.0),
+        trust_env=not s.gateway_ignore_proxy,
+    )
+    client = None
+    try:
+        if caps.protocol == "anthropic":
+            from anthropic import AsyncAnthropic
+
+            client = AsyncAnthropic(
+                api_key=profile.api_key, base_url=profile.base_url or None,
+                http_client=http, max_retries=0,
+            )
+            await client.messages.create(
+                model=profile.effective_model, max_tokens=1,
+                messages=[{"role": "user", "content": "ping"}],
+            )
+            return True
+        if caps.protocol == "google":
+            from google import genai
+            from google.genai import types as gtypes
+
+            gc = genai.Client(
+                api_key=profile.api_key,
+                http_options=gtypes.HttpOptions(httpx_async_client=http, timeout=30000),
+            )
+            try:
+                await gc.aio.models.get(model=profile.effective_model)
+                return True
+            finally:
+                try:
+                    await gc.aio.aclose()
+                except Exception:  # noqa: BLE001
+                    pass
+        from openai import AsyncOpenAI
+
+        base = profile.base_url
+        if caps.protocol == "ollama" and not base.rstrip("/").endswith("/v1"):
+            base = base.rstrip("/") + "/v1"
+        client = AsyncOpenAI(
+            base_url=base,
+            api_key=profile.api_key or "not-needed",
+            http_client=http,
+            max_retries=0,  # no backoff on a probe — fail fast, fall over
+        )
+        await client.chat.completions.create(
+            model=profile.effective_model,
+            messages=[{"role": "user", "content": "ping"}],
+            max_tokens=1,
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001
+        if _is_rate_limited(exc):
+            pass  # exhausted -> not usable, but NOT a misconfig
+        return False
+    finally:
+        if client is not None:
+            await client.close()
+        elif caps.protocol in ("anthropic", "google"):
+            await http.aclose()
+
+
+async def pick_active_profile() -> tuple[LLMProfile, list[LLMProfile]]:
+    """Pre-flight router: return (chosen_profile, full_pool).
+
+    Walks the pool in priority order and picks the FIRST profile whose probe
+    succeeds (200). If every profile fails (all rate-limited / all broken), fall
+    back to the first profile anyway — the case will fail with its own clear
+    error rather than being silently skipped, and at least we don't hide a total
+    outage behind a "no key" message.
+    """
+    pool = await load_pool()
+    if len(pool) == 1:
+        # Single-set install: no fall-over possible, and a pre-flight probe would just
+        # add ~4s to every case for nothing. Use it directly (preserves today's
+        # behaviour byte-for-byte for the common 1-key case).
+        return pool[0], pool
+    for prof in pool:
+        if await probe_profile(prof):
+            return prof, pool
+    # nothing live right now — return the preferred one; callers that want to know
+    # "this is degraded" can compare against pool[0].
+    return pool[0], pool
+
+
+async def client_for(profile: LLMProfile, *, timeout: float = 60.0) -> AsyncOpenAI:
+    """An AsyncOpenAI client bound to one specific pool profile (proxy/TLS mirrored)."""
+    s = get_settings()
+    http = httpx.AsyncClient(
+        verify=s.gateway_verify_ssl, timeout=timeout, trust_env=not s.gateway_ignore_proxy
+    )
+    return AsyncOpenAI(
+        base_url=profile.base_url,
+        api_key=profile.api_key,
+        http_client=http,
+        max_retries=s.llm_max_retries,
+    )
+
+
+def _structured_output_override() -> bool | None:
+    """config.agent_json_schema 三态 → True(强制) / False(永不) / None(auto，靠探测)。"""
+    v = str(getattr(get_settings(), "agent_json_schema", "auto") or "auto").strip().lower()
+    if v in ("true", "1", "yes", "on", "force"):
+        return True
+    if v in ("false", "0", "no", "off", "never"):
+        return False
+    return None
+
+
+async def agent_llm_for(profile: LLMProfile):
+    """A browser-use chat client bound to one pool profile (the per-step agent model).
+
+    按 profile 的协议自动选类（ChatOpenAI / ChatAnthropic / ChatGoogle / ChatOllama），
+    并把"要不要发 response_format=json_schema"交给能力探测 —— 换厂商不用改代码。
+    """
+    return await _build_agent_llm(profile)
+
+
+async def _build_agent_llm(profile: LLMProfile):
+    """一个协议无关的 browser-use 客户端。所有分支都保留同一套代理/TLS 策略。"""
+    from app.llm_protocol import capabilities_for
+
+    s = get_settings()
+    caps = await capabilities_for(profile)
+    http = httpx.AsyncClient(
+        verify=s.gateway_verify_ssl, timeout=120, trust_env=not s.gateway_ignore_proxy
+    )
+    max_tokens = s.agent_max_tokens or s.gateway_max_tokens
+
+    if caps.protocol == "anthropic":
+        from browser_use import ChatAnthropic
+
+        return ChatAnthropic(
+            model=profile.effective_model,
+            api_key=profile.api_key,
+            base_url=profile.base_url or None,
+            http_client=http,
+            # Anthropic 的 max_tokens 必填；代理每一步的输出不长，但 thinking 会吃额度
+            max_tokens=max_tokens,
+            max_retries=s.llm_max_retries,
+        )
+
+    if caps.protocol == "google":
+        from browser_use import ChatGoogle
+        from google.genai import types as gtypes
+
+        return ChatGoogle(
+            model=profile.effective_model,
+            api_key=profile.api_key,
+            max_output_tokens=max_tokens,
+            # Gemini 的原生结构化输出走 responseSchema，兼容层标记由 browser-use 处理
+            supports_structured_output=caps.json_schema,
+            http_options=gtypes.HttpOptions(
+                base_url=(profile.base_url or "").strip().rstrip("/") or None,
+                httpx_async_client=http,
+            ),
+            max_retries=s.llm_max_retries,
+        )
+
+    if caps.protocol == "ollama":
+        from browser_use import ChatOllama
+
+        base = (profile.base_url or "http://127.0.0.1:11434").strip().rstrip("/")
+        if base.endswith("/v1"):
+            base = base[: -len("/v1")]
+        await http.aclose()
+        return ChatOllama(
+            model=profile.effective_model,
+            host=base,
+            timeout=120,
+        )
+
+    from browser_use import ChatOpenAI
+
+    override = _structured_output_override()
+    force_schema = caps.json_schema if override is None else override
+    return ChatOpenAI(
+        model=profile.effective_model,
+        base_url=profile.base_url,
+        api_key=profile.api_key or "not-needed",
+        http_client=http,
+        # complex pages produce long structured output; the 4096 default truncates it
+        # into invalid JSON. raise the ceiling and also put the schema in the system
+        # prompt so the model reliably returns the right shape.
+        max_completion_tokens=max_tokens,
+        # ★ 2026-10-10：`add_schema_to_system_prompt` 只是**额外**把 schema 写进 system
+        # prompt，并不能阻止 browser-use 发 response_format（源码 chat.py:225-256）。
+        # 真正决定发不发的是 dont_force_structured_output —— 由能力探测的结果驱动：
+        # 网关拒 json_schema（400 This response_format type is unavailable now）时关掉，
+        # 否则每一步都 400，用例表现为"只导航、零动作"（run17 TP-CCR-001/005）。
+        add_schema_to_system_prompt=True,
+        dont_force_structured_output=not force_schema,
+        # ★ 429 重试次数 —— 2026-10-06 实测这是当前最大的时间黑洞。
+        #
+        # 现象：一条只跑 3 步、还登录失败的用例，`判定描述` 阶段耗了 10.6s，
+        # 日志里是 **8 次连续 429**（"您已达到免费用户的 API 速率限制"），
+        # 全部来自 OpenAI SDK 的自动重试 + 指数退避。
+        #
+        # browser-use 的 ChatOpenAI 自己把默认值抬到了 **5**（源码注释：
+        # "Increase default retries for automation reliability"），比 SDK 默认的 2 更高。
+        # 对"偶发网络抖动"重试是对的；但对"配额已耗尽"这种**必然失败**的状态，
+        # 重试只是把 1 次失败拖成 5 次退避等待 —— 时间花完了，结果还是失败。
+        #
+        # 所以这里设 0：429 由上层（步骤重试 / 判定降级）按语义处理，
+        # 不让传输层盲目重试。要恢复成SDK 默认就设 2，要更激进设 5（=browser-use 原值）。
+        max_retries=s.llm_max_retries,
+    )
+
+
+# ---------------------------------------------------------------------------
+# 门面转发：调用方只 import app.llm 就够了，不必记住模块分工。
+# 放在文件末尾是为了避免与 app.llm_chat 的延迟导入绕成环。
+# ---------------------------------------------------------------------------
+from app.llm_chat import ChatResult, chat, chat_with_pool, empty_usage, extract_json  # noqa: E402
+from app.llm_protocol import Capabilities, capabilities_for  # noqa: E402
+
+__all__ = [
+    "LLMConfig",
+    "LLMProfile",
+    "ChatResult",
+    "Capabilities",
+    "active_profile",
+    "agent_llm_for",
+    "browser_use_llm",
+    "capabilities_for",
+    "chat",
+    "chat_with_pool",
+    "client_for",
+    "empty_usage",
+    "extract_json",
+    "llm_config",
+    "load_pool",
+    "openai_client",
+    "pick_active_profile",
+    "probe_profile",
+]
 
 
 async def openai_client() -> AsyncOpenAI:
@@ -85,44 +476,8 @@ async def openai_client() -> AsyncOpenAI:
 
 
 async def browser_use_llm():
-    """LLM handed to the browser-use Agent. Imported lazily so `app.engine` stays import-safe."""
-    from browser_use import ChatOpenAI
+    """LLM handed to the browser-use Agent. Imported lazily so `app.engine` stays import-safe.
 
-    s = get_settings()
-    cfg = await llm_config()
-    # browser-use's ChatOpenAI passes http_client straight to AsyncOpenAI; use it to
-    # tolerate the gateway's self-signed cert (verify=False), same as the judge client.
-    http = httpx.AsyncClient(
-        verify=s.gateway_verify_ssl, timeout=120, trust_env=not s.gateway_ignore_proxy
-    )
-    return ChatOpenAI(
-        # browser-use agent can run a different (e.g. local VLM) model than the judge;
-        # falls back to the shared model when no agent model is set.
-        model=cfg.agent_model or cfg.model,
-        base_url=cfg.base_url,
-        api_key=cfg.api_key,
-        http_client=http,
-        # complex pages produce long structured output; the 4096 default truncates it
-        # into invalid JSON. raise the ceiling and also put the schema in the system
-        # prompt so the model reliably returns the right shape.
-        #
-        # agent_max_tokens (when set) caps THIS call only — the agent just picks the next
-        # action, and on a reasoning model every thinking token is wall-clock time per step.
-        # The judge keeps the full gateway_max_tokens because it writes the verdict.
-        max_completion_tokens=s.agent_max_tokens or s.gateway_max_tokens,
-        add_schema_to_system_prompt=True,
-        # ★ 429 重试次数 —— 2026-10-06 实测这是当前最大的时间黑洞。
-        #
-        # 现象：一条只跑 3 步、还登录失败的用例，`判定描述` 阶段耗了 10.6s，
-        # 日志里是 **8 次连续 429**（"您已达到免费用户的 API 速率限制"），
-        # 全部来自 OpenAI SDK 的自动重试 + 指数退避。
-        #
-        # browser-use 的 ChatOpenAI 自己把默认值抬到了 **5**（源码注释：
-        # "Increase default retries for automation reliability"），比 SDK 默认的 2 更高。
-        # 对"偶发网络抖动"重试是对的；但对"配额已耗尽"这种**必然失败**的状态，
-        # 重试只是把 1 次失败拖成 5 次退避等待 —— 时间花完了，结果还是失败。
-        #
-        # 所以这里设 0：429 由上层（步骤重试 / 判定降级）按语义处理，
-        # 不让传输层盲目重试。要恢复成SDK 默认就设 2，要更激进设 5（=browser-use 原值）。
-        max_retries=s.llm_max_retries,
-    )
+    单套配置路径：把当前生效配置包成一个 profile，再走同一套协议分发。
+    """
+    return await _build_agent_llm(await active_profile())

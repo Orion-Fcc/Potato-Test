@@ -383,7 +383,7 @@ async def summarize(
     if not steps:
         return None
     try:
-        from app.llm import llm_config, openai_client
+        from app.llm import chat
 
         trace_lines: list[str] = []
         for d in steps:
@@ -400,24 +400,19 @@ async def summarize(
             return None
         user = f"用例名称：{case_name}\n本次执行过程：\n" + "\n".join(trace_lines[:60])
 
-        cfg = await llm_config()
-        client = await openai_client()
-        try:
-            async def ask() -> Any:
-                resp = await client.chat.completions.create(
-                    model=cfg.model,
-                    messages=[
-                        {"role": "system", "content": _SUMMARY_SYSTEM},
-                        {"role": "user", "content": user},
-                    ],
-                    temperature=0,
-                    response_format={"type": "json_object"},
-                )
-                return json.loads(resp.choices[0].message.content or "{}")
+        async def ask() -> Any:
+            # 协议无关门面：能力支持就发原生 response_format，不支持就走提示词 + 容错解析
+            res = await chat(
+                system=_SUMMARY_SYSTEM,
+                user=user,
+                json_mode=True,
+                temperature=0,
+                timeout=timeout_s,
+            )
+            data = res.json(default=None)
+            return data if isinstance(data, dict) else {}
 
-            raw = await asyncio.wait_for(ask(), timeout=timeout_s)
-        finally:
-            await client.close()
+        raw = await asyncio.wait_for(ask(), timeout=timeout_s)
         return sanitize(raw)
     except asyncio.TimeoutError:
         log.warning("case_memory: 记忆提炼超时（%.0fs），本条跳过", timeout_s)

@@ -32,6 +32,24 @@ class Settings(BaseSettings):
     gateway_ignore_proxy: bool = True
     gateway_max_tokens: int = 16000  # completion cap for the browser agent's structured output
     agent_max_tokens: int = 0  # cap for the browser agent's per-step call; 0 = use gateway_max_tokens
+    # ★ 网关协议：auto / openai / anthropic / google / ollama（也认 deepseek、qwen、kimi 等别名）。
+    #
+    # auto = 由 app/llm_protocol.py 自动识别（先看 base_url 线索，再按 openai → anthropic →
+    # google → ollama 依次发小请求探测）。绝大多数国产网关是 OpenAI 兼容，auto 会命中；
+    # 只有自动识别猜错时才需要显式指定。池里每个条目可单独设 provider，优先于这里。
+    gateway_provider: str = "auto"
+    # ★ 代理每步调用是否强制原生结构化输出（response_format=json_schema）—— 三态，默认 auto。
+    #
+    # auto（推荐）= 由能力探测决定：网关支持 json_schema 就发（更严格），不支持就只把
+    #   schema 写进 system prompt（browser-use 的 dont_force_structured_output=True）。
+    #   2026-10-10 现场：网关拒 json_schema（400 This response_format type is
+    #   unavailable now），而 browser-use 默认每步都发它，于是**每一步**都 400，
+    #   用例只剩导航就判 failed（run17 TP-CCR-001/005）。auto 让这件事自愈。
+    # true / false = 跳过探测，强制开 / 关（排障用）。
+    agent_json_schema: str = "auto"
+    # 协议/能力探测结果的进程内缓存时长（秒）。探测只花一两次 1-token 调用，缓存后
+    # 不再落在每个用例上；厂商能力随时可能变，所以默认 6 小时重探一次。
+    llm_capability_ttl_s: int = 21600
     report_language: str = "Chinese (简体中文)"  # language for agent reasoning + judge reason
 
     # --- optional integrations (both OFF by default — a plain install needs neither) ---

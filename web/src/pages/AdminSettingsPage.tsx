@@ -1,9 +1,27 @@
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { api, type FeishuStatus, type LlmStatus } from "../lib/api";
+import { api, type FeishuStatus, type LlmPoolEntry, type LlmStatus, type LlmTestResult } from "../lib/api";
 import { useAuth } from "../lib/auth";
-import { Button, Card, Checkbox, Field, Input } from "../components/ui";
+import { Button, Card, Checkbox, Field, Input, Select } from "../components/ui";
 import { useToast, useErrorToast } from "../components/toast";
+
+// 协议取值与后端 app/llm_protocol.py 的 normalize_provider 对齐。
+// auto = 自动识别（先看地址线索，再依次小请求探测），绝大多数国产网关是 OpenAI 兼容。
+const PROVIDERS = ["auto", "openai", "anthropic", "google", "ollama"] as const;
+const PROVIDER_LABEL: Record<string, string> = {
+  auto: "Auto-detect",
+  openai: "OpenAI-compatible",
+  anthropic: "Anthropic (Claude)",
+  google: "Google (Gemini)",
+  ollama: "Ollama (local)",
+};
+
+type PoolRow = LlmPoolEntry & { api_key: string };
+
+// 能力徽标只用符号，不引入新的文案键（服务端实测出来的布尔值无歧义）
+function mark(ok: boolean) {
+  return ok ? "✓" : "✕";
+}
 
 export function AdminSettingsPage() {
   const { t } = useTranslation();
@@ -19,11 +37,18 @@ export function AdminSettingsPage() {
   const [llmBaseUrl, setLlmBaseUrl] = useState("");
   const [llmModel, setLlmModel] = useState("");
   const [llmAgentModel, setLlmAgentModel] = useState("");
+  const [llmProvider, setLlmProvider] = useState("auto");
   const [llmApiKey, setLlmApiKey] = useState("");
   const [savingLlm, setSavingLlm] = useState(false);
   const [testingLlm, setTestingLlm] = useState(false);
-  const [llmTest, setLlmTest] = useState<{ ok: boolean; text: string } | null>(null);
+  const [llmTest, setLlmTest] = useState<{ ok: boolean; text: string; result?: LlmTestResult } | null>(
+    null,
+  );
   const [loadError, setLoadError] = useState("");
+
+  // LLM 池（多套网关，按顺序 429 兜底）
+  const [pool, setPool] = useState<PoolRow[] | null>(null);
+  const [savingPool, setSavingPool] = useState(false);
 
   // Feishu
   const [fs, setFs] = useState<FeishuStatus | null>(null);
@@ -46,14 +71,23 @@ export function AdminSettingsPage() {
         setLlmBaseUrl(s.llm.base_url);
         setLlmModel(s.llm.model);
         setLlmAgentModel(s.llm.agent_model);
+        setLlmProvider(s.llm.provider || "auto");
         setFs(s.feishu);
         setAppId(s.feishu.app_id);
         setApiBase(s.feishu.api_base);
         setAutoAnswer(s.feishu.auto_answer_detected);
       })
       .catch((e) => setLoadError(e?.message || String(e)));
+
+  const loadPool = () =>
+    api
+      .getLlmPool()
+      .then((r) => setPool(r.pool.map((p) => ({ ...p, api_key: "" }))))
+      .catch((e) => setLoadError(e?.message || String(e)));
+
   useEffect(() => {
     load();
+    loadPool();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -65,12 +99,14 @@ export function AdminSettingsPage() {
         base_url: llmBaseUrl.trim(),
         model: llmModel.trim(),
         agent_model: llmAgentModel.trim(),
+        provider: llmProvider,
         api_key: llmApiKey.trim() || undefined,
       });
       setLlm(r);
       setLlmBaseUrl(r.base_url);
       setLlmModel(r.model);
       setLlmAgentModel(r.agent_model);
+      setLlmProvider(r.provider || "auto");
       setLlmApiKey("");
       toast("success", t("Saved"));
     } catch (e: any) {
@@ -82,6 +118,35 @@ export function AdminSettingsPage() {
     }
   };
 
+  const savePool = async () => {
+    if (!pool) return;
+    setSavingPool(true);
+    try {
+      const rows = pool
+        .filter((r) => r.base_url.trim() && r.model.trim())
+        .map((r, i) => ({
+          name: (r.name || `llm${i + 1}`).trim(),
+          base_url: r.base_url.trim(),
+          model: r.model.trim(),
+          agent_model: (r.agent_model || "").trim(),
+          provider: r.provider || "auto",
+          // 留空 → 后端保持同位置已存的那把钥匙
+          api_key: r.api_key.trim() || undefined,
+        }));
+      if (!rows.length) {
+        toast("error", t("Fill in at least one entry (base URL + model)."));
+        return;
+      }
+      await api.setLlmSettings({ pool: rows });
+      await loadPool();
+      toast("success", t("Saved"));
+    } catch (e: any) {
+      fail(e);
+    } finally {
+      setSavingPool(false);
+    }
+  };
+
   const testLlm = async () => {
     setTestingLlm(true);
     setLlmTest(null);
@@ -89,7 +154,11 @@ export function AdminSettingsPage() {
       const r = await api.testLlmSettings();
       setLlmTest(
         r.ok
-          ? { ok: true, text: `${t("Connected.")} ${t("Model")}: ${r.reply_model || r.model}` }
+          ? {
+              ok: true,
+              text: `${t("Connected.")} ${t("Model")}: ${r.reply_model || r.model}`,
+              result: r,
+            }
           : { ok: false, text: r.error || t("Connection failed.") },
       );
     } catch (e: any) {
@@ -175,8 +244,26 @@ export function AdminSettingsPage() {
             <span className="font-mono">
               {llm?.api_key_set ? t("set") : t("not set — calls will likely be rejected")}
             </span>
+            <span className="text-ink-500">{t("Protocol")}</span>
+            <span className="font-mono">
+              {llm?.provider || "auto"}
+              {llm?.provider === "auto" ? t(" (detected by probe)") : ""}
+            </span>
           </div>
         </div>
+
+        <Field label={t("Protocol")}>
+          <Select value={llmProvider} onChange={(e) => setLlmProvider(e.target.value)}>
+            {PROVIDERS.map((p) => (
+              <option key={p} value={p}>
+                {t(PROVIDER_LABEL[p])}
+              </option>
+            ))}
+          </Select>
+          <div className="mt-1 text-xs text-ink-500">
+            {t("Auto-detect works for any OpenAI-compatible gateway (DeepSeek, Qwen, GLM, Kimi, vLLM, OpenRouter …) and for Claude / Gemini / Ollama. Only set it explicitly if detection guesses wrong.")}
+          </div>
+        </Field>
 
         <Field label={t("Base URL (OpenAI-compatible)")}>
           <Input value={llmBaseUrl} onChange={(e) => setLlmBaseUrl(e.target.value)}
@@ -214,11 +301,145 @@ export function AdminSettingsPage() {
           >
             {llmTest.ok ? "✓ " : "✕ "}
             <span className="break-all">{llmTest.text}</span>
+            {/* 实测能力：换厂商后"能不能跑"就看这几个值，不用去翻日志找 400。
+                json_schema=false 是正常情况（如 DeepSeek）—— 代理会自动改走
+                system prompt 里的 schema，不需要用户做任何事。 */}
+            {llmTest.result?.protocol && (
+              <div className="mt-2 space-y-1 border-t border-[var(--line)] pt-2 text-[11px]">
+                <div className="font-mono">
+                  {t("Detected protocol")}: {llmTest.result.protocol}
+                  {llmTest.result.probed === false ? t(" (assumed, probe failed)") : ""}
+                </div>
+                <div className="flex flex-wrap gap-x-3 gap-y-0.5 font-mono">
+                  <span>{t("JSON object mode")}: {mark(!!llmTest.result.json_object)}</span>
+                  <span>{t("Strict JSON schema")}: {mark(!!llmTest.result.json_schema)}</span>
+                  <span>{t("Tool calling")}: {mark(!!llmTest.result.tools)}</span>
+                  <span>{t("Image input")}: {mark(!!llmTest.result.vision)}</span>
+                </div>
+                {llmTest.result.json_schema === false && (
+                  <div>
+                    {t("This gateway rejects strict JSON schema — the browser agent automatically keeps the schema in the system prompt instead. Nothing to fix.")}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         )}
         <p className="text-xs text-ink-500">
           {t("The judge model needs vision (screenshots are evidence). Values here override .env; key stored encrypted.")}
         </p>
+      </Card>
+
+      {/* 池：多套网关按顺序兜底。之前只有 API/数据库能改 —— 也就是"换模型要改代码"
+          这件事的最后一块。顺序即优先级，429（配额耗尽）自动换下一套。 */}
+      <Card className="max-w-2xl space-y-3 p-4">
+        <div>
+          <div className="text-sm font-medium text-ink-900">{t("Model pool (fallback order)")}</div>
+          <div className="text-xs text-ink-500">
+            {t("Several gateways tried in order: index 1 is preferred, the next one takes over when a key is rate-limited (429) or misconfigured. Leave an API key blank to keep the stored one.")}
+          </div>
+        </div>
+
+        {pool === null ? (
+          <div className="text-xs text-ink-500">{t("Loading…")}</div>
+        ) : (
+          <div className="space-y-2">
+            {pool.map((row, i) => (
+              <div key={i} className="rounded-lg border border-[var(--line)] p-2.5 space-y-2">
+                <div className="flex items-center gap-2">
+                  <span className="w-6 text-center text-xs font-mono text-ink-500">{i + 1}</span>
+                  <Input
+                    value={row.name}
+                    onChange={(e) =>
+                      setPool(pool.map((r, j) => (j === i ? { ...r, name: e.target.value } : r)))
+                    }
+                    placeholder={t("Name")}
+                    className="w-40"
+                  />
+                  <Select
+                    value={row.provider || "auto"}
+                    onChange={(e) =>
+                      setPool(pool.map((r, j) => (j === i ? { ...r, provider: e.target.value } : r)))
+                    }
+                    className="w-44"
+                  >
+                    {PROVIDERS.map((p) => (
+                      <option key={p} value={p}>
+                        {t(PROVIDER_LABEL[p])}
+                      </option>
+                    ))}
+                  </Select>
+                  <Button
+                    variant="ghost"
+                    onClick={() => setPool(pool.filter((_r, j) => j !== i))}
+                  >
+                    {t("Remove")}
+                  </Button>
+                </div>
+                <Input
+                  value={row.base_url}
+                  onChange={(e) =>
+                    setPool(pool.map((r, j) => (j === i ? { ...r, base_url: e.target.value } : r)))
+                  }
+                  placeholder="https://api.deepseek.com/v1"
+                />
+                <div className="grid grid-cols-3 gap-2">
+                  <Input
+                    value={row.model}
+                    onChange={(e) =>
+                      setPool(pool.map((r, j) => (j === i ? { ...r, model: e.target.value } : r)))
+                    }
+                    placeholder={t("Model")}
+                  />
+                  <Input
+                    value={row.agent_model}
+                    onChange={(e) =>
+                      setPool(pool.map((r, j) => (j === i ? { ...r, agent_model: e.target.value } : r)))
+                    }
+                    placeholder={t("Agent model")}
+                  />
+                  <Input
+                    type="password"
+                    value={row.api_key}
+                    onChange={(e) =>
+                      setPool(pool.map((r, j) => (j === i ? { ...r, api_key: e.target.value } : r)))
+                    }
+                    placeholder={row.api_key_set ? t("•••••••• (kept)") : "sk-…"}
+                  />
+                </div>
+              </div>
+            ))}
+            <div className="flex items-center gap-3">
+              <Button
+                variant="ghost"
+                onClick={() =>
+                  setPool([
+                    ...pool,
+                    {
+                      name: `llm${pool.length + 1}`,
+                      base_url: "",
+                      model: "",
+                      agent_model: "",
+                      provider: "auto",
+                      api_key_set: false,
+                      api_key: "",
+                    },
+                  ])
+                }
+              >
+                {t("Add a gateway")}
+              </Button>
+              <Button onClick={savePool} disabled={savingPool}>
+                {savingPool ? t("Saving…") : t("Save pool")}
+              </Button>
+              <span className="text-xs text-ink-500">
+                {pool.length <= 1
+                  ? t("One entry = no fallback: the single set above is used as-is.")
+                  : t("{{n}} sets configured.", { n: pool.length })}
+              </span>
+            </div>
+          </div>
+        )}
       </Card>
 
       {gitlabEnabled && (

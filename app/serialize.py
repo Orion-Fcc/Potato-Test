@@ -87,6 +87,9 @@ def _llm_status(cfg) -> dict:
         "base_url": cfg.base_url,
         "model": cfg.model,
         "agent_model": cfg.agent_model,
+        # 协议与能力由 /admin/settings/llm/test 实测后给出；这里只回配置里的取值，
+        # 让设置页能显示"当前用的是哪个协议"（auto 表示交给自动识别）。
+        "provider": getattr(cfg, "provider", "auto"),
         "api_key_set": bool(cfg.api_key),
     }
 

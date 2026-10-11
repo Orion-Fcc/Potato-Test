@@ -1848,7 +1848,7 @@ async def execute_case(spec: CaseSpec, on_step=None, should_abort=None) -> Resul
 
             from browser_use import Agent, Browser
 
-            from app.llm import browser_use_llm
+            from app.llm import agent_llm_for, browser_use_llm, pick_active_profile
 
             # ponytail: record_video_dir / traces_dir are the Playwright-context recording
             # knobs. Their exact names on Browser/BrowserProfile drift across browser-use

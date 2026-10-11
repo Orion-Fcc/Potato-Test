@@ -40,7 +40,7 @@ from typing import Any
 
 from app.config import get_settings
 from app.failure_attrib import prompt_hint
-from app.llm import llm_config, openai_client
+from app.llm import chat
 
 # The output contract. Kept as a dataclass so the executor can store it as JSON and the
 # frontend can render three labelled sections without parsing prose.
@@ -236,10 +236,7 @@ async def describe_failure(
     # describe_failure 会带着 RuntimeError 直接抛出，docstring 里写的
     # "Never raises" 变成一句空话，整个用例执行被叙述功能带崩。
     # 失败叙事是挂在失败结果上的附加物，丢它不能反过来毁掉这次执行。
-    client: Any = None
     try:
-        cfg = await llm_config()
-        client = await openai_client()
         content: Any = user
         if screenshot_b64:
             # The screenshot is what makes 【实际结果】 concrete — it is where the error
@@ -254,16 +251,12 @@ async def describe_failure(
             ]
 
         async def ask(c: Any) -> FailureNarrative:
-            resp = await client.chat.completions.create(
-                model=cfg.model,
-                messages=[
-                    {"role": "system", "content": _SYSTEM},
-                    {"role": "user", "content": c},
-                ],
-                temperature=0,
-                response_format={"type": "json_object"},
-            )
-            data = json.loads(resp.choices[0].message.content or "{}")
+            # 协议无关：图片 part 会被门面翻译成 Anthropic 的 image block / Gemini 的
+            # Part.from_bytes；JSON 支持原生 response_format 就发，不支持走提示词 + 容错解析。
+            res = await chat(system=_SYSTEM, user=c, json_mode=True, temperature=0)
+            data = res.json(default=None)
+            if not isinstance(data, dict):
+                data = {}
             return FailureNarrative(
                 steps=_clip(str(data.get("steps", "")), 1200),
                 actual=_clip(str(data.get("actual", "")), 800),
@@ -287,8 +280,3 @@ async def describe_failure(
             "failure narrative 生成失败（不影响用例结果）：%s: %s", type(exc).__name__, exc
         )
         return FailureNarrative(steps="", actual="", expected="", attribution=attribution)
-    finally:
-        # 建客户端就失败时 client 是 None —— 直接 client.close() 会 AttributeError，
-        # 把上面刚吞掉的异常重新抛出来，等于白救。
-        if client is not None:
-            await client.close()

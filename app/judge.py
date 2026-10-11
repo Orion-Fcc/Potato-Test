@@ -5,11 +5,10 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from app.config import get_settings
-from app.llm import llm_config, openai_client
 
 # 2026-10-08 补：下面"无依据的通过 → 翻案"那条分支在用它，但此前**从未定义** ——
 # 也就是说 gate 一旦真的拦下一条假通过，这里就抛 NameError，翻案逻辑从来没生效过。
@@ -172,6 +171,10 @@ class Verdict:
     # 取值见 _ROOT_CAUSES。无法判断时必须填 "unclear"，**不允许猜** ——
     # 猜错的分类比不分类更糟，因为它会让真缺陷被归到"环境问题"里被忽略。
     root_cause: str = ""
+    # 判定器这一次消耗的 token（2026-10-09）：{"prompt","completion","cached","total","calls"}。
+    # 为什么要带出来：判定是**每条用例固定一次**的调用，而它的 system 提示词有近 3000 token；
+    # 不把它算进账里，就会出现"agent 看起来很省、整体却依然很贵"的错觉。
+    usage: dict = field(default_factory=dict)
 
 
 # 根因分类表。key 是内部标识（落库用），值是给判定器看的中文说明。
@@ -332,17 +335,41 @@ async def judge(
         user = f"{user}\n\n[确定性校验发现]\n{_claim_note}"
 
     system = f'{_SYSTEM} Write the "reason" in {s.report_language}.'
-    cfg = await llm_config()
-    client = await openai_client()
+    from app import llm as _llm
+
+    # token 账本（2026-10-09）：判定器自己也要调 LLM，它的消耗必须算进这条用例的总账，
+    # 否则"agent 花的"和"实际花的"对不上，优化就会盯着错误的目标。
+    _usage = {"prompt": 0, "completion": 0, "cached": 0, "total": 0, "calls": 0}
+
+    def _tally(res: _llm.ChatResult) -> None:
+        u = res.usage or {}
+        if not u:
+            return
+        _usage["calls"] += int(u.get("calls", 1) or 1)
+        for k in ("prompt", "completion", "total", "cached"):
+            _usage[k] += int(u.get(k, 0) or 0)
+
+    async def _call(content: Any) -> _llm.ChatResult:
+        # 走统一门面（app/llm_chat.py）：协议由 profile 决定 —— OpenAI 兼容 / Anthropic /
+        # Gemini 都能跑，判定器不再绑定 OpenAI 协议。
+        #
+        # 池按优先级走：429（这套 key 配额耗尽）换下一套，不让 SDK 盲目退避 ——
+        # 就是那个"退避 + 配额天花板"把 run10 拖成 105/115 失败（2026-10-09）。
+        # 非 429 的错误（401 错 key、404 错模型）是配置问题，直接抛，不在池里乱跳。
+        return await _llm.chat_with_pool(
+            system=system,
+            user=content,
+            json_mode=True,
+            temperature=0,
+            timeout=60.0,
+        )
 
     async def ask(content: Any) -> Verdict:
-        resp = await client.chat.completions.create(
-            model=cfg.model,
-            messages=[{"role": "system", "content": system}, {"role": "user", "content": content}],
-            temperature=0,
-            response_format={"type": "json_object"},
-        )
-        data = json.loads(resp.choices[0].message.content or "{}")
+        res = await _call(content)
+        _tally(res)
+        data = res.json(default=None)
+        if not isinstance(data, dict):
+            data = {}
         status = "passed" if data.get("status") == "passed" else "failed"
         reason = str(data.get("reason", ""))[:500]
         # 证据编号校验：让"依据哪几步"可核对，抽到编造的理由时能看出来
@@ -399,9 +426,15 @@ async def judge(
                 evidence=ev,
                 evidence_gap=True,
                 root_cause=_gate.root_cause,
+                usage=dict(_usage),
             )
         return Verdict(
-            status=status, reason=reason, evidence=ev, evidence_gap=gap, root_cause=cause
+            status=status,
+            reason=reason,
+            evidence=ev,
+            evidence_gap=gap,
+            root_cause=cause,
+            usage=dict(_usage),
         )
 
     try:
@@ -419,6 +452,8 @@ async def judge(
             status="failed",
             reason=f"judge_error: {type(exc).__name__}: {exc}"[:500],
             root_cause="environment",
+            # 失败也要带上已经花掉的 token —— 判定出错前那几次调用是真花了钱的，
+            # 记 0 会让"账"漏掉这一截，而判定失败恰恰是最该被看见的一类。
+            usage=dict(_usage),
         )
-    finally:
-        await client.close()
+    # 客户端的创建与关闭现在由门面负责（app/llm_chat.py），这里不再持有连接。

@@ -104,10 +104,7 @@ async def backfill_root_causes(
         return {}
 
     try:
-        from app.llm import llm_config, openai_client
-
-        cfg = await llm_config()
-        client = await openai_client()
+        from app.llm import chat  # noqa: F401 — 只是确认门面可用（同样会读配置）
     except Exception as exc:  # noqa: BLE001
         _log("backfill 跳过：LLM 客户端不可用（%s）", exc)
         return {}
@@ -125,18 +122,18 @@ async def backfill_root_causes(
                 for r in batch
             ]
             try:
-                resp = await client.chat.completions.create(
-                    model=cfg.model,
-                    messages=[
-                        {"role": "system", "content": _SYSTEM},
-                        {"role": "user", "content": json.dumps(
-                            [{"id": p["id"], "case": p["case"], "reason": p["reason"]}
-                             for p in payload], ensure_ascii=False)},
-                    ],
+                res = await chat(
+                    system=_SYSTEM,
+                    user=json.dumps(
+                        [{"id": p["id"], "case": p["case"], "reason": p["reason"]}
+                         for p in payload], ensure_ascii=False),
+                    json_mode=True,
                     temperature=0,
-                    response_format={"type": "json_object"},
+                    timeout=90.0,
                 )
-                data = json.loads(resp.choices[0].message.content or "{}")
+                data = res.json(default=None)
+                if not isinstance(data, dict):
+                    data = {}
             except Exception as exc:  # noqa: BLE001 — 单批失败不拖垮整体
                 _log("backfill 第 %d 批失败：%s", i // batch_size + 1, exc)
                 continue
@@ -162,11 +159,8 @@ async def backfill_root_causes(
                     cause = "unclear"
                 out[int(rid)] = cause
             _log("backfill 进度 %d/%d", min(i + batch_size, len(pending)), len(pending))
-    finally:
-        try:
-            await client.close()
-        except Exception:  # noqa: BLE001
-            pass
+    except Exception as exc:  # noqa: BLE001 — 与 docstring 一致：清单生成不被 LLM 侧异常拖垮
+        _log("backfill 中断（返回已补好的部分）：%s", exc)
     return out
 
 

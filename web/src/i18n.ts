@@ -633,6 +633,34 @@ const zh: Record<string, string> = {
   "set": "已设置",
   "not set — calls will likely be rejected": "未设置 —— 调用大概率会被拒绝",
   "(not set)": "（未设置）",
+  // LLM 协议与能力（2026-10-11）：换厂商不改代码，协议自动识别、能力实测
+  "Protocol": "协议",
+  "Auto-detect": "自动识别",
+  "OpenAI-compatible": "OpenAI 兼容",
+  "Anthropic (Claude)": "Anthropic（Claude）",
+  "Google (Gemini)": "Google（Gemini）",
+  "Ollama (local)": "Ollama（本地）",
+  " (detected by probe)": "（由探测得出）",
+  "Auto-detect works for any OpenAI-compatible gateway (DeepSeek, Qwen, GLM, Kimi, vLLM, OpenRouter …) and for Claude / Gemini / Ollama. Only set it explicitly if detection guesses wrong.":
+    "自动识别适用于所有 OpenAI 兼容网关（DeepSeek、通义、智谱、Kimi、vLLM、OpenRouter…）以及 Claude / Gemini / Ollama。只有识别猜错时才需要手动指定。",
+  "Detected protocol": "识别到的协议",
+  " (assumed, probe failed)": "（探测未通过，按协议默认值）",
+  "JSON object mode": "原生 JSON 模式",
+  "Strict JSON schema": "严格 JSON Schema",
+  "Tool calling": "工具调用",
+  "Image input": "图片输入",
+  "This gateway rejects strict JSON schema — the browser agent automatically keeps the schema in the system prompt instead. Nothing to fix.":
+    "该网关拒绝严格 JSON Schema —— 浏览器代理会自动改为把 schema 写进 system prompt，无需人工处理。",
+  "Model pool (fallback order)": "模型池（按顺序兜底）",
+  "Several gateways tried in order: index 1 is preferred, the next one takes over when a key is rate-limited (429) or misconfigured. Leave an API key blank to keep the stored one.":
+    "按顺序尝试多套网关：第 1 套优先，某套配额耗尽（429）或配置有误时自动切换下一套。API Key 留空表示保持已存的那把。",
+  "Add a gateway": "新增一套网关",
+  "Save pool": "保存模型池",
+  "•••••••• (kept)": "••••••••（保持不变）",
+  "One entry = no fallback: the single set above is used as-is.":
+    "只有一套时不会兜底：直接使用上面配置的那一套。",
+  "{{n}} sets configured.": "已配置 {{n}} 套。",
+  "Fill in at least one entry (base URL + model).": "请至少填写一套（接口地址 + 模型名）。",
   "Global GitLab token": "全局 GitLab 令牌",
   "An api-scope token used for GitLab sync across all projects. Projects then only pick a GitLab project.":
     "用于全部项目 GitLab 同步的 api 权限令牌；配置后各项目只需选择对应的 GitLab 项目。",

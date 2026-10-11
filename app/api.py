@@ -479,19 +479,82 @@ async def set_admin_llm(body: LlmSettingsIn) -> dict:
     "" clears the override (falls back to env). The API key is write-only."""
     from app import llm as llm_mod
     from app.settings_store import set_setting
+    import json
 
     async with db_session() as s:
         for value, key in (
             (body.base_url, llm_mod.LLM_BASE_URL_KEY),
             (body.model, llm_mod.LLM_MODEL_KEY),
             (body.agent_model, llm_mod.LLM_AGENT_MODEL_KEY),
+            (body.provider, llm_mod.LLM_PROVIDER_SETTING_KEY),
         ):
             if value is not None:
                 await set_setting(s, key, value.strip(), secret=False)
         if body.api_key:
             await set_setting(s, llm_mod.LLM_API_KEY_KEY, body.api_key.strip(), secret=True)
+        if body.pool is not None:
+            # Persist the ordered pool as one encrypted blob (api_keys inside are secret).
+            # api_key blank/None means "inherit the key at this same pool position in
+            # the CURRENT pool" (the UI only shows masked keys, so editing a set must
+            # not force the user to retype it). A brand-new position with no key yet
+            # cannot be resolved — that entry is dropped as unusable (safe default).
+            old_pool = await llm_mod.load_pool()  # resolves the existing encrypted keys
+            old_keys = [p.api_key for p in old_pool]
+            old_providers = [p.provider for p in old_pool]
+            resolved: list[dict] = []
+            for i, p in enumerate(body.pool):
+                if not p.base_url or not p.model:
+                    continue
+                key = (p.api_key or "").strip()
+                if not key and i < len(old_keys):
+                    key = old_keys[i]  # inherit from same position
+                if not key:
+                    continue  # new position with no key → cannot build a usable client
+                # provider 同理：留空就继承同位置的旧值（老 UI 没有这个字段，不能因此把
+                # 一个显式配好的 anthropic 条目悄悄改回 auto）
+                provider = (p.provider or "").strip()
+                if not provider and i < len(old_providers):
+                    provider = old_providers[i]
+                resolved.append(
+                    {
+                        "name": (p.name or f"llm{i + 1}").strip(),
+                        "base_url": p.base_url.strip(),
+                        "api_key": key,
+                        "model": p.model.strip(),
+                        "agent_model": (p.agent_model or "").strip(),
+                        "provider": provider or "auto",
+                    }
+                )
+            if resolved:
+                await set_setting(
+                    s, llm_mod.LLM_POOL_KEY,
+                    json.dumps(resolved, ensure_ascii=False), secret=True,
+                )
+            else:
+                await set_setting(s, llm_mod.LLM_POOL_KEY, "", secret=False)
     llm_mod.invalidate_llm_cache()
     return _llm_status(await llm_mod.llm_config())
+
+
+@router.get("/admin/settings/llm/pool", dependencies=[Depends(auth.require_admin)])
+async def get_admin_llm_pool() -> dict:
+    """The ordered LLM pool, WITHOUT secrets. api_key is shown masked so the UI can
+    display how many sets are configured and their base_url/model, not the keys."""
+    from app import llm as llm_mod
+
+    profiles = await llm_mod.load_pool()
+    masked = [
+        {
+            "name": p.name,
+            "base_url": p.base_url,
+            "model": p.model,
+            "agent_model": p.agent_model,
+            "provider": p.provider,
+            "api_key_set": bool(p.api_key),
+        }
+        for p in profiles
+    ]
+    return {"pool": masked, "count": len(masked)}
 
 
 @router.post("/admin/settings/llm/test", dependencies=[Depends(auth.require_admin)])
@@ -511,31 +574,25 @@ async def test_admin_llm() -> dict:
     if not model:
         return {"ok": False, "error": "No model name set — fill in Model first."}
 
+    profile = await llm_mod.active_profile()
     try:
-        from openai import AsyncOpenAI
-
-        import httpx
-
-        s = get_settings()
-        # Mirror the real client exactly (same proxy policy, same TLS policy), otherwise
-        # this probe says "ok" while the assistant/judge still fail — the most misleading
-        # possible outcome for a diagnostic button.
-        client = AsyncOpenAI(
-            api_key=cfg.api_key or "not-needed",
-            base_url=cfg.base_url,
-            timeout=25.0,
-            http_client=httpx.AsyncClient(
-                verify=s.gateway_verify_ssl, trust_env=not s.gateway_ignore_proxy
-            ),
-        )
-        resp = await client.chat.completions.create(
-            model=model, messages=[{"role": "user", "content": "ping"}], max_tokens=1
+        # 协议与能力一起报出来：换厂商之后"能不能跑"就看这几个布尔值，
+        # 不用再去翻日志找 400。force=True 绕过缓存 —— 这个按钮的语义就是"现在实测"。
+        caps = await llm_mod.capabilities_for(profile, force=True)
+        res = await llm_mod.chat(
+            profile, user="ping", max_tokens=16, timeout=25.0
         )
         return {
             "ok": True,
             "model": model,
-            "reply_model": getattr(resp, "model", model),
+            "reply_model": getattr(res.raw, "model", model),
             "api_key_set": bool(cfg.api_key),
+            "protocol": caps.protocol,
+            "json_object": caps.json_object,
+            "json_schema": caps.json_schema,
+            "tools": caps.tools,
+            "vision": caps.vision,
+            "probed": caps.probed,
         }
     except Exception as exc:  # noqa: BLE001 — surfaced verbatim to the operator
         return {"ok": False, "error": f"{type(exc).__name__}: {exc}", "model": model}

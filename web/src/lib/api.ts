@@ -211,6 +211,8 @@ export interface LlmStatus {
   base_url: string;
   model: string;
   agent_model: string;
+  // auto（默认，自动识别）/ openai / anthropic / google / ollama
+  provider: string;
   api_key_set: boolean;
 }
 
@@ -218,7 +220,45 @@ export interface LlmSettingsIn {
   base_url?: string; // "" clears the override (falls back to env)
   model?: string;
   agent_model?: string;
+  provider?: string;
   api_key?: string; // blank keeps the stored key
+  pool?: LlmPoolIn[]; // when present it fully replaces the ordered pool
+}
+
+// 池里的一套网关（多套时按顺序 429 兜底）。api_key 是只写的：留空表示
+// "保持同位置已存的那把钥匙"（界面只显示掩码，不允许被编辑动作意外清空）。
+export interface LlmPoolIn {
+  name?: string;
+  base_url: string;
+  model: string;
+  agent_model?: string;
+  provider?: string;
+  api_key?: string;
+}
+
+export interface LlmPoolEntry {
+  name: string;
+  base_url: string;
+  model: string;
+  agent_model: string;
+  provider: string;
+  api_key_set: boolean;
+}
+
+// 探活结果：不只是"通不通"，还把实测到的协议与能力一起报出来 ——
+// 换厂商之后"到底能不能跑、哪个特性不可用"看这几个布尔值就够了。
+export interface LlmTestResult {
+  ok: boolean;
+  model?: string;
+  reply_model?: string;
+  api_key_set?: boolean;
+  protocol?: string;
+  json_object?: boolean;
+  json_schema?: boolean;
+  tools?: boolean;
+  vision?: boolean;
+  probed?: boolean;
+  error?: string;
 }
 
 export interface FeishuStatus {
@@ -848,11 +888,8 @@ export const api = {
     }),
   setLlmSettings: (b: LlmSettingsIn) =>
     req<LlmStatus>("/admin/settings/llm", { method: "PUT", body: JSON.stringify(b) }),
-  testLlmSettings: () =>
-    req<{ ok: boolean; model?: string; reply_model?: string; api_key_set?: boolean; error?: string }>(
-      "/admin/settings/llm/test",
-      { method: "POST" },
-    ),
+  getLlmPool: () => req<{ pool: LlmPoolEntry[]; count: number }>("/admin/settings/llm/pool"),
+  testLlmSettings: () => req<LlmTestResult>("/admin/settings/llm/test", { method: "POST" }),
   setFeishuSettings: (b: FeishuSettingsIn) =>
     req<FeishuStatus>("/admin/settings/feishu", { method: "PUT", body: JSON.stringify(b) }),
 

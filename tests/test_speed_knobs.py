@@ -29,8 +29,10 @@ def test_llm_retries_are_not_left_at_the_library_default():
 def test_both_llm_clients_receive_the_retry_setting():
     """The judge client AND the agent client. Checking one is how this regresses.
 
-    The two are separate constructors (`openai_client` / `browser_use_llm`) and each
+    The two are separate constructors (`openai_client` / the browser-use builder) and each
     carries its own default, so setting only the obvious one leaves the other at 5.
+    The agent client is protocol-dispatched since 2026-10-10, so it is built inside
+    `_build_agent_llm` — assert there, not on the thin wrapper.
     """
     src = inspect.getsource(executor)  # sanity: the module is the one under test
     assert src  # (executor is imported for its settings plumbing, not its internals)
@@ -40,8 +42,10 @@ def test_both_llm_clients_receive_the_retry_setting():
     judge_src = inspect.getsource(llm.openai_client)
     assert "max_retries" in judge_src, "judge client still uses the SDK default"
 
-    agent_src = inspect.getsource(llm.browser_use_llm)
+    agent_src = inspect.getsource(llm._build_agent_llm)
     assert "max_retries" in agent_src, "agent client still uses browser-use's default of 5"
+    # 换协议的路径也不能漏（否则切到 Claude/Gemini 就重新踩一遍重试黑洞）
+    assert agent_src.count("max_retries") >= 3, "某个协议分支漏掉了 max_retries"
 
 
 def test_browser_use_version_check_is_off():

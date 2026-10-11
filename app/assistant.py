@@ -1855,6 +1855,30 @@ async def assistant_turn(pid: int, message: str, history: list[dict] | None = No
     reply = ""
     calls_made = 0
 
+    # 工具循环用的工具 schema 是 OpenAI 形状（function/tool_calls）。换成非 OpenAI 协议的
+    # 厂商（Claude / Gemini）时，这条路径整条不可用 —— 那就**明确降级**成一次性回答，
+    # 而不是让用户看到一句 [assistant error]（原实现会在协议不符时抛出并落到那个分支）。
+    from app import llm as _llm
+
+    caps = await _llm.capabilities_for(await _llm.active_profile())
+    if caps.protocol != "openai" or not caps.tools:
+        log.info("assistant: 协议 %s 不支持 OpenAI 形状的工具调用，降级为单轮回答", caps.protocol)
+        try:
+            res = await _llm.chat(
+                messages=messages,
+                temperature=0.2,
+                timeout=90.0,
+            )
+            text = (res.text or "").strip()
+        except Exception as exc:  # noqa: BLE001 — 失败也要给用户一句人话
+            log.warning("assistant: 单轮回答失败：%s", exc)
+            return {"reply": f"[assistant error] {exc}", "actions": actions, "awaiting_user": False}
+        return {
+            "reply": _guard_identity(message, text, project_name) or "（无回复）",
+            "actions": actions,
+            "awaiting_user": False,
+        }
+
     for _ in range(MAX_ROUNDS):
         # Budget spent: stop offering tools so the model must write the answer with
         # what it already gathered. The old code simply broke out and returned

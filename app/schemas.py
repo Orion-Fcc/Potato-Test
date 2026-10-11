@@ -298,13 +298,36 @@ class GitlabTokenIn(BaseModel):
     token: str = ""  # "" clears the global token
 
 
+class LlmProfileIn(BaseModel):
+    """One LLM gateway in the pool. Ordered by array position: index 0 = most preferred.
+
+    api_key is write-only (never echoed back) and OPTIONAL: blank/None means "keep the
+    key currently stored at this same pool position" (the UI only ever shows masked
+    keys, so editing an existing set must not force the user to retype it). A brand-new
+    entry with no key yet at that position will fail validation server-side and be
+    dropped, which is the safe behaviour."""
+
+    name: str | None = None
+    base_url: str = Field(min_length=1)
+    api_key: str | None = None  # blank => inherit the key at this pool position
+    model: str = Field(min_length=1)
+    agent_model: str | None = None
+    # auto（默认，自动识别）/ openai / anthropic / google / ollama。
+    # 也认 deepseek、qwen、kimi、zhipu、openrouter 等别名（归一化到 openai 兼容协议）。
+    provider: str | None = None
+
+
 class LlmSettingsIn(BaseModel):
     # Non-secret fields: None => leave unchanged; "" => clear the override (env fallback).
     base_url: str | None = None
     model: str | None = None
     agent_model: str | None = None
+    # 协议：auto / openai / anthropic / google / ollama（见 app/llm_protocol.py）
+    provider: str | None = None
     # Secret: blank/None => keep the stored key; non-empty => replace.
     api_key: str | None = None
+    # The ordered pool. When provided, it fully replaces the pool (None => keep current).
+    pool: list[LlmProfileIn] | None = None
 
 
 class FeishuSettingsIn(BaseModel):

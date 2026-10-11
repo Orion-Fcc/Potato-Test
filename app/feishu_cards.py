@@ -15,14 +15,30 @@ def _run_web_url(project_id: int, run_id: int) -> str | None:
 
 
 def confirm_run_card(
-    project_id: int, project_name: str, case_count: int, rerun_of: int | None
+    project_id: int,
+    project_name: str,
+    case_count: int,
+    rerun_of: int | None,
+    only: str | None = None,
+    case_ids: list[int] | None = None,
 ) -> dict:
-    """A [确认运行][取消] card sent before actually launching a run."""
-    what = (
-        f"重跑 run #{rerun_of}"
-        if rerun_of
-        else f"运行 **{project_name}** 的 {case_count} 个启用用例"
-    )
+    """A [确认运行][取消] card sent before actually launching a run.
+
+    ``only`` mirrors the web UI's rerun filter ("failing"/"error") so a 「重跑失败」
+    from chat produces the same case set as a rerun from the run report. The card
+    must say so: 「重跑 run #12」 alone would hide that most of the run is being
+    skipped, and the operator would read a partial pass rate as a full one.
+
+    ``case_ids`` is the resolved set the card is asking about. It rides in the button
+    value so the button path launches exactly what was confirmed instead of
+    re-deriving it (the two must not drift apart).
+    """
+    if rerun_of and only:
+        what = f"只重跑 run #{rerun_of} 里**未通过**的 {case_count} 个用例"
+    elif rerun_of:
+        what = f"重跑 run #{rerun_of}"
+    else:
+        what = f"运行 **{project_name}** 的 {case_count} 个启用用例"
     return {
         "config": {"wide_screen_mode": True},
         "header": {
@@ -42,6 +58,8 @@ def confirm_run_card(
                             "act": "run_confirm",
                             "project_id": project_id,
                             "rerun_of": rerun_of,
+                            "only": only,
+                            "case_ids": case_ids or [],
                         },
                     },
                     {
@@ -181,8 +199,10 @@ def help_card() -> dict:
                     "tag": "lark_md",
                     "content": (
                         "**@机器人 状态** —— 立刻回一张进度卡（在跑的显示进度，没在跑的显示最近一次结果）\n"
-                        "**@机器人 跑** —— 弹确认卡片，点了才真的跑\n"
+                        "**@机器人 跑** —— 弹确认卡片，回了「确认」才真的跑（回「取消」就不跑）\n"
                         "**@机器人 重跑** —— 重跑最近一次\n"
+                        "**@机器人 重跑失败** —— 只重跑最近一次里**未通过**的那些\n"
+                        "**@机器人 改判 <结果号> 通过|失败 [理由]** —— 人工改判一条结论\n"
                         "**@机器人 绑定 <项目名>** —— 把本群和项目绑起来\n"
                         "**@机器人 帮助** —— 这条说明"
                     ),

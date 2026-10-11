@@ -150,13 +150,26 @@ async def _exec_tool(session, project_id: int | None, name: str, args: dict) -> 
 
 async def agent_reply(session, text: str, context: str, project_id: int | None) -> str:
     """Run a bounded tool-calling loop and return the reply text."""
-    client = await openai_client()
-    model = (await llm_config()).model
+    from app import llm as _llm
+
     ctx = f"【最近群聊】\n{context}\n\n" if context else ""
     proj = f"当前项目 id={project_id}。" if project_id is not None else "尚未确定所属项目。"
+    system = f"{_SYSTEM} {proj}"
+    user = f"{ctx}{text}"
+
+    # 工具 schema 是 OpenAI 形状；协议不符（Claude / Gemini）时明确降级为单轮回答，
+    # 而不是把 "tools 不被接受" 的错误当成机器人故障。
+    caps = await _llm.capabilities_for(await _llm.active_profile())
+    if caps.protocol != "openai" or not caps.tools:
+        log.info("feishu agent: 协议 %s 不支持工具调用，降级为单轮回答", caps.protocol)
+        res = await _llm.chat(system=system, user=user, temperature=0.2, timeout=90.0)
+        return (res.text or "").strip() or "(没有生成回答)"
+
+    client = await openai_client()
+    model = (await llm_config()).model
     messages: list = [
-        {"role": "system", "content": f"{_SYSTEM} {proj}"},
-        {"role": "user", "content": f"{ctx}{text}"},
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
     ]
     for _ in range(4):
         try:

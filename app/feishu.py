@@ -27,8 +27,8 @@ from sqlalchemy.exc import IntegrityError
 
 from app.config import get_settings
 from app.feishu_cards import confirm_run_card, help_card
-from app.llm import llm_config, openai_client
-from app.models import FeedbackItem, Issue, Project, Run, TestCase
+from app.llm import chat
+from app.models import FeedbackItem, Issue, Project, Run, RunResult, TestCase
 from app.settings_store import get_setting, set_setting
 
 log = logging.getLogger("potato-test.feishu")
@@ -102,19 +102,143 @@ def _parse_bind_command(text: str) -> str | None:
     return name or None
 
 
-# `@bot 跑 [项目]` / `@bot 重跑` — trigger a run (a confirm card is sent first).
+# `@bot 跑 [项目]` / `@bot 重跑` / `@bot 重跑失败` — confirm card first; poller
+# cannot receive button clicks, so a later `@bot 确认` / `@bot 取消` is the fallback.
+_RERUN_FAILING_RE = re.compile(
+    r"^\s*(?:重跑失败|只重跑失败|重跑未通过|rerun\s+fail(?:ing)?)\b",
+    re.IGNORECASE,
+)
 _RERUN_RE = re.compile(r"^\s*(?:重跑|再跑一?次?|rerun)", re.IGNORECASE)
 _RUN_RE = re.compile(r"^\s*(?:跑|运行|run)\s*(.*)$", re.IGNORECASE)
+_CONFIRM_RE = re.compile(r"^\s*(?:确认(?:运行)?|开跑|走起|confirm)\s*$", re.IGNORECASE)
+_CANCEL_RE = re.compile(r"^\s*(?:取消|算了|不要了?|cancel)\s*$", re.IGNORECASE)
+_OVERRIDE_RE = re.compile(
+    r"^\s*(?:改判|override)\s+#?(\d+)\s+(通过|失败|passed|failed|pass|fail)(?:\s+(.+))?\s*$",
+    re.IGNORECASE,
+)
+
+# One pending confirm per chat. Poller never sees card.action.trigger, so the
+# confirm card is a visual prompt; the real close of the loop is this dict +
+# a later 确认/取消 message. TTL stops a stale 「确认」 from launching yesterday's run.
+_PENDING: dict[str, dict] = {}
+_PENDING_TTL_SEC = 600
 
 
 def _parse_run_command(text: str) -> tuple[str, str] | None:
-    """('rerun', '') or ('run', target) or None. Confirmation card is the safety net."""
+    """('rerun_failing', '') / ('rerun', '') / ('run', target) or None.
+
+    「重跑失败」must be matched before 「重跑」, otherwise the generic prefix wins.
+    """
+    if _RERUN_FAILING_RE.match(text):
+        return ("rerun_failing", "")
     if _RERUN_RE.match(text):
         return ("rerun", "")
     m = _RUN_RE.match(text)
     if m:
         return ("run", (m.group(1) or "").strip())
     return None
+
+
+def _is_confirm_command(text: str) -> bool:
+    return bool(_CONFIRM_RE.match((text or "").strip()))
+
+
+def _is_cancel_command(text: str) -> bool:
+    return bool(_CANCEL_RE.match((text or "").strip()))
+
+
+def _parse_override_command(text: str) -> dict | None:
+    """{'result_id', 'status', 'reason'} or None. status is passed|failed."""
+    m = _OVERRIDE_RE.match((text or "").strip())
+    if not m:
+        return None
+    raw = m.group(2).lower()
+    status = "passed" if raw in ("通过", "passed", "pass") else "failed"
+    reason = (m.group(3) or "").strip()
+    return {"result_id": int(m.group(1)), "status": status, "reason": reason}
+
+
+def _set_pending(chat_id: str, payload: dict) -> None:
+    _PENDING[chat_id] = {**payload, "ts": time.time()}
+
+
+def _peek_pending(chat_id: str) -> dict | None:
+    p = _PENDING.get(chat_id)
+    if p is None:
+        return None
+    if time.time() - float(p.get("ts") or 0) > _PENDING_TTL_SEC:
+        _PENDING.pop(chat_id, None)
+        return None
+    return p
+
+
+def _pop_pending(chat_id: str) -> dict | None:
+    p = _PENDING.pop(chat_id, None)
+    if p is None:
+        return None
+    if time.time() - float(p.get("ts") or 0) > _PENDING_TTL_SEC:
+        return None
+    return p
+
+
+def _rerun_case_ids(src_case_ids: list[int], verdict_by_case: dict[int, str], only: str | None) -> list[int]:
+    """Same keep-set as api._RERUN_SETS; missing verdict counts as error."""
+    if only is None:
+        return list(src_case_ids)
+    if only == "failing":
+        keep = lambda st: st != "passed"  # noqa: E731
+    elif only == "error":
+        keep = lambda st: st == "error"  # noqa: E731
+    else:
+        return list(src_case_ids)
+    return [c for c in src_case_ids if keep(verdict_by_case.get(c, "error"))]
+
+
+async def _apply_override(session, result_id: int, status: str, reason: str, by: str) -> str:
+    """改判一条结果的结论，返回给群里看的中文回执。
+
+    与 ``api.override_result`` 写的是同一批列（``verdict_override`` / ``original_status``
+    等），不是另一套 —— 否则同一条结果"界面改的"和"群里改的"在报告里长得不一样。
+    ``original_status`` 只在**首次**改判时记录，连改两次不会把 AI 原判冲掉；
+    这一点和 API 保持一致。
+    """
+    row = await session.get(RunResult, result_id)
+    if row is None:
+        return f"没找到结果 #{result_id}，无法改判。"
+    if row.verdict_override is None:
+        row.original_status = row.status
+    row.status = status
+    row.verdict_override = status
+    row.override_reason = (reason or "").strip() or None
+    row.override_by = by
+    row.override_at = datetime.now(UTC).isoformat()
+    await session.flush()
+    label = "通过" if status == "passed" else "失败"
+    tail = f"（理由：{reason}）" if (reason or "").strip() else ""
+    return f"已把结果 #{result_id} 改判为 **{label}**{tail} ✅"
+
+
+async def _rerun_failing_ids(session, run_id: int) -> tuple[list[int], list[int]]:
+    """(keep, all) case ids for 「重跑失败」 on ``run_id``.
+
+    Query is bounded by the run's own case_ids — a run holds a snapshot of its case
+    list, so a case deleted or disabled after the run must not reappear here.
+    A case with no RunResult row counts as "not passed" (see ``_rerun_case_ids``),
+    which is the same default the web rerun uses.
+    """
+    run = await session.get(Run, run_id)
+    if run is None:
+        return [], []
+    all_ids = [int(c) for c in (run.case_ids or [])]
+    if not all_ids:
+        return [], []
+    rows = (
+        await session.execute(
+            select(RunResult.case_id, RunResult.status).where(RunResult.run_id == run_id)
+        )
+    ).all()
+    verdicts = {int(cid): str(st or "error") for cid, st in rows}
+    return _rerun_case_ids(all_ids, verdicts, "failing"), all_ids
 
 
 # `@bot 状态` / `@bot 进度` / `@bot 到哪了` — answer with a status card, no LLM.
@@ -680,16 +804,14 @@ async def _classify(
         )
         project_hint = f"项目清单:\n{project_lines}"
     ctx = f"\n\n【群里最近对话,供理解上下文,最后一条即本条】\n{context}" if context else ""
-    client = await openai_client()
-    resp = await client.chat.completions.create(
-        model=(await llm_config()).model,
+    # 协议无关门面（app/llm_chat.py）：换厂商不用改这里
+    res = await chat(
+        system=_SYSTEM_PROMPT,
+        user=f"{project_hint}{ctx}\n\n【需要判断的消息】\n{text}",
         temperature=0.2,
-        messages=[
-            {"role": "system", "content": _SYSTEM_PROMPT},
-            {"role": "user", "content": f"{project_hint}{ctx}\n\n【需要判断的消息】\n{text}"},
-        ],
+        timeout=60.0,
     )
-    return _parse_json(resp.choices[0].message.content or "")
+    return _parse_json(res.text or "")
 
 
 def _feedback_items(result: dict, text: str) -> list[dict]:
@@ -990,13 +1112,19 @@ async def handle_message_event(payload: dict) -> None:
             # they change things.
             want_help = _is_help_query(evt["text"])
             want_status = _is_status_query(evt["text"])
+            want_confirm = _is_confirm_command(evt["text"])
+            want_cancel = _is_cancel_command(evt["text"])
+            pending = _peek_pending(evt["chat_id"])
 
             # Ambient cost gate: a non-@ message must look like a problem before we
             # spend LLM on it. Flip FEISHU_AMBIENT_REQUIRE_KEYWORD=false to never drop.
+            # Confirm/cancel without @ are allowed only while this chat has a pending
+            # action — that is the poller close-the-loop path (card buttons never fire).
             if (
                 not evt["mentioned"]
                 and not want_help
                 and not want_status
+                and not (pending and (want_confirm or want_cancel))
                 and get_settings().feishu_ambient_require_keyword
                 and not _looks_like_problem(evt["text"])
             ):
@@ -1008,13 +1136,28 @@ async def handle_message_event(payload: dict) -> None:
             projects = [{"id": p.id, "name": p.name, "base_url": p.base_url} for p in rows]
 
             # `@bot 绑定 <项目>` — bind this chat to a project (powers routing + push).
+            # Every selector below is `mentioned`-gated, so bind_name is hoisted to one
+            # variable and the bind branch reuses it instead of re-evaluating the
+            # condition in six places.
             bind_name = _parse_bind_command(evt["text"]) if evt["mentioned"] else None
+            # 改判 is parsed before run_cmd: both 「@bot 改判 12 通过」 and a run request are
+            # `mentioned`-gated, and 改判 must win (it is never a run target).
+            override_cmd = (
+                _parse_override_command(evt["text"])
+                if (evt["mentioned"] and not want_help and not want_status)
+                else None
+            )
             # Help / status are matched BEFORE the run command: 「运行状态」starts with 运行,
             # so `_parse_run_command` would otherwise claim it and reply with a 确认运行
             # card — the opposite of what was asked (see _STATUS_RE).
+            #
+            # read_only = this message is a query, a card answer, or a 改判, so it must NOT
+            # be read as a run request. One exclusion list applied to every run selector
+            # keeps "改判 12 通过" from ever becoming a run target.
+            read_only = want_help or want_status or override_cmd is not None
             run_cmd = (
                 _parse_run_command(evt["text"])
-                if (evt["mentioned"] and not want_help and not want_status)
+                if (evt["mentioned"] and not read_only and not want_confirm and not want_cancel)
                 else None
             )
             if bind_name is not None:
@@ -1035,6 +1178,34 @@ async def handle_message_event(payload: dict) -> None:
                 # On-demand status — the whole point of turning the timed heartbeat off.
                 # Answers with a card built from live DB rows, so it can never be stale.
                 reply_card_payload, reply = await _status_reply(s, bound)
+            elif want_confirm and pending is not None:
+                # Close the loop the confirm card opened. The poller never receives
+                # card.action.trigger, so the card's buttons are a visual prompt only —
+                # this 「确认」 is the path that actually launches. Popping (not peeking)
+                # makes it one-shot: a second 「确认」 cannot start a second run.
+                _pop_pending(evt["chat_id"])
+                case_ids = [int(c) for c in (pending.get("case_ids") or [])]
+                run_id = await _start_run(
+                    int(pending["project_id"]), pending.get("rerun_of"), case_ids=case_ids
+                )
+                if run_id is None:
+                    reply = "没有可运行的启用用例（可能都已完成或被禁用）。"
+                else:
+                    reply = f"已开始运行 run #{run_id}，跑完我在这里播报结果。"
+            elif want_cancel and pending is not None:
+                _pop_pending(evt["chat_id"])
+                reply = "已取消。"
+            elif override_cmd is not None:
+                # 改判 shares api.override_result's columns, so a verdict corrected from
+                # chat shows up in the report exactly like one corrected in the UI.
+                await s.flush()  # settle any staged row before the helper re-reads it
+                reply = await _apply_override(
+                    s,
+                    override_cmd["result_id"],
+                    override_cmd["status"],
+                    override_cmd["reason"],
+                    by=f"feishu:{evt.get('sender_id') or 'unknown'}",
+                )
             elif run_cmd is not None:
                 # Resolve target project, then send a CONFIRM card (never run directly).
                 kind, target = run_cmd
@@ -1045,7 +1216,9 @@ async def handle_message_event(payload: dict) -> None:
                     reply = "没识别到项目。先在群里「@机器人 绑定 <项目>」,或写明项目名(如「跑 Demo-test」)。"
                 else:
                     rerun_of = None
-                    if kind == "rerun":
+                    only = None
+                    case_ids: list[int] = []
+                    if kind in ("rerun", "rerun_failing"):
                         last = (
                             (
                                 await s.execute(
@@ -1062,18 +1235,46 @@ async def handle_message_event(payload: dict) -> None:
                             reply = f"「{proj.name}」还没有可重跑的运行。"
                         else:
                             rerun_of = last.id
+                            if kind == "rerun_failing":
+                                # Resolve the keep-set now, while the run is fresh — not at
+                                # confirm time. The operator should confirm the number they
+                                # were shown; recomputing later could silently change it.
+                                only = "failing"
+                                case_ids, all_ids = await _rerun_failing_ids(s, last.id)
+                                if not case_ids:
+                                    reply = (
+                                        f"run #{last.id} 里没有未通过的用例"
+                                        f"（共 {len(all_ids)} 条），无需重跑。"
+                                    )
                     if not reply:
-                        count = (
-                            await s.execute(
-                                select(func.count())
-                                .select_from(TestCase)
-                                .where(
-                                    TestCase.project_id == proj.id,
-                                    TestCase.enabled == True,  # noqa: E712
+                        if case_ids:
+                            count = len(case_ids)
+                        else:
+                            count = (
+                                await s.execute(
+                                    select(func.count())
+                                    .select_from(TestCase)
+                                    .where(
+                                        TestCase.project_id == proj.id,
+                                        TestCase.enabled == True,  # noqa: E712
+                                    )
                                 )
-                            )
-                        ).scalar_one()
-                        reply_card_payload = confirm_run_card(proj.id, proj.name, count, rerun_of)
+                            ).scalar_one()
+                        # Remember what this card would start, so a later 「确认」 can run it
+                        # without re-deriving anything (see the want_confirm branch above).
+                        _set_pending(
+                            evt["chat_id"],
+                            {
+                                "project_id": proj.id,
+                                "rerun_of": rerun_of,
+                                "only": only,
+                                "case_ids": case_ids,
+                                "message_id": evt["message_id"],
+                            },
+                        )
+                        reply_card_payload = confirm_run_card(
+                            proj.id, proj.name, count, rerun_of, only, case_ids
+                        )
             else:
                 context = await _recent_context(client, evt["chat_id"])
                 try:
@@ -1207,24 +1408,40 @@ async def handle_card_action(event: dict) -> None:
         await client.send_text(chat_id, "已取消运行。")
         return
 
-    run_id = await _start_run(int(value["project_id"]), value.get("rerun_of"))
+    run_id = await _start_run(
+        int(value["project_id"]),
+        value.get("rerun_of"),
+        case_ids=[int(c) for c in (value.get("case_ids") or [])],
+    )
     if run_id is None:
         await client.send_text(chat_id, "没有可运行的启用用例。")
         return
     await client.send_text(chat_id, f"已开始运行 run #{run_id},跑完我在这里播报结果。")
 
 
-async def _start_run(project_id: int, rerun_of: int | None) -> int | None:
-    """Create a Run (all enabled cases, or the rerun's case set) and launch it."""
+async def _start_run(
+    project_id: int, rerun_of: int | None, case_ids: list[int] | None = None
+) -> int | None:
+    """Create a Run and launch it.
+
+    ``case_ids`` (already resolved, e.g. 「重跑失败」's keep-set) wins over ``rerun_of``:
+    the caller computed it from the run it showed the operator, and re-deriving it here
+    would let the confirmed set differ from the confirmed card. ``rerun_of`` stays for
+    the card-button path, which only carries a run id.
+    """
     from app.db import db_session
 
     async with db_session() as s:
-        if rerun_of is not None:
+        explicit = [int(c) for c in (case_ids or [])]
+        if explicit:
+            ids = explicit
+            name = f"重跑 #{rerun_of}" if rerun_of else "飞书触发运行"
+        elif rerun_of is not None:
             src = await s.get(Run, rerun_of)
-            case_ids = list(src.case_ids or []) if src else []
+            ids = list(src.case_ids or []) if src else []
             name = f"重跑 #{rerun_of}"
         else:
-            case_ids = [
+            ids = [
                 c.id
                 for c in (
                     await s.execute(
@@ -1238,15 +1455,15 @@ async def _start_run(project_id: int, rerun_of: int | None) -> int | None:
                 .all()
             ]
             name = "飞书触发运行"
-        if not case_ids:
+        if not ids:
             return None
         proj = await s.get(Project, project_id)
         run = Run(
             project_id=project_id,
             name=name,
-            case_ids=case_ids,
+            case_ids=ids,
             concurrency=(proj.run_concurrency or get_settings().run_concurrency) if proj else get_settings().run_concurrency,
-            total_count=len(case_ids),
+            total_count=len(ids),
             trigger="feishu",
         )
         s.add(run)

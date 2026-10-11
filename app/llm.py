@@ -32,6 +32,18 @@ LLM_ROLES_KEY = "llm_roles"  # encrypted blob: {role: {model, base_url, api_key,
 # 两级判定开关（"1" = 开）。默认关：它会在失败/证据可疑时多花一次强模型调用，
 # 得由人显式打开并选好复核模型 —— 悄悄打开等于悄悄加钱。
 LLM_JUDGE_TWO_TIER_KEY = "llm_judge_two_tier"
+# 平台级「高端模型」（2026-10-11）。encrypted blob：
+# {enabled, model, base_url, api_key, provider, roles: [...]}
+#
+# 为什么要在"按用途分模型"之外再加一层：那张卡要求逐行手填六个用途的网关/模型/钥匙，
+# 而用户的真实意图通常只是一句话 ——"要不要为质量多花点钱"。所以把这件事收敛成一个
+# 显式选择：**开或不开一支高端模型，开了再勾它管哪几个环节**。不开就全部回落到便宜的
+# 池第 1 套（等于一分钱不多花），开了才把贵的那支用在质量敏感的环节上。
+#
+# 与"按用途分模型"的关系是**优先级**而不是替代：那张卡仍然保留，且更具体（单独指名
+# 某个用途）⇒ 它盖过这一层。这一层负责的是"一次性把高级模型铺到几个环节"。
+LLM_PREMIUM_KEY = "llm_premium"
+
 ROLES: tuple[str, ...] = (
     "agent",
     "judge",
@@ -40,6 +52,25 @@ ROLES: tuple[str, ...] = (
     "specgen",
     "assistant",
 )
+
+# 高端模型可以挂到哪些用途上。
+#
+# agent 也在列 —— 但界面默认不勾、并且勾上要警告：它占全部 token 的约 95%，
+# 把执行步换贵等于把省钱的**主旋钮**关掉。允许它是尊重"我就想要最高质量"，
+# 默认不勾是不让人一开总开关就悄悄多花一大笔。
+PREMIUM_ROLES: tuple[str, ...] = (
+    "judge_escalate",
+    "judge",
+    "specgen",
+    "narrative",
+    "assistant",
+    "agent",
+)
+
+# 一开开关就默认勾上的用途：都是"量小、质量关键"的那几个（每条用例零到一次，
+# 输入几 k）。judge 不在里面 —— 判定的初判刻意留给便宜模型，那正是两级判定的意义。
+PREMIUM_DEFAULT_ROLES: tuple[str, ...] = ("judge_escalate", "specgen", "narrative")
+
 
 
 @dataclass(frozen=True)
@@ -58,6 +89,39 @@ class RoleOverride:
     @property
     def empty(self) -> bool:
         return not (self.model or self.base_url or self.api_key or self.provider)
+
+
+@dataclass(frozen=True)
+class PremiumModel:
+    """平台级的「高端模型」槽位（贵、聪明，可选）。
+
+    语义刻意做得很窄，因为它的价值就在"一句话说清"：**开或不开**，开了管哪几个环节。
+    所以只需要一份连接信息 + 一份用途名单，而不是每个用途各存一套。
+
+    不生效的三种情形都必须老老实实回落，不能"看起来配了其实没用"：
+      · enabled 关；
+      · 没填 model（只填了网关/钥匙等于说不出要调什么模型）；
+      · roles 空（开了却没说管哪几件事）。
+    """
+
+    enabled: bool = False
+    model: str = ""
+    base_url: str = ""
+    api_key: str = ""
+    provider: str = ""
+    roles: tuple[str, ...] = ()
+
+    @property
+    def usable(self) -> bool:
+        """能不能真的派上用场（三个条件缺一不可）。"""
+        return bool(self.enabled and self.model and self.roles)
+
+    def covers(self, role: str) -> bool:
+        return self.usable and role in self.roles
+
+    @property
+    def empty(self) -> bool:
+        return not (self.enabled or self.model or self.base_url or self.api_key or self.roles)
 
 
 @dataclass(frozen=True)
@@ -108,6 +172,8 @@ _roles_cached: dict[str, "RoleOverride"] | None = None
 _roles_cached_at: float = 0.0
 _two_tier_cached: bool | None = None
 _two_tier_cached_at: float = 0.0
+_premium_cached: "PremiumModel | None" = None
+_premium_cached_at: float = 0.0
 _TTL_S = 30.0  # ponytail: pull-based refresh; push invalidation across processes if 30s lag hurts
 
 
@@ -117,10 +183,11 @@ def invalidate_llm_cache() -> None:
     协议/能力探测结果一起清掉：换了 base_url 或模型之后，"旧端点支持什么"
     对新端点毫无参考价值，留着只会让新配置静默继承旧结论。
     """
-    global _cached, _roles_cached, _two_tier_cached
+    global _cached, _roles_cached, _two_tier_cached, _premium_cached
     _cached = None
     _roles_cached = None
     _two_tier_cached = None
+    _premium_cached = None
     from app.llm_protocol import invalidate_capabilities
 
     invalidate_capabilities()
@@ -286,6 +353,70 @@ async def load_roles() -> dict[str, RoleOverride]:
     return out
 
 
+async def load_premium() -> PremiumModel:
+    """平台级「高端模型」配置，读自加密 AppSetting `llm_premium`。**永不抛异常**。
+
+    与 load_roles 同样的原则：配置坏了只该退化成"没有高端模型"，
+    绝不能让每一次 LLM 调用都失败 —— 一个可选的加速/提质层不该有把平台打挂的能力。
+    """
+    global _premium_cached, _premium_cached_at
+    if _premium_cached is not None and time.monotonic() - _premium_cached_at < _TTL_S:
+        return _premium_cached
+
+    import json
+
+    try:
+        from app.db import db_session
+        from app.settings_store import get_setting
+
+        async with db_session() as sess:
+            raw = await get_setting(sess, LLM_PREMIUM_KEY)
+    except Exception:  # DB unavailable (early boot / bare test)
+        raw = None
+
+    out = PremiumModel()
+    if raw:
+        try:
+            it = json.loads(raw) or {}
+            if isinstance(it, dict):
+                added = [
+                    r
+                    for r in (it.get("roles") or [])
+                    if isinstance(r, str) and r in PREMIUM_ROLES
+                ]
+                out = PremiumModel(
+                    enabled=bool(it.get("enabled")),
+                    model=(it.get("model") or "").strip(),
+                    base_url=(it.get("base_url") or "").strip(),
+                    api_key=(it.get("api_key") or "").strip(),
+                    provider=(it.get("provider") or "").strip(),
+                    # 按 PREMIUM_ROLES 的固定顺序归一，界面勾选顺序不该影响存储内容
+                    roles=tuple(r for r in PREMIUM_ROLES if r in set(added)),
+                )
+        except Exception:  # malformed JSON -> "没有高端模型"
+            out = PremiumModel()
+    _premium_cached = out
+    _premium_cached_at = time.monotonic()
+    return out
+
+
+async def premium_for_ui() -> dict:
+    """给设置页看的高端模型配置（钥匙只回"有没有存过"，不回明文）。"""
+    prem = await load_premium()
+    return {
+        "enabled": prem.enabled,
+        "model": prem.model,
+        "base_url": prem.base_url,
+        "provider": prem.provider,
+        "api_key_set": bool(prem.api_key),
+        "roles": list(prem.roles),
+        # 配了但用不起来（缺 model 或一个用途都没勾）—— 界面必须说清，否则用户
+        # 会以为"开了就生效了"，实际一分钱没花、质量也没提升。
+        "usable": prem.usable,
+        "applies_to": [r for r in ROLES if prem.covers(r)],
+    }
+
+
 async def judge_two_tier_enabled() -> bool:
     """两级判定的开关（admin 可改，默认关）。
 
@@ -317,16 +448,38 @@ async def judge_two_tier_enabled() -> bool:
 
 
 async def role_profile(role: str) -> LLMProfile:
-    """这个用途实际该用的 profile：默认配置 + 该用途的覆盖。
+    """这个用途实际该用的 profile。三层，越具体越优先：
+
+      ① 池的第 1 套（平台默认，也就是**实际在跑**的那套）
+      ② 平台级「高端模型」（如果开着，且这个用途被勾选）
+      ③ 「按用途分模型」里这个用途自己的覆盖（最具体 ⇒ 盖过 ①②）
 
     "默认"取池里优先级最高那套（没有池就是 legacy 单套）—— 也就是平台**实际在跑**
     的那个模型，而不是设置页上可能已经不再生效的旧字段。
 
     池与用途是**正交**的两件事：池回答"这套 key 用完了换哪套"（429 兜底），
     用途回答"这件事该用哪个模型"。混在一起会让"省钱的模型"被 429 兜底悄悄换成贵的。
+
+    ②与③的关系是优先级而不是替代：②的价值是"一次勾选管几个环节"，③的价值是
+    "单独指名某个环节"。所以③赢 —— 但也正因为③赢，界面在两者同时命中同一个用途时
+    必须提示，否则用户会觉得高速模型"配了没生效"。
     """
     pool = await load_pool()
     base = pool[0]
+
+    prem = await load_premium()
+    if prem.covers(role):
+        # 只写 model 也能用：网关/钥匙没填就沿用池第 1 套的（多数人是同一个网关换模型名）。
+        base = LLMProfile(
+            name=f"premium:{prem.model}",
+            base_url=prem.base_url or base.base_url,
+            api_key=prem.api_key or base.api_key,
+            model=prem.model,
+            # 换了模型就不再沿用默认的 agent_model —— 那个默认名在新模型上多半不存在。
+            agent_model="",
+            provider=prem.provider or base.provider,
+        )
+
     ov = (await load_roles()).get(role)
     if ov is None or ov.empty:
         return base
@@ -339,6 +492,20 @@ async def role_profile(role: str) -> LLMProfile:
         agent_model="" if ov.model else base.agent_model,
         provider=ov.provider or base.provider,
     )
+
+
+async def role_source(role: str) -> str:
+    """这个用途的**生效值来自哪一层**：pool / premium / override。
+
+    界面靠它说清"我配的高端模型到底有没有管到这里"。没有这个字段，用户只能看着
+    一个模型名猜它从哪来 —— 而猜错的表现正是"我明明开了高端模型却没生效"。
+    """
+    ov = (await load_roles()).get(role)
+    if ov is not None and not ov.empty:
+        return "override"
+    if (await load_premium()).covers(role):
+        return "premium"
+    return "pool"
 
 
 async def pool_for_role(role: str) -> list[LLMProfile]:
@@ -361,20 +528,27 @@ async def pool_for_role(role: str) -> list[LLMProfile]:
 
 
 async def roles_for_ui() -> dict[str, dict]:
-    """给设置页看的角色配置（不带钥匙明文，只回"有没有单独配过钥匙"）。"""
+    """给设置页看的角色配置（不带钥匙明文，只回"有没有单独配过钥匙"）。
+
+    生效值一律走 `role_profile(role)` 取，而不是在这里自己推算继承 —— 三层优先级
+    （池 → 高端模型 → 按用途覆盖）只该有一处实现，两处各算一遍迟早会漂移，
+    而漂移的表现就是"界面显示一个没在跑的模型名"。
+    """
     roles = await load_roles()
-    base = (await load_pool())[0]
     out: dict[str, dict] = {}
     for role in ROLES:
         ov = roles.get(role)
+        eff = await role_profile(role)
         out[role] = {
             "model": (ov.model if ov else "") or "",
             "base_url": (ov.base_url if ov else "") or "",
             "provider": (ov.provider if ov else "") or "",
             "api_key_set": bool(ov and ov.api_key),
             # 生效值：界面直接显示"这个用途现在实际用哪个模型"，而不是让人自己推算继承。
-            "effective_model": (ov.model if ov and ov.model else base.model),
-            "effective_base_url": (ov.base_url if ov and ov.base_url else base.base_url),
+            "effective_model": eff.model,
+            "effective_base_url": eff.base_url,
+            # 生效值来自哪一层（pool / premium / override）。
+            "source": await role_source(role),
         }
     return out
 
@@ -636,9 +810,12 @@ from app.llm_chat import ChatResult, chat, chat_with_pool, empty_usage, extract_
 from app.llm_protocol import Capabilities, capabilities_for  # noqa: E402
 
 __all__ = [
+    "PREMIUM_DEFAULT_ROLES",
+    "PREMIUM_ROLES",
     "ROLES",
     "LLMConfig",
     "LLMProfile",
+    "PremiumModel",
     "RoleOverride",
     "ChatResult",
     "Capabilities",
@@ -653,14 +830,17 @@ __all__ = [
     "extract_json",
     "llm_config",
     "load_pool",
+    "load_premium",
     "judge_two_tier_enabled",
     "load_roles",
     "openai_client",
     "pick_active_profile",
     "pool_for_role",
     "pool_origin",
+    "premium_for_ui",
     "probe_profile",
     "role_profile",
+    "role_source",
     "roles_for_ui",
 ]
 

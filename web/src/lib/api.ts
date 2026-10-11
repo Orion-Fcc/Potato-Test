@@ -254,6 +254,23 @@ export interface LlmStatus {
   // pool_source 说明这套配置来自哪里：pool = 已保存的池；env = 池为空、回落 .env。
   pool_source?: "pool" | "env";
   pool_count?: number;
+  // 平台级「高端模型」（贵、聪明，可选）。默认关。
+  premium?: LlmPremiumStatus;
+}
+
+// 平台级「高端模型」的现状。`usable` 不只看 enabled ——
+// 没填模型、或一个用途都没勾，都算"看起来配了其实没用"，界面必须如实说。
+export interface LlmPremiumStatus {
+  enabled: boolean;
+  model: string;
+  base_url: string;
+  provider: string;
+  api_key_set: boolean;
+  // 勾选的用途（已按后端固定顺序归一）
+  roles: string[];
+  usable: boolean;
+  // 真正会被它接管的用途 —— 界面用它说清"我开的高端模型管到了哪几个环节"
+  applies_to: string[];
 }
 
 // 一个用途的配置现状。model/base_url/provider 为空 = 跟随默认；
@@ -265,6 +282,9 @@ export interface LlmRoleStatus {
   api_key_set: boolean;
   effective_model: string;
   effective_base_url: string;
+  // 生效值来自哪一层：pool（池第 1 套）/ premium（高端模型）/ override（这张卡自己配的）。
+  // 少了它用户只能看着一个模型名猜它从哪来，而猜错的表现正是"高端模型配了没生效"。
+  source?: "pool" | "premium" | "override";
 }
 
 // 保存某个用途：留空 = 跟随默认；只换模型填 model 就够，换厂商才要 base_url/api_key。
@@ -284,6 +304,18 @@ export interface LlmSettingsIn {
   pool?: LlmPoolIn[]; // when present it fully replaces the ordered pool
   roles?: Record<string, LlmRoleIn>; // when present it fully replaces the per-purpose map
   judge_two_tier?: boolean; // two-tier judging on/off; omitted = leave unchanged
+  premium?: LlmPremiumIn; // when present it fully replaces the premium slot
+}
+
+// 保存平台级「高端模型」。整体替换语义：发上去的就是全部。
+// api_key 留空 = 保留已存的那把（界面只显示掩码，不可能让用户重输）。
+export interface LlmPremiumIn {
+  enabled: boolean;
+  model?: string;
+  base_url?: string;
+  api_key?: string;
+  provider?: string;
+  roles?: string[];
 }
 
 // 池里的一套网关（多套时按顺序 429 兜底）。api_key 是只写的：留空表示

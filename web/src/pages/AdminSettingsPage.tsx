@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { api, type FeishuStatus, type LlmPoolEntry, type LlmRoleStatus, type LlmStatus, type LlmTestResult } from "../lib/api";
+import { api, type FeishuStatus, type LlmPoolEntry, type LlmPremiumStatus, type LlmRoleStatus, type LlmStatus, type LlmTestResult } from "../lib/api";
 import { useAuth } from "../lib/auth";
 import { Button, Card, Checkbox, Field, Input, Select } from "../components/ui";
 import { useToast, useErrorToast } from "../components/toast";
@@ -61,6 +61,37 @@ function emptyRole(): RoleRow {
   };
 }
 
+// 平台级「高端模型」可以挂到哪些用途上（与服务端 app/llm.py::PREMIUM_ROLES 对齐）。
+//
+// agent 排在最后并且**默认不勾**：它占全部 token 的约 95%，把执行步换成贵模型
+// 等于把省钱的唯一大旋钮关掉。放在这里是因为"我就想要最高质量"也该被允许，
+// 但要勾就得先看到那句警告 —— 不能让人拨个总开关就悄悄多花一大笔。
+const PREMIUM_ROLES = [
+  "judge_escalate",
+  "judge",
+  "specgen",
+  "narrative",
+  "assistant",
+  "agent",
+] as const;
+// 一开开关默认勾上的用途：量小、质量关键的那些。judge 不在内 ——
+// 初判刻意留给便宜模型，那正是两级判定的意义。
+const PREMIUM_DEFAULT_ROLES = ["judge_escalate", "specgen", "narrative"];
+
+// 一个高端模型配置在"还没从后端拿到"时的空壳。
+function emptyPremium(): LlmPremiumStatus {
+  return {
+    enabled: false,
+    model: "",
+    base_url: "",
+    provider: "",
+    api_key_set: false,
+    roles: [],
+    usable: false,
+    applies_to: [],
+  };
+}
+
 export function AdminSettingsPage() {
   const { t } = useTranslation();
   const toast = useToast();
@@ -93,6 +124,14 @@ export function AdminSettingsPage() {
   // 默认关 —— 它确实会多花 token，必须由人显式打开。
   const [twoTier, setTwoTier] = useState(false);
 
+  // 平台级「高端模型」（贵、聪明，可选）。默认关。
+  // 有意的设计：整个平台"要不要为质量多花钱"只在这里回答一次，而不是让用户去六个
+  // 用途行里各填一遍。空壳用 emptyPremium()，字段与后端 premium_for_ui() 对齐。
+  const [premium, setPremium] = useState<LlmPremiumStatus>(emptyPremium);
+  // 钥匙是只写的：本地编辑用的输入框（留空 = 保留已存）
+  const [premiumKey, setPremiumKey] = useState("");
+  const [savingPremium, setSavingPremium] = useState(false);
+
   // Feishu
   const [fs, setFs] = useState<FeishuStatus | null>(null);
   const [appId, setAppId] = useState("");
@@ -115,6 +154,8 @@ export function AdminSettingsPage() {
         setLlm(s.llm);
         setRoles(s.llm.roles || {});
         setTwoTier(!!s.llm.judge_two_tier);
+        setPremium(s.llm.premium || emptyPremium());
+        setPremiumKey("");
         setFs(s.feishu);
         setAppId(s.feishu.app_id);
         setApiBase(s.feishu.api_base);
@@ -191,6 +232,31 @@ export function AdminSettingsPage() {
     }
   };
 
+  // 保存平台级「高端模型」。整体替换语义：发上去的就是全部。
+  // 钥匙留空按 undefined 发 —— 后端把它解释成"保留已存的那把"，不是清空。
+  const savePremium = async () => {
+    setSavingPremium(true);
+    try {
+      await api.setLlmSettings({
+        premium: {
+          enabled: premium.enabled,
+          model: premium.model.trim(),
+          base_url: premium.base_url.trim(),
+          provider: premium.provider || "auto",
+          roles: [...premium.roles],
+          api_key: premiumKey.trim() || undefined,
+        },
+      });
+      await load();
+      await loadPool();
+      toast("success", t("Saved"));
+    } catch (e: any) {
+      fail(e);
+    } finally {
+      setSavingPremium(false);
+    }
+  };
+
   const testLlm = async () => {
     setTestingLlm(true);
     setLlmTest(null);
@@ -252,6 +318,24 @@ export function AdminSettingsPage() {
   const judgeEff = roles.judge?.effective_model || llm?.model || "";
   const escalateEff = roles.judge_escalate?.effective_model || llm?.model || "";
 
+  // 高端模型的表单态判断（不看服务端回值，否则"改了还没保存"时提示是错的）。
+  const premiumReady = premium.enabled && !!premium.model.trim() && premium.roles.length > 0;
+  const premiumOnAgent = premium.enabled && premium.roles.includes("agent");
+  // 勾了高端模型、但同一个用途又在下面那张卡里单独配了模型 ⇒ 按用途的那张赢。
+  // 不说清楚的话，用户会觉得高端模型"配了没生效"。
+  const premiumShadowed = premium.enabled
+    ? premium.roles.filter((r) => !!(roles[r]?.model || "").trim())
+    : [];
+  // 已保存且真的在生效的用途（用服务端回值，避免把未保存的编辑当成现状）
+  const premiumLiveRoles = (llm?.premium?.applies_to || [])
+    .map((r) => `${t(ROLE_LABEL[r] || r)}`)
+    .join(" / ");
+  // 高端模型（已保存且可用）是否被挂到了「判定复核」上。
+  // 判定复核**只**由两级判定调用，所以开关关着时它一次都不会被叫 —— 属于
+  // "看起来配了其实没用"，必须当场说破，否则用户会以为质量已经提上去了。
+  const premiumConfiguredForReview =
+    !!llm?.premium?.usable && (llm.premium.applies_to || []).includes("judge_escalate");
+
   return (
     <div className="space-y-6">
       <div>
@@ -282,9 +366,16 @@ export function AdminSettingsPage() {
           <div className="flex flex-wrap items-baseline justify-between gap-x-3">
             <div className="font-medium">{t("Currently in use (agent)")}</div>
             <div className="text-ink-500">
-              {llm?.pool_source === "env"
-                ? t("from .env — no pool saved yet")
-                : t("from the pool ({{n}} set(s))", { n: llm?.pool_count ?? 1 })}
+              {/* 来源要按**优先级**说，不能只看池：高端模型或某个用途的覆盖一旦接管 agent，
+                  实际模型就不是池第 1 套了 —— 那时还说"来自模型池"就成了新的假信息
+                  （这正是这一版要消灭的那类错觉）。 */}
+              {llm?.roles?.agent?.source === "premium"
+                ? t("from the premium model")
+                : llm?.roles?.agent?.source === "override"
+                  ? t("from the execution row in “Model per purpose”")
+                  : llm?.pool_source === "env"
+                    ? t("from .env — no pool saved yet")
+                    : t("from the pool ({{n}} set(s))", { n: llm?.pool_count ?? 1 })}
             </div>
           </div>
           <div className="mt-1 grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5">
@@ -477,13 +568,150 @@ export function AdminSettingsPage() {
         )}
       </Card>
 
+      {/* 平台级「高端模型」（贵、聪明，可选）—— 2026-10-11。
+          用户的诉求是「可以自己选择是否加高端 LLM」：整个平台"要不要为质量多花钱"
+          在这一个开关上回答一次，而不是让人去下面六个用途行里各填一遍。
+          默认关 = 省钱优先；关着时所有用途都还是池的第 1 套，一分钱不多花。 */}
+      <Card className="max-w-2xl space-y-3 p-4">
+        <div className="flex flex-wrap items-baseline justify-between gap-x-3">
+          <div className="text-sm font-medium text-ink-900">{t("Premium model (optional)")}</div>
+          <div className="text-[11px] text-ink-500">
+            {llm?.premium?.usable
+              ? t("In effect: {{roles}}", { roles: premiumLiveRoles || "—" })
+              : t("Not in effect — every step uses the pool's set 1 above.")}
+          </div>
+        </div>
+        <div className="text-xs text-ink-500">
+          {t("Add one expensive, smart model and tick exactly which steps may use it. Off means every step falls back to the pool's set 1 — no extra spend at all.")}
+        </div>
+
+        <label className="flex cursor-pointer items-center gap-2">
+          <Checkbox
+            checked={premium.enabled}
+            onChange={(e) => {
+              const on = e.target.checked;
+              setPremium({
+                ...premium,
+                enabled: on,
+                // 第一次打开时预勾"量小、质量关键"的那几个 —— 而不是让用户对着六个空勾选框发呆。
+                // 刻意不含 agent 与 judge：前者是省钱主旋钮，后者初判就该留给便宜模型。
+                roles:
+                  on && premium.roles.length === 0 ? [...PREMIUM_DEFAULT_ROLES] : premium.roles,
+              });
+            }}
+          />
+          <span className="text-[13px] font-medium text-ink-900">{t("Use a premium model")}</span>
+        </label>
+
+        {premium.enabled && (
+          <>
+            <div className="flex flex-wrap items-center gap-2">
+              <Input
+                value={premium.model}
+                onChange={(e) => setPremium({ ...premium, model: e.target.value })}
+                placeholder={t("model name (required)")}
+                className="h-9 w-56"
+              />
+              <Select
+                value={premium.provider || "auto"}
+                onChange={(e) => setPremium({ ...premium, provider: e.target.value })}
+                className="h-9 w-44"
+              >
+                {PROVIDERS.map((p) => (
+                  <option key={p} value={p}>
+                    {t(PROVIDER_LABEL[p])}
+                  </option>
+                ))}
+              </Select>
+              <Input
+                value={premium.base_url}
+                onChange={(e) => setPremium({ ...premium, base_url: e.target.value })}
+                placeholder={t("gateway URL (blank = pool's set 1)")}
+                className="h-9 w-64"
+              />
+              <Input
+                type="password"
+                value={premiumKey}
+                onChange={(e) => setPremiumKey(e.target.value)}
+                placeholder={premium.api_key_set ? t("•••••••• (kept)") : t("api key (blank = keep stored)")}
+                className="h-9 w-48"
+              />
+            </div>
+            <div className="text-[11px] text-ink-400">
+              {t("Gateway and key are optional: leave the gateway blank to reuse the pool's set 1, leave the key blank to keep the stored one.")}
+            </div>
+
+            <div className="space-y-1.5 rounded-lg border border-[var(--line)] p-3">
+              <div className="text-[13px] font-medium text-ink-900">{t("Which steps may use it")}</div>
+              <div className="flex flex-wrap gap-x-4 gap-y-2">
+                {PREMIUM_ROLES.map((r) => (
+                  <label key={r} className="flex cursor-pointer items-center gap-2">
+                    <Checkbox
+                      checked={premium.roles.includes(r)}
+                      onChange={(e) =>
+                        setPremium({
+                          ...premium,
+                          roles: e.target.checked
+                            ? [...premium.roles, r]
+                            : premium.roles.filter((x) => x !== r),
+                        })
+                      }
+                    />
+                    <span className="text-[12px] text-ink-700">{t(ROLE_LABEL[r])}</span>
+                  </label>
+                ))}
+              </div>
+              <div className="text-[11px] text-ink-400">
+                {t("Judge escalation is only called when the cheap judge says failed or a gate warns — it can be the priciest model, because a routine pass never calls it.")}
+              </div>
+            </div>
+
+            {premiumOnAgent && (
+              <div className="tp-alert tp-alert-warn text-[11px]">
+                {t("The execution step is about 95% of all tokens. Sending it to the premium model removes the main cost lever — the other steps are small-volume, so that is where the money actually goes.")}
+              </div>
+            )}
+            {premiumConfiguredForReview && !twoTier && (
+              <div className="tp-alert tp-alert-warn text-[11px]">
+                {t("You assigned the premium model to judging review, but two-tier judging is off — so it will never be called. Turn that switch on for it to actually do something.")}
+              </div>
+            )}
+            {premiumShadowed.length > 0 && (
+              <div className="tp-alert tp-alert-warn text-[11px]">
+                {t("These steps also have their own model in “Model per purpose” below, and that one wins: {{roles}}. Clear those rows if you want the premium model to take over.", {
+                  roles: premiumShadowed.map((r) => t(ROLE_LABEL[r] || r)).join(" / "),
+                })}
+              </div>
+            )}
+            {!premiumReady && (
+              <div className="tp-alert tp-alert-warn text-[11px]">
+                {t("Not in effect yet: fill in a model name and tick at least one step.")}
+              </div>
+            )}
+          </>
+        )}
+
+        <div className="flex items-center gap-3">
+          <Button onClick={savePremium} disabled={savingPremium}>
+            {savingPremium ? t("Saving…") : t("Save premium model")}
+          </Button>
+        </div>
+      </Card>
+
       {/* 按用途分模型（2026-10-11）：钱花在"量"上，质量保在"判"上。
-          留空 = 跟随默认；只换模型填模型名就够，换厂商才需要网关/钥匙。 */}
+          留空 = 跟随默认；只换模型填模型名就够，换厂商才需要网关/钥匙。
+          这是**更具体**的一层：单独指名某个用途，所以它盖过上面的高端模型。 */}
       <Card className="max-w-2xl space-y-3 p-4">
         <div>
-          <div className="text-sm font-medium text-ink-900">{t("Model per purpose")}</div>
+          <div className="text-sm font-medium text-ink-900">
+            {t("Model per purpose")}
+            <span className="ml-2 text-[11px] font-normal text-ink-400">{t("advanced")}</span>
+          </div>
           <div className="text-xs text-ink-500">
             {t("Cheap model for the high-volume execution steps, strong model where quality matters. Blank = follow the default (= set 1 of the pool above).")}
+          </div>
+          <div className="mt-1 text-[11px] text-ink-400">
+            {t("A value here also wins over the premium model above — this card is the most specific layer.")}
           </div>
         </div>
 

@@ -480,6 +480,9 @@ async def get_admin_settings() -> dict:
     llm_status["roles"] = await roles_for_ui()
     # 两级判定的当前开关（存在 AppSetting，可能覆盖 env 默认）
     llm_status["judge_two_tier"] = await llm_mod.judge_two_tier_enabled()
+    # 平台级「高端模型」：开没开、管哪几个环节、能不能真用起来。
+    # 一起回出来，界面才能说清"我开的高端模型到底管到了哪几个用途"。
+    llm_status["premium"] = await llm_mod.premium_for_ui()
     return {
         "llm": llm_status,
         "gitlab_token_set": token_set or bool(get_settings().gitlab_token),
@@ -660,6 +663,32 @@ async def set_admin_llm(body: LlmSettingsIn) -> dict:
                 s, llm_mod.LLM_ROLES_KEY,
                 json.dumps(kept, ensure_ascii=False) if kept else "",
                 secret=True,
+            )
+        if body.premium is not None:
+            # 平台级「高端模型」：整体替换（None 才表示"不动"）。
+            #
+            # 钥匙留空 = 保留已存的那把（界面只显示掩码，不可能逼用户重输）。
+            # 用途名按 PREMIUM_ROLES 白名单过滤：一个拼错的用途如果被存下来，
+            # 界面会显示它"已生效"而实际从不生效 —— 正是这一版要消灭的那类错觉。
+            old_prem = await llm_mod.load_premium()  # 已存的钥匙（加密），用于"留空=保留"
+            roles_in = {r for r in body.premium.roles if r in llm_mod.PREMIUM_ROLES}
+            item = {
+                "enabled": bool(body.premium.enabled),
+                "model": (body.premium.model or "").strip(),
+                "base_url": (body.premium.base_url or "").strip(),
+                "api_key": (body.premium.api_key or "").strip() or old_prem.api_key,
+                "provider": (body.premium.provider or "").strip(),
+                # 按固定顺序归一：界面勾选顺序不该泄漏进存储内容。
+                "roles": [r for r in llm_mod.PREMIUM_ROLES if r in roles_in],
+            }
+            empty = not (
+                item["enabled"] or item["model"] or item["base_url"]
+                or item["api_key"] or item["roles"]
+            )
+            await set_setting(
+                s, llm_mod.LLM_PREMIUM_KEY,
+                "" if empty else json.dumps(item, ensure_ascii=False),
+                secret=not empty,
             )
     llm_mod.invalidate_llm_cache()
     # 回真实生效的那一套（池的第 1 条 + 用途覆盖），不是旧单值字段 ——

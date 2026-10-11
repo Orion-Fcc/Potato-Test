@@ -317,6 +317,8 @@ const zh: Record<string, string> = {
   "Currently in use (agent)": "当前生效（agent）",
   "from .env — no pool saved yet": "来自 .env —— 还没有保存过模型池",
   "from the pool ({{n}} set(s))": "来自模型池（共 {{n}} 套）",
+  "from the premium model": "来自高端模型",
+  "from the execution row in “Model per purpose”": "来自「按用途分模型」里的「执行」那一行",
   "Per-purpose models below may override the model for judging, narration, spec generation and the assistant.":
     "下面的「按用途分模型」可能覆盖判定 / 失败叙述 / 需规生成 / 助手所用的模型。",
   "Tests the set the agent actually calls — and tells you which one that was.":
@@ -343,6 +345,34 @@ const zh: Record<string, string> = {
   "runs only on failures, short output": "只在失败时跑，输出很短",
   "long-document batches, quality matters": "长文档批量生成，质量重要",
   "interactive, latency-sensitive": "交互式，对速度敏感",
+  // 平台级「高端模型」（2026-10-11）：用户要的是"可以自己选择是否加高端 LLM"。
+  // 整个平台"要不要为质量多花钱"在这一个开关上回答一次，默认关 = 省钱优先。
+  "Premium model (optional)": "高端模型（可选）",
+  "Add one expensive, smart model and tick exactly which steps may use it. Off means every step falls back to the pool's set 1 — no extra spend at all.":
+    "加一支贵的、聪明的模型，并勾选允许哪几个环节用它。关着的时候所有环节都还是模型池的第 1 套 —— 一分钱都不多花。",
+  "Use a premium model": "启用高端模型",
+  "In effect: {{roles}}": "正在生效：{{roles}}",
+  "Not in effect — every step uses the pool's set 1 above.": "未生效 —— 所有环节都用上面模型池的第 1 套。",
+  "model name (required)": "模型名（必填）",
+  "gateway URL (blank = pool's set 1)": "网关地址（留空 = 用模型池的第 1 套）",
+  "api key (blank = keep stored)": "钥匙（留空 = 保留已存的那把）",
+  "Gateway and key are optional: leave the gateway blank to reuse the pool's set 1, leave the key blank to keep the stored one.":
+    "网关与钥匙都可以不填：网关留空就沿用模型池的第 1 套，钥匙留空就保留已存的那把（界面只显示掩码，没法让你重输）。",
+  "Which steps may use it": "允许哪几个环节用它",
+  "Judge escalation is only called when the cheap judge says failed or a gate warns — it can be the priciest model, because a routine pass never calls it.":
+    "「判定复核」只在便宜模型判失败 / 闸门报警时才被调用 —— 所以它可以放最贵的模型，因为通过且干净的结果一次都不会叫它。",
+  "The execution step is about 95% of all tokens. Sending it to the premium model removes the main cost lever — the other steps are small-volume, so that is where the money actually goes.":
+    "「执行」占全部 token 的约 95%。把它也交给高端模型等于关掉了省钱的主旋钮 —— 其余环节量都很小，钱其实都花在这一项上。",
+  "These steps also have their own model in “Model per purpose” below, and that one wins: {{roles}}. Clear those rows if you want the premium model to take over.":
+    "这几个环节在下面的「按用途分模型」里也单独配了模型，而那一层更具体、会盖过这里：{{roles}}。想让高端模型接管，请把那几行清空。",
+  "Not in effect yet: fill in a model name and tick at least one step.":
+    "尚未生效：还需要填模型名，并至少勾选一个环节 —— 否则等于配了不用。",
+  "You assigned the premium model to judging review, but two-tier judging is off — so it will never be called. Turn that switch on for it to actually do something.":
+    "你把高端模型挂到了「判定复核」上，但两级判定开关是关的 —— 那它一次都不会被调用（复核只由两级判定触发）。要让它真起作用，请把下面那个开关打开。",
+  "Save premium model": "保存高端模型",
+  advanced: "高级",
+  "A value here also wins over the premium model above — this card is the most specific layer.":
+    "这里填的值同样盖过上面的高端模型 —— 这张卡是最具体的一层。",
   // 两级判定（2026-10-11）：便宜模型先判，判 failed / 闸门报警才升级复核。
   "Two-tier judging (cheap judge first, escalate on failure)": "两级判定（便宜模型先判，失败才升级复核）",
   "The cheap judge runs first. Only a failed verdict or a deterministic gate warning spends the escalation model — routine passes never call it. Takes effect after saving.":

@@ -354,6 +354,25 @@ class LlmRoleIn(BaseModel):
     provider: str | None = None
 
 
+class LlmPremiumIn(BaseModel):
+    """平台级「高端模型」（贵、聪明，**可选**）。整体替换语义：配置页保存的就是全部。
+
+    为什么单独一个模型而不是复用 LlmRoleIn：这一层要表达的是"开不开 + 管哪几件事"，
+    所以必须带 enabled 与 roles 两个语义位。缺了 enabled 就分不清"关掉它"和"没配过"；
+    缺了 roles 就变成"又一支默认模型"，而它存在的意义正是**只**用在质量敏感的环节上。
+
+    api_key 只写：留空 = 保留已存的那把（界面只显示掩码，不可能让人重输）。
+    roles 里不认识的名字会被服务端丢掉（按 app.llm.PREMIUM_ROLES 白名单过滤）。
+    """
+
+    enabled: bool = False
+    model: str = ""
+    base_url: str = ""
+    api_key: str | None = None  # 留空 => 保留已存的钥匙
+    provider: str = ""
+    roles: list[str] = Field(default_factory=list)
+
+
 class LlmSettingsIn(BaseModel):
     # Non-secret fields: None => leave unchanged; "" => clear the override (env fallback).
     base_url: str | None = None
@@ -369,6 +388,8 @@ class LlmSettingsIn(BaseModel):
     roles: dict[str, LlmRoleIn] | None = None
     # 两级判定开关：None => 不动；True/False => 开/关（存在 AppSetting，立即生效）。
     judge_two_tier: bool | None = None
+    # 平台级高端模型：给定时**整体替换**（None => 保持现状）。
+    premium: LlmPremiumIn | None = None
 
 
 class FeishuSettingsIn(BaseModel):

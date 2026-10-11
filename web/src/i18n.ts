@@ -306,6 +306,8 @@ const zh: Record<string, string> = {
   "Reverted to the AI verdict": "已撤销改判，恢复 AI 判定",
   "Click to override this verdict (AI judging is not always right)": "点击改判（AI 判定不一定准）",
   "Manually overridden by {{who}}": "由 {{who}} 人工改判",
+  "Override": "改判",
+  "Edit override": "修改改判",
   manual: "人工",
   "No step diagnostics captured for this run.": "本次运行未采集到步骤诊断信息。",
   " — see the step timeline below": "，详见下方步骤时间线",

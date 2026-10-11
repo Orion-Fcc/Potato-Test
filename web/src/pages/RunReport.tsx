@@ -648,6 +648,20 @@ export function RunReport() {
                                 {t("+ Issue")}
                               </Button>
                             )}
+                            {/* 显式「改判」按钮 —— 之前唯一入口是点结论徽章（只有悬停提示），
+                                用户找不到（2026-10-11 反馈"没有人工修改结果状态的功能"）。
+                                光标提示与徽章点击都保留，两条路进同一个弹窗。 */}
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              title={t("Click to override this verdict (AI judging is not always right)")}
+                              onClick={() => {
+                                setOverrideFor(r!);
+                                setOverrideReason(r!.override_reason ?? "");
+                              }}
+                            >
+                              {r?.verdict_override ? t("Edit override") : t("Override")}
+                            </Button>
                             <Button size="sm" variant="outline" onClick={() => setSelected(r!)}>
                               {t("Replay")}
                             </Button>

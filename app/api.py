@@ -461,14 +461,18 @@ async def update_user(uid: int, body: UserPatch) -> dict:
 
 @router.get("/admin/settings", dependencies=[Depends(auth.require_admin)])
 async def get_admin_settings() -> dict:
-    from app.llm import llm_config
+    from app.llm import llm_config, roles_for_ui
     from app.settings_store import GITLAB_TOKEN_KEY, has_setting
 
     async with db_session() as s:
         token_set = await has_setting(s, GITLAB_TOKEN_KEY)
         feishu_cfg = await feishu.resolve_config(s)
+    llm_status = _llm_status(await llm_config())
+    # 按用途分模型：每个用途的"配了什么 + 实际生效的模型/网关"。
+    # 一起回给界面，省得前端自己推算继承关系（推错就会显示一个不存在的模型名）。
+    llm_status["roles"] = await roles_for_ui()
     return {
-        "llm": _llm_status(await llm_config()),
+        "llm": llm_status,
         "gitlab_token_set": token_set or bool(get_settings().gitlab_token),
         "feishu": _feishu_status(feishu_cfg),
     }
@@ -533,6 +537,30 @@ async def set_admin_llm(body: LlmSettingsIn) -> dict:
                 )
             else:
                 await set_setting(s, llm_mod.LLM_POOL_KEY, "", secret=False)
+        if body.roles is not None:
+            # 按用途分模型：整体替换（None 才表示"不动"）。未知用途直接丢弃 ——
+            # 一个拼错的用途名如果被存下来，界面会显示它"已配置"而实际从不生效。
+            old_roles = await llm_mod.load_roles()  # 已存的钥匙（加密），用于"留空=保留"
+            kept: dict[str, dict] = {}
+            for role, r in body.roles.items():
+                if role not in llm_mod.ROLES:
+                    continue
+                prev = old_roles.get(role)
+                item = {
+                    "model": (r.model or "").strip(),
+                    "base_url": (r.base_url or "").strip(),
+                    "api_key": (r.api_key or "").strip() or (prev.api_key if prev else ""),
+                    "provider": (r.provider or "").strip(),
+                }
+                # 四项全空 = 这一行就是"跟随默认"，不存即可（省得把空壳写进库）。
+                if not (item["model"] or item["base_url"] or item["api_key"] or item["provider"]):
+                    continue
+                kept[role] = item
+            await set_setting(
+                s, llm_mod.LLM_ROLES_KEY,
+                json.dumps(kept, ensure_ascii=False) if kept else "",
+                secret=True,
+            )
     llm_mod.invalidate_llm_cache()
     return _llm_status(await llm_mod.llm_config())
 

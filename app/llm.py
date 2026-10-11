@@ -24,6 +24,31 @@ LLM_AGENT_MODEL_KEY = "llm_agent_model"
 LLM_PROVIDER_SETTING_KEY = "llm_provider"
 _KEYS = (LLM_BASE_URL_KEY, LLM_API_KEY_KEY, LLM_MODEL_KEY, LLM_AGENT_MODEL_KEY, LLM_PROVIDER_SETTING_KEY)
 
+# 按用途分模型（2026-10-11）。真库实测：近 46 条结果共 444 万 token / 271 次调用，
+# 其中 **agent 每步调用**吃掉约 95% —— 判定器每条用例只调用一次、输入约 3~4k token，
+# 占总量的个位数百分比。所以"全平台用一个最贵的模型"是把钱花在不需要的地方：
+# 该省的（量大的执行步）和该保的（质量敏感的判定/生成）必须能分开配。
+LLM_ROLES_KEY = "llm_roles"  # encrypted blob: {role: {model, base_url, api_key, provider}}
+ROLES: tuple[str, ...] = ("agent", "judge", "narrative", "specgen", "assistant")
+
+
+@dataclass(frozen=True)
+class RoleOverride:
+    """One purpose's model override. 空字符串一律表示"继承默认配置"。
+
+    只存"这个用途要改的部分"：多数场景只需要换个模型名（同一网关不同模型），
+    要换厂商时才填 base_url/api_key/provider。
+    """
+
+    model: str = ""
+    base_url: str = ""
+    api_key: str = ""
+    provider: str = ""
+
+    @property
+    def empty(self) -> bool:
+        return not (self.model or self.base_url or self.api_key or self.provider)
+
 
 @dataclass(frozen=True)
 class LLMConfig:
@@ -69,6 +94,8 @@ LLM_PROVIDER_KEY = "llm_provider"  # legacy single-profile protocol (admin-overr
 
 _cached: LLMConfig | None = None
 _cached_at: float = 0.0
+_roles_cached: dict[str, "RoleOverride"] | None = None
+_roles_cached_at: float = 0.0
 _TTL_S = 30.0  # ponytail: pull-based refresh; push invalidation across processes if 30s lag hurts
 
 
@@ -78,8 +105,9 @@ def invalidate_llm_cache() -> None:
     协议/能力探测结果一起清掉：换了 base_url 或模型之后，"旧端点支持什么"
     对新端点毫无参考价值，留着只会让新配置静默继承旧结论。
     """
-    global _cached
+    global _cached, _roles_cached
     _cached = None
+    _roles_cached = None
     from app.llm_protocol import invalidate_capabilities
 
     invalidate_capabilities()
@@ -186,6 +214,108 @@ async def load_pool() -> list[LLMProfile]:
     return [legacy]
 
 
+async def load_roles() -> dict[str, RoleOverride]:
+    """按用途的模型覆盖，读自加密 AppSetting `llm_roles`。**永不抛异常**：
+
+    配置坏了只该退化成"全用默认模型"，绝不能让每一次 LLM 调用都失败。
+    """
+    global _roles_cached, _roles_cached_at
+    if _roles_cached is not None and time.monotonic() - _roles_cached_at < _TTL_S:
+        return _roles_cached
+
+    import json
+
+    try:
+        from app.db import db_session
+        from app.settings_store import get_setting
+
+        async with db_session() as sess:
+            raw = await get_setting(sess, LLM_ROLES_KEY)
+    except Exception:  # DB unavailable (early boot / bare test)
+        raw = None
+
+    out: dict[str, RoleOverride] = {}
+    if raw:
+        try:
+            for role, it in (json.loads(raw) or {}).items():
+                if role not in ROLES or not isinstance(it, dict):
+                    continue
+                out[role] = RoleOverride(
+                    model=(it.get("model") or "").strip(),
+                    base_url=(it.get("base_url") or "").strip(),
+                    api_key=(it.get("api_key") or "").strip(),
+                    provider=(it.get("provider") or "").strip(),
+                )
+        except Exception:
+            out = {}
+    _roles_cached = out
+    _roles_cached_at = time.monotonic()
+    return out
+
+
+async def role_profile(role: str) -> LLMProfile:
+    """这个用途实际该用的 profile：默认配置 + 该用途的覆盖。
+
+    "默认"取池里优先级最高那套（没有池就是 legacy 单套）—— 也就是平台**实际在跑**
+    的那个模型，而不是设置页上可能已经不再生效的旧字段。
+
+    池与用途是**正交**的两件事：池回答"这套 key 用完了换哪套"（429 兜底），
+    用途回答"这件事该用哪个模型"。混在一起会让"省钱的模型"被 429 兜底悄悄换成贵的。
+    """
+    pool = await load_pool()
+    base = pool[0]
+    ov = (await load_roles()).get(role)
+    if ov is None or ov.empty:
+        return base
+    return LLMProfile(
+        name=f"{role}:{ov.model or base.model}",
+        base_url=ov.base_url or base.base_url,
+        api_key=ov.api_key or base.api_key,
+        model=ov.model or base.model,
+        # 换了模型就不再沿用默认的 agent_model —— 那个默认名在新模型上多半不存在。
+        agent_model="" if ov.model else base.agent_model,
+        provider=ov.provider or base.provider,
+    )
+
+
+async def pool_for_role(role: str) -> list[LLMProfile]:
+    """该用途的候选序列：用途 profile 优先，其余池条目仍做 429 兜底。
+
+    兜底**保留**（这是池的原意：配额耗尽不能把整轮跑废），但对"用途换了模型"
+    的那一套要去重，否则同一个模型会被试两遍。
+    """
+    pool = await load_pool()
+    rp = await role_profile(role)
+    out = [rp]
+    seen = {(rp.base_url, rp.model, rp.api_key)}
+    for p in pool:
+        k = (p.base_url, p.model, p.api_key)
+        if k in seen:
+            continue
+        seen.add(k)
+        out.append(p)
+    return out
+
+
+async def roles_for_ui() -> dict[str, dict]:
+    """给设置页看的角色配置（不带钥匙明文，只回"有没有单独配过钥匙"）。"""
+    roles = await load_roles()
+    base = (await load_pool())[0]
+    out: dict[str, dict] = {}
+    for role in ROLES:
+        ov = roles.get(role)
+        out[role] = {
+            "model": (ov.model if ov else "") or "",
+            "base_url": (ov.base_url if ov else "") or "",
+            "provider": (ov.provider if ov else "") or "",
+            "api_key_set": bool(ov and ov.api_key),
+            # 生效值：界面直接显示"这个用途现在实际用哪个模型"，而不是让人自己推算继承。
+            "effective_model": (ov.model if ov and ov.model else base.model),
+            "effective_base_url": (ov.base_url if ov and ov.base_url else base.base_url),
+        }
+    return out
+
+
 def _is_rate_limited(exc: BaseException) -> bool:
     """True when the exception is an HTTP 429 from the gateway (any provider wording).
 
@@ -285,15 +415,19 @@ async def probe_profile(profile: LLMProfile) -> bool:
 
 
 async def pick_active_profile() -> tuple[LLMProfile, list[LLMProfile]]:
-    """Pre-flight router: return (chosen_profile, full_pool).
+    """Pre-flight router: return (chosen_profile, full_candidate_list).
 
-    Walks the pool in priority order and picks the FIRST profile whose probe
-    succeeds (200). If every profile fails (all rate-limited / all broken), fall
-    back to the first profile anyway — the case will fail with its own clear
+    Walks the candidates in priority order and picks the FIRST profile whose probe
+    succeeds (200). If every candidate fails (all rate-limited / all broken), fall
+    back to the first one anyway — the case will fail with its own clear
     error rather than being silently skipped, and at least we don't hide a total
     outage behind a "no key" message.
+
+    候选序列来自 `pool_for_role("agent")`：**agent 每步调用占全部 token 的约 95%**
+    （真库实测），所以"执行用哪个模型"是唯一能显著省钱的旋钮；判定/生成等
+    质量敏感但量小的用途另有各自的角色配置。
     """
-    pool = await load_pool()
+    pool = await pool_for_role("agent")
     if len(pool) == 1:
         # Single-set install: no fall-over possible, and a pre-flight probe would just
         # add ~4s to every case for nothing. Use it directly (preserves today's
@@ -439,8 +573,10 @@ from app.llm_chat import ChatResult, chat, chat_with_pool, empty_usage, extract_
 from app.llm_protocol import Capabilities, capabilities_for  # noqa: E402
 
 __all__ = [
+    "ROLES",
     "LLMConfig",
     "LLMProfile",
+    "RoleOverride",
     "ChatResult",
     "Capabilities",
     "active_profile",
@@ -454,9 +590,13 @@ __all__ = [
     "extract_json",
     "llm_config",
     "load_pool",
+    "load_roles",
     "openai_client",
     "pick_active_profile",
+    "pool_for_role",
     "probe_profile",
+    "role_profile",
+    "roles_for_ui",
 ]
 
 

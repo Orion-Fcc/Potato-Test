@@ -391,6 +391,7 @@ async def _call_json(system: str, user: str, max_tokens: int = 8000) -> tuple[di
     from app import llm as _llm
 
     res, _prof = await _llm.chat_with_pool(
+        role="specgen",
         system=system,
         user=user,
         json_mode=True,

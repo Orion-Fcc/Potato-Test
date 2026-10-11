@@ -1632,6 +1632,7 @@ def _add_look_at_screen(tools, s) -> None:
                 # 协议无关门面：图片 part 会被翻译成 Anthropic image block / Gemini
                 # Part.from_bytes，所以"看屏"这个工具在换厂商后依旧可用。
                 res = await chat(
+                    role="agent",  # 看屏属于"执行"这件事，与 agent 每步同模型
                     content=[
                         {"type": "text", "text": prompt},
                         {"type": "image_url",

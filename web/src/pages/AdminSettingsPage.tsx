@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { api, type FeishuStatus, type LlmPoolEntry, type LlmStatus, type LlmTestResult } from "../lib/api";
+import { api, type FeishuStatus, type LlmPoolEntry, type LlmRoleStatus, type LlmStatus, type LlmTestResult } from "../lib/api";
 import { useAuth } from "../lib/auth";
 import { Button, Card, Checkbox, Field, Input, Select } from "../components/ui";
 import { useToast, useErrorToast } from "../components/toast";
@@ -17,10 +17,44 @@ const PROVIDER_LABEL: Record<string, string> = {
 };
 
 type PoolRow = LlmPoolEntry & { api_key: string };
+// 用途行：服务端回来的状态 + 本地编辑用的钥匙输入框（只写，留空=保留已存）。
+type RoleRow = LlmRoleStatus & { api_key?: string };
+
+// 用途清单与后端 app/llm.py::ROLES 对齐。顺序按"花费从大到小"排：
+// 真库实测 agent 每步调用占全部 token 的约 95%，所以"执行"这一行是省钱的唯一大旋钮，
+// 判定/生成量小而质量敏感，值得留强模型。
+const ROLES = ["agent", "judge", "narrative", "specgen", "assistant"] as const;
+const ROLE_LABEL: Record<string, string> = {
+  agent: "Execution (agent, every step)",
+  judge: "Judging (once per case)",
+  narrative: "Failure narrative / case memory",
+  specgen: "Case generation from spec",
+  assistant: "Assistant chat & Feishu",
+};
+const ROLE_HINT: Record<string, string> = {
+  agent: "~95% of all tokens — the only lever that really cuts cost",
+  judge: "small volume, quality-critical — keep the strong model here",
+  narrative: "runs only on failures, short output",
+  specgen: "long-document batches, quality matters",
+  assistant: "interactive, latency-sensitive",
+};
 
 // 能力徽标只用符号，不引入新的文案键（服务端实测出来的布尔值无歧义）
 function mark(ok: boolean) {
   return ok ? "✓" : "✕";
+}
+
+// 一个用途行在"还没从后端拿到"时的空壳（含 effective_* 的占位），
+// 免得每个 onChange 都要判 null。
+function emptyRole(): RoleRow {
+  return {
+    model: "",
+    base_url: "",
+    provider: "",
+    api_key_set: false,
+    effective_model: "",
+    effective_base_url: "",
+  };
 }
 
 export function AdminSettingsPage() {
@@ -50,6 +84,11 @@ export function AdminSettingsPage() {
   const [pool, setPool] = useState<PoolRow[] | null>(null);
   const [savingPool, setSavingPool] = useState(false);
 
+  // 按用途分模型（agent 每步执行 / 判定 / 失败叙述 / 需规生成 / 助手对话）。
+  // 空字符串 = 跟随默认配置；界面显示 effective_* 让"这个用途实际用哪个模型"一目了然。
+  const [roles, setRoles] = useState<Record<string, RoleRow>>({});
+  const [savingRoles, setSavingRoles] = useState(false);
+
   // Feishu
   const [fs, setFs] = useState<FeishuStatus | null>(null);
   const [appId, setAppId] = useState("");
@@ -72,6 +111,7 @@ export function AdminSettingsPage() {
         setLlmModel(s.llm.model);
         setLlmAgentModel(s.llm.agent_model);
         setLlmProvider(s.llm.provider || "auto");
+        setRoles(s.llm.roles || {});
         setFs(s.feishu);
         setAppId(s.feishu.app_id);
         setApiBase(s.feishu.api_base);
@@ -144,6 +184,31 @@ export function AdminSettingsPage() {
       fail(e);
     } finally {
       setSavingPool(false);
+    }
+  };
+
+  // 保存按用途分模型：只发有值的字段，空字符串 = 清除该覆盖（回归"跟随默认"）。
+  const saveRoles = async () => {
+    setSavingRoles(true);
+    try {
+      const payload: Record<string, { model?: string; base_url?: string; api_key?: string; provider?: string }> = {};
+      for (const r of ROLES) {
+        const row = roles[r];
+        if (!row) continue;
+        const item: { model?: string; base_url?: string; api_key?: string; provider?: string } = {};
+        if (row.model.trim()) item.model = row.model.trim();
+        if (row.base_url.trim()) item.base_url = row.base_url.trim();
+        if (row.api_key?.trim()) item.api_key = row.api_key.trim();
+        if (row.provider && row.provider !== "auto") item.provider = row.provider;
+        if (Object.keys(item).length) payload[r] = item;
+      }
+      await api.setLlmSettings({ roles: payload });
+      await load();
+      toast("success", t("Saved"));
+    } catch (e: any) {
+      fail(e);
+    } finally {
+      setSavingRoles(false);
     }
   };
 
@@ -440,6 +505,97 @@ export function AdminSettingsPage() {
             </div>
           </div>
         )}
+      </Card>
+
+      {/* 按用途分模型（2026-10-11）：钱花在"量"上，质量保在"判"上。
+          留空 = 跟随默认；只换模型填模型名就够，换厂商才需要网关/钥匙。 */}
+      <Card className="max-w-2xl space-y-3 p-4">
+        <div>
+          <div className="text-sm font-medium text-ink-900">{t("Model per purpose")}</div>
+          <div className="text-xs text-ink-500">
+            {t("Cheap model for the high-volume execution steps, strong model where quality matters. Blank = follow the default.")}
+          </div>
+        </div>
+        <div className="space-y-3">
+          {ROLES.map((r) => {
+            const row = roles[r];
+            return (
+              <div key={r} className="space-y-1.5 rounded-lg border border-[var(--line)] p-3">
+                <div className="flex items-baseline justify-between gap-3">
+                  <div className="text-[13px] font-medium text-ink-900">{t(ROLE_LABEL[r])}</div>
+                  <div className="text-[11px] text-ink-400">
+                    {t("now: {{model}}", { model: row?.effective_model || llm?.model || "—" })}
+                  </div>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <Input
+                    value={row?.model ?? ""}
+                    onChange={(e) =>
+                      setRoles({
+                        ...roles,
+                        [r]: { ...(row || emptyRole()), model: e.target.value },
+                      })
+                    }
+                    placeholder={t("(inherit default)")}
+                    className="h-9 w-56"
+                  />
+                  <Select
+                    value={row?.provider || "auto"}
+                    onChange={(e) =>
+                      setRoles({
+                        ...roles,
+                        [r]: { ...(row || emptyRole()), provider: e.target.value },
+                      })
+                    }
+                    className="h-9 w-44"
+                  >
+                    {PROVIDERS.map((p) => (
+                      <option key={p} value={p}>
+                        {t(PROVIDER_LABEL[p])}
+                      </option>
+                    ))}
+                  </Select>
+                  <Input
+                    value={row?.base_url ?? ""}
+                    onChange={(e) =>
+                      setRoles({
+                        ...roles,
+                        [r]: { ...(row || emptyRole()), base_url: e.target.value },
+                      })
+                    }
+                    placeholder={t("gateway URL (optional)")}
+                    className="h-9 w-64"
+                  />
+                  <Input
+                    type="password"
+                    value={row?.api_key ?? ""}
+                    onChange={(e) =>
+                      setRoles({
+                        ...roles,
+                        [r]: { ...(row || emptyRole()), api_key: e.target.value },
+                      })
+                    }
+                    placeholder={row?.api_key_set ? t("•••••••• (kept)") : t("api key (optional)")}
+                    className="h-9 w-48"
+                  />
+                </div>
+                <div className="text-[11px] text-ink-400">{t(ROLE_HINT[r])}</div>
+              </div>
+            );
+          })}
+        </div>
+        <div className="flex items-center gap-3">
+          <Button onClick={saveRoles} disabled={savingRoles}>
+            {savingRoles ? t("Saving…") : t("Save per-purpose models")}
+          </Button>
+          <Button
+            variant="ghost"
+            onClick={() => setRoles({})}
+            disabled={savingRoles || !Object.keys(roles).length}
+          >
+            {t("Reset all to default")}
+          </Button>
+        </div>
       </Card>
 
       {gitlabEnabled && (

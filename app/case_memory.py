@@ -403,6 +403,7 @@ async def summarize(
         async def ask() -> Any:
             # 协议无关门面：能力支持就发原生 response_format，不支持就走提示词 + 容错解析
             res = await chat(
+                role="narrative",
                 system=_SUMMARY_SYSTEM,
                 user=user,
                 json_mode=True,

@@ -253,7 +253,7 @@ async def describe_failure(
         async def ask(c: Any) -> FailureNarrative:
             # 协议无关：图片 part 会被门面翻译成 Anthropic 的 image block / Gemini 的
             # Part.from_bytes；JSON 支持原生 response_format 就发，不支持走提示词 + 容错解析。
-            res = await chat(system=_SYSTEM, user=c, json_mode=True, temperature=0)
+            res = await chat(system=_SYSTEM, user=c, json_mode=True, temperature=0, role="narrative")
             data = res.json(default=None)
             if not isinstance(data, dict):
                 data = {}

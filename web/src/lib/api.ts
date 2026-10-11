@@ -214,6 +214,28 @@ export interface LlmStatus {
   // auto（默认，自动识别）/ openai / anthropic / google / ollama
   provider: string;
   api_key_set: boolean;
+  // 按用途分模型（2026-10-11）：agent 每步执行 / judge 判定 / narrative 失败叙述 /
+  // specgen 需规生成 / assistant 助手对话。effective_* 是实际生效值（含继承默认）。
+  roles?: Record<string, LlmRoleStatus>;
+}
+
+// 一个用途的配置现状。model/base_url/provider 为空 = 跟随默认；
+// effective_* 永远有值，界面直接显示"这个用途现在实际用哪个模型"。
+export interface LlmRoleStatus {
+  model: string;
+  base_url: string;
+  provider: string;
+  api_key_set: boolean;
+  effective_model: string;
+  effective_base_url: string;
+}
+
+// 保存某个用途：留空 = 跟随默认；只换模型填 model 就够，换厂商才要 base_url/api_key。
+export interface LlmRoleIn {
+  model?: string;
+  base_url?: string;
+  api_key?: string;
+  provider?: string;
 }
 
 export interface LlmSettingsIn {
@@ -223,6 +245,7 @@ export interface LlmSettingsIn {
   provider?: string;
   api_key?: string; // blank keeps the stored key
   pool?: LlmPoolIn[]; // when present it fully replaces the ordered pool
+  roles?: Record<string, LlmRoleIn>; // when present it fully replaces the per-purpose map
 }
 
 // 池里的一套网关（多套时按顺序 429 兜底）。api_key 是只写的：留空表示

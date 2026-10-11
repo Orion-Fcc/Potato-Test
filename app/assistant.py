@@ -23,7 +23,7 @@ from urllib.parse import quote
 
 import httpx
 
-from app.llm import llm_config, openai_client
+from app import llm
 
 log = logging.getLogger("potato-test.assistant")
 
@@ -1693,7 +1693,7 @@ async def _web_search(query: str) -> dict:
     try:
         from app import llm
 
-        pool = await llm.load_pool()
+        pool = await llm.pool_for_role("assistant")
         if not pool:
             return {"error": "没有可用的模型配置，无法联网搜索"}
         res = await llm.chat(
@@ -2318,11 +2318,13 @@ def _guard_identity(message: str, reply: str, project_name: str = "Potato Test")
 
 async def assistant_turn(pid: int, message: str, history: list[dict] | None = None) -> dict:
     """One assistant turn: LLM + tool loop. Returns {"reply", "actions"}."""
-    cfg = await llm_config()
-    client = await openai_client()
+    # 助手对话走「assistant」用途模型：工具循环的往返次数多、质量要求低于判定，
+    # 是第二个值得单独配便宜模型的用途（第一个是 agent 每步执行）。
+    prof = await llm.role_profile("assistant")
+    client = await llm.client_for(prof)
     # Chat should use the faster/cheaper model when one is configured for the agent;
     # a tool-calling conversation is latency-sensitive in a way a test run is not.
-    model = cfg.agent_model or cfg.model
+    model = prof.agent_model or prof.model
 
     catalog = await _api_catalog()
     project_name = await _project_label(pid)
@@ -2346,11 +2348,12 @@ async def assistant_turn(pid: int, message: str, history: list[dict] | None = No
     # 而不是让用户看到一句 [assistant error]（原实现会在协议不符时抛出并落到那个分支）。
     from app import llm as _llm
 
-    caps = await _llm.capabilities_for(await _llm.active_profile())
+    caps = await _llm.capabilities_for(await _llm.role_profile("assistant"))
     if caps.protocol != "openai" or not caps.tools:
         log.info("assistant: 协议 %s 不支持 OpenAI 形状的工具调用，降级为单轮回答", caps.protocol)
         try:
             res = await _llm.chat(
+                role="assistant",
                 messages=messages,
                 temperature=0.2,
                 timeout=90.0,

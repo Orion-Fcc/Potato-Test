@@ -806,6 +806,7 @@ async def _classify(
     ctx = f"\n\n【群里最近对话,供理解上下文,最后一条即本条】\n{context}" if context else ""
     # 协议无关门面（app/llm_chat.py）：换厂商不用改这里
     res = await chat(
+        role="assistant",
         system=_SYSTEM_PROMPT,
         user=f"{project_hint}{ctx}\n\n【需要判断的消息】\n{text}",
         temperature=0.2,

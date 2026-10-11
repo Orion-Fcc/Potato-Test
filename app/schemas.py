@@ -336,6 +336,24 @@ class LlmProfileIn(BaseModel):
     provider: str | None = None
 
 
+class LlmRoleIn(BaseModel):
+    """一个**用途**（agent 每步执行 / judge 判定 / narrative 失败叙述 / specgen 需规生成 /
+    assistant 助手对话）的模型覆盖。
+
+    为什么要有这一层：真库实测 agent 每步调用占全部 token 的约 95%，判定只占个位数
+    百分比 —— "全平台用一个最贵的模型"等于把钱全花在量最大的地方，而真正需要强模型的
+    是判定与生成这类质量敏感、量又小的环节。分开配才能一边省钱一边保住质量。
+
+    所有字段留空 = 继承默认配置（同一个模型）。只换模型时填 model 就够；
+    要换厂商才需要 base_url/api_key/provider。
+    """
+
+    model: str | None = None
+    base_url: str | None = None
+    api_key: str | None = None  # 只写：留空表示保留已存钥匙（界面只显示掩码）
+    provider: str | None = None
+
+
 class LlmSettingsIn(BaseModel):
     # Non-secret fields: None => leave unchanged; "" => clear the override (env fallback).
     base_url: str | None = None
@@ -347,6 +365,8 @@ class LlmSettingsIn(BaseModel):
     api_key: str | None = None
     # The ordered pool. When provided, it fully replaces the pool (None => keep current).
     pool: list[LlmProfileIn] | None = None
+    # 按用途分模型。给定时**整体替换**（None => 保持现状）；传空 dict 即全部恢复默认。
+    roles: dict[str, LlmRoleIn] | None = None
 
 
 class FeishuSettingsIn(BaseModel):

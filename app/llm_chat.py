@@ -146,6 +146,7 @@ def _image_parts(content: Any) -> list[dict]:
 async def chat(
     profile=None,
     *,
+    role: str | None = None,
     messages: list[dict] | None = None,
     system: str | None = None,
     user: Any = None,
@@ -157,13 +158,14 @@ async def chat(
 ) -> ChatResult:
     """协议无关的一发 completion。
 
-    profile=None 时用当前生效配置（legacy 单 profile），即"平台默认模型"。
+    profile=None 时按 `role` 取该用途的模型（agent/judge/narrative/specgen/assistant），
+    没给 role 就用"平台默认模型"。显式传 profile 时 role 被忽略（调用方已经决定了）。
     `content`/`user` 都可以是字符串或 OpenAI 风格 part 列表（含 image_url）。
     """
     from app import llm as _llm  # 延迟导入，避免循环依赖
 
     if profile is None:
-        profile = await _llm.active_profile()
+        profile = await _llm.role_profile(role) if role else await _llm.active_profile()
     caps = await capabilities_for(profile)
 
     if messages is None:
@@ -186,6 +188,7 @@ async def chat(
 
 async def chat_with_pool(
     *,
+    role: str | None = None,
     messages: list[dict] | None = None,
     system: str | None = None,
     user: Any = None,
@@ -197,12 +200,15 @@ async def chat_with_pool(
 ) -> tuple[ChatResult, Any]:
     """按池优先级调用，429（配额耗尽）自动换下一套。
 
+    role 给定时，候选序列以**该用途的模型**打头（见 llm.pool_for_role），
+    池里其余条目仍作为 429 兜底。
+
     与 judge/specgen 原有的语义一致：非 429 的错误（401 错 key、404 错模型）
     是配置问题，直接抛出，不在池里乱跳 —— 跳了也一样失败，只会把报错搞模糊。
     """
     from app import llm as _llm
 
-    pool = await _llm.load_pool()
+    pool = await (_llm.pool_for_role(role) if role else _llm.load_pool())
     last: Exception | None = None
     for prof in pool:
         try:

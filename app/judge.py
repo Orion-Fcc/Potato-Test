@@ -361,6 +361,7 @@ async def judge(
         #   2026-10-11 真实事故：直接把元组当 ChatResult 返回，_tally 取 .usage 时
         #   炸 'tuple' object has no attribute 'usage'，整轮判定全部 judge_error。
         res, _prof = await _llm.chat_with_pool(
+            role="judge",
             system=system,
             user=content,
             json_mode=True,

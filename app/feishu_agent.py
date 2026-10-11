@@ -162,7 +162,7 @@ async def agent_reply(session, text: str, context: str, project_id: int | None) 
     caps = await _llm.capabilities_for(await _llm.active_profile())
     if caps.protocol != "openai" or not caps.tools:
         log.info("feishu agent: 协议 %s 不支持工具调用，降级为单轮回答", caps.protocol)
-        res = await _llm.chat(system=system, user=user, temperature=0.2, timeout=90.0)
+        res = await _llm.chat(role="assistant", system=system, user=user, temperature=0.2, timeout=90.0)
         return (res.text or "").strip() or "(没有生成回答)"
 
     client = await openai_client()

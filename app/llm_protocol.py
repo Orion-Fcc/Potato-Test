@@ -126,6 +126,23 @@ def _hint_protocol(base_url: str) -> str | None:
 
 
 # ---------------------------------------------------------------------------
+# 探测期的 429：**协议是对的，只是配额用完了**
+#
+# 必须与"这个端点不是这个协议"（探测返回 None）严格分开。2026-10-11 的真实缺陷：
+# 探测链路把任何 >=400 都当成"不是这个协议"，于是一个配额耗尽的 OpenAI 兼容端点
+# 被判成 anthropic → google，最后用 Gemini 的 genai 去跟 DeepSeek 说话，报错完全
+# 指不到真实原因（"按用途分模型"让这件事更容易踩到：便宜模型的日配额更容易打满）。
+#
+# 抛出去而不是吞掉，是为了让 chat_with_pool 按池语义换下一套 key。
+# ---------------------------------------------------------------------------
+class RateLimitedError(RuntimeError):
+    def __init__(self, status: int, text: str):
+        super().__init__(f"gateway rate-limited (HTTP {status}): {(text or '')[:200]}")
+        # chat_with_pool 的 _is_rate_limited 看的就是这个属性
+        self.status_code = status
+
+
+# ---------------------------------------------------------------------------
 # 缓存：能力随厂商变更而变，但没人希望每个用例都去探一遍（那是纯延迟开销）。
 # in-process + TTL。TTL 内零成本；过期后下一次调用顺手重探一次。
 # ---------------------------------------------------------------------------
@@ -147,7 +164,12 @@ def _ttl() -> float:
 
 
 async def capabilities_for(profile, *, force: bool = False) -> Capabilities:
-    """一个 profile 的实测能力（带 TTL 缓存）。永不抛异常：探测不出来就按协议默认值。"""
+    """一个 profile 的实测能力（带 TTL 缓存）。探测不出来就按协议默认值。
+
+    唯一的例外：**429**（配额耗尽）会原样抛出。它不是"探测不出"，而是"这套 key 现在
+    不能用"—— 上层（chat_with_pool）要靠这个异常换下一套；吞掉它会让一个配额用完的
+    端点被当成"换个协议也许行"。
+    """
     key = _cache_key(profile)
     now = time.monotonic()
     if not force:
@@ -158,6 +180,8 @@ async def capabilities_for(profile, *, force: bool = False) -> Capabilities:
     explicit = normalize_provider(getattr(profile, "provider", "") or "")
     try:
         caps = await _probe(profile, explicit)
+    except RateLimitedError:
+        raise
     except Exception as exc:  # noqa: BLE001 — 探测失败绝不能阻断真实调用
         log.warning("llm: 能力探测失败（按协议默认值继续）：%s: %s", type(exc).__name__, exc)
         proto = explicit if explicit != "auto" else (_hint_protocol(profile.base_url) or "openai")
@@ -273,6 +297,9 @@ async def _probe_openai(profile) -> Capabilities | None:
         except Exception:  # noqa: BLE001 — 网络层不通 → 不是这个协议（或该地址不可达）
             return None
         if r.status_code >= 400:
+            if r.status_code == 429:
+                # 配额耗尽 ≠ 协议不对：继续用 openai 协议，让上层换下一套 key。
+                raise RateLimitedError(r.status_code, r.text)
             if r.status_code in (401, 403):
                 # 路由在、鉴权有问题 → 是 OpenAI 协议但配置要修，照实返回（不阻断其余判断）
                 return Capabilities("openai", True, False, True, True, probed=False)
@@ -280,7 +307,11 @@ async def _probe_openai(profile) -> Capabilities | None:
 
         # ① json_object（判定器 / 三段式叙述 / 话术提炼依赖它）
         ro = await c.post(url, json={**json_body, "response_format": {"type": "json_object"}}, headers=headers)
-        json_object = not (ro.status_code >= 400 and _rf_unsupported(ro.text))
+        if ro.status_code == 429:
+            # 这一发也限流：能力无从判断，按"兼容端点通常支持"继续，别因为限流把它记成"不支持"
+            json_object = True
+        else:
+            json_object = not (ro.status_code >= 400 and _rf_unsupported(ro.text))
         # ② json_schema（browser-use 代理默认要发它 —— 就是 2026-10-10 崩在这）
         probe_schema = {
             "type": "json_schema",
@@ -319,6 +350,9 @@ async def _probe_anthropic(profile) -> Capabilities | None:
             r = await c.post(url, json=body, headers=headers)
         except Exception:  # noqa: BLE001
             return None
+    if r.status_code == 429:
+        # 同上：限流不是『协议不对』，交给上层换 key
+        raise RateLimitedError(r.status_code, r.text)
     if r.status_code in (401, 403):
         return Capabilities("anthropic", False, False, False, True, probed=False)
     if r.status_code >= 400:
@@ -335,6 +369,9 @@ async def _probe_google(profile) -> Capabilities | None:
             r = await c.get(url, headers={"x-goog-api-key": profile.api_key})
         except Exception:  # noqa: BLE001
             return None
+    if r.status_code == 429:
+        # 同上：限流不是『协议不对』，交给上层换 key
+        raise RateLimitedError(r.status_code, r.text)
     if r.status_code in (401, 403):
         return Capabilities("google", False, False, False, True, probed=False)
     if r.status_code >= 400:

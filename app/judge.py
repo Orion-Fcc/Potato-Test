@@ -356,13 +356,18 @@ async def judge(
         # 池按优先级走：429（这套 key 配额耗尽）换下一套，不让 SDK 盲目退避 ——
         # 就是那个"退避 + 配额天花板"把 run10 拖成 105/115 失败（2026-10-09）。
         # 非 429 的错误（401 错 key、404 错模型）是配置问题，直接抛，不在池里乱跳。
-        return await _llm.chat_with_pool(
+        #
+        # ★ chat_with_pool 返回的是 (结果, 命中的profile) **二元组** —— 必须解包。
+        #   2026-10-11 真实事故：直接把元组当 ChatResult 返回，_tally 取 .usage 时
+        #   炸 'tuple' object has no attribute 'usage'，整轮判定全部 judge_error。
+        res, _prof = await _llm.chat_with_pool(
             system=system,
             user=content,
             json_mode=True,
             temperature=0,
             timeout=60.0,
         )
+        return res
 
     async def ask(content: Any) -> Verdict:
         res = await _call(content)

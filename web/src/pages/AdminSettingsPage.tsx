@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { ChevronRight } from "lucide-react";
-import { api, type FeishuStatus, type LlmPoolEntry, type LlmPremiumStatus, type LlmStatus, type LlmTestResult } from "../lib/api";
+import { api, type FeishuStatus, type LlmPoolEntry, type LlmPremiumStatus, type LlmStatus, type LlmTestReport } from "../lib/api";
 import { useAuth } from "../lib/auth";
 import { Button, Card, Checkbox, Field, Input, Select } from "../components/ui";
 import { useToast, useErrorToast } from "../components/toast";
@@ -161,14 +161,99 @@ const PREMIUM_DEFAULT_ROLES = ["judge_escalate", "specgen", "narrative"];
 function emptyPremium(): LlmPremiumStatus {
   return {
     enabled: false,
-    model: "",
-    base_url: "",
-    provider: "",
-    api_key_set: false,
+    pool_name: "",
+    resolved_model: "",
     roles: [],
     usable: false,
     applies_to: [],
   };
+}
+
+/**
+ * 「高端模型」卡里的建议块：直接告诉用户哪些环节该上高端模型。
+ *
+ * 依据（和 ROLE_TOKEN_SHARE_ESTIMATE 一致）：agent 占全部 token 的约 94%，把执行步
+ * 换贵等于把"省钱主旋钮"关掉，所以**不推荐**；其余用途都是"质量敏感、量小"——
+ * 判定/复核决定用例成败、需规/叙述决定交付物质量、助手偶发——用更好的模型性价比最高。
+ *
+ * 占比数字优先用真实实测（tokenShare.measured），无数据回退结构估算并标 ≈，
+ * 与「勾选项旁占比」同一套口径，绝不把估算冒充实测。
+ */
+function PremiumSuggestion({
+  poolEmpty,
+  suggested,
+  selected,
+  tokenShare,
+  onApply,
+}: {
+  poolEmpty: boolean;
+  suggested: readonly string[];
+  selected: string[];
+  tokenShare: {
+    measured: Record<string, number>;
+    estimate: Record<string, number>;
+    has_data: boolean;
+    runs: number;
+  } | null;
+  onApply: () => void;
+}) {
+  const { t } = useTranslation();
+
+  const pctOf = (r: string): { pct: number; real: boolean } | null => {
+    if (!tokenShare) return null;
+    if (tokenShare.has_data && tokenShare.measured[r] != null) {
+      return { pct: tokenShare.measured[r], real: true };
+    }
+    return { pct: tokenShare.estimate[r] ?? 0, real: false };
+  };
+  const agentPct = pctOf("agent");
+  const suggestedPct = suggested.reduce((s, r) => s + (pctOf(r)?.pct ?? 0), 0);
+  const allSelected = suggested.every((r) => selected.includes(r));
+
+  return (
+    <div className="rounded-lg border border-[var(--line)] bg-[var(--panel2)] p-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="text-[12px] font-medium text-ink-900">
+          {t("Suggested: give the premium model to quality-sensitive, low-volume steps")}
+        </div>
+        <Button
+          variant="ghost"
+          className="h-7 text-[11px]"
+          disabled={poolEmpty || allSelected}
+          onClick={onApply}
+        >
+          {allSelected ? t("Suggestion applied") : t("Apply suggestion")}
+        </Button>
+      </div>
+      <div className="mt-1.5 space-y-0.5">
+        {suggested.map((r) => {
+          const tp = pctOf(r);
+          return (
+            <div key={r} className="flex items-center gap-2 text-[11px] text-ink-600">
+              <span className="text-ink-700">{t(ROLE_LABEL[r])}</span>
+              {tp && (
+                <span className={tp.real ? "text-ink-500" : "text-ink-400"}>
+                  {tp.real ? `· ${tp.pct}%` : `· ≈${tp.pct}%`}
+                </span>
+              )}
+            </div>
+          );
+        })}
+      </div>
+      <div className="mt-1.5 text-[11px] text-ink-400">
+        {t(
+          "These add up to about {{pct}}% of tokens — small volume, so the premium model is cheap here. Execution is ~{{agent}}% of tokens, so it is deliberately not recommended.",
+          { pct: Math.round(suggestedPct), agent: agentPct ? Math.round(agentPct.pct) : "—" },
+        )}
+        {poolEmpty && (
+          <>
+            {" "}
+            {t("Add at least one model to the pool first, then pick it above as the premium model.")}
+          </>
+        )}
+      </div>
+    </div>
+  );
 }
 
 export function AdminSettingsPage() {
@@ -183,9 +268,7 @@ export function AdminSettingsPage() {
   // LLM model（只读展示真实生效值 + 连通性测试；编辑入口在下面的模型池里）
   const [llm, setLlm] = useState<LlmStatus | null>(null);
   const [testingLlm, setTestingLlm] = useState(false);
-  const [llmTest, setLlmTest] = useState<{ ok: boolean; text: string; result?: LlmTestResult } | null>(
-    null,
-  );
+  const [llmTest, setLlmTest] = useState<LlmTestReport | null>(null);
   const [loadError, setLoadError] = useState("");
 
   // LLM 池（多套网关，按顺序 429 兜底）—— 这是**唯一**的网关配置入口。
@@ -200,8 +283,6 @@ export function AdminSettingsPage() {
   // 这是唯一的模型分配控件，不再有"逐环节指定"那张子卡）。空壳用 emptyPremium()，
   // 字段与后端 premium_for_ui() 对齐。
   const [premium, setPremium] = useState<LlmPremiumStatus>(emptyPremium);
-  // 钥匙是只写的：本地编辑用的输入框（留空 = 保留已存）
-  const [premiumKey, setPremiumKey] = useState("");
   // 「模型分配」只用这一个保存按钮和一个 saving 标记。
   const [savingModels, setSavingModels] = useState(false);
 
@@ -237,7 +318,6 @@ export function AdminSettingsPage() {
         // 所以下面这块面板显示的模型名与实际调用逐字节一致。
         setLlm(s.llm);
         setPremium(s.llm.premium || emptyPremium());
-        setPremiumKey("");
         // 各角色 token 占比：与上面的设置加载并行，互不依赖。
         api.getLlmTokenShare().then(setTokenShare).catch(() => {});
         setFs(s.feishu);
@@ -293,6 +373,7 @@ export function AdminSettingsPage() {
 
   // 保存「模型分配」= 只提交平台级「高端模型接管」（2026-10-12 简化：砍掉合并时的
   // 逐环节覆盖 / 两级判定两张子卡，只留这一个机制）。一次 PUT，后端整体替换 premium。
+  // 2026-10-12 起：高端模型只从模型池里选一套（pool_name），不再自己提交连接信息。
   // 注意：逐环节覆盖（后端 roles 字段）不在界面暴露后这里不提交它 —— 后端保持原值，
   // 已存的逐环节覆盖仍按"更具体者胜"生效，只是不再可编辑；需要清空告诉我即可。
   const saveModels = async () => {
@@ -301,11 +382,8 @@ export function AdminSettingsPage() {
       await api.setLlmSettings({
         premium: {
           enabled: premium.enabled,
-          model: premium.model.trim(),
-          base_url: premium.base_url.trim(),
-          provider: premium.provider || "auto",
+          pool_name: premium.pool_name.trim(),
           roles: [...premium.roles],
-          api_key: premiumKey.trim() || undefined,
         },
       });
       await load();
@@ -323,17 +401,13 @@ export function AdminSettingsPage() {
     setLlmTest(null);
     try {
       const r = await api.testLlmSettings();
-      setLlmTest(
-        r.ok
-          ? {
-              ok: true,
-              text: `${t("Connected.")} ${t("Model")}: ${r.reply_model || r.model}`,
-              result: r,
-            }
-          : { ok: false, text: r.error || t("Connection failed.") },
-      );
+      setLlmTest(r);
     } catch (e: any) {
-      setLlmTest({ ok: false, text: e?.message || String(e) });
+      setLlmTest({
+        ok: false,
+        all_ok: false,
+        results: [{ name: "—", ok: false, error: e?.message || String(e) }],
+      });
     } finally {
       setTestingLlm(false);
     }
@@ -375,7 +449,10 @@ export function AdminSettingsPage() {
   };
 
   // 高端模型的表单态判断（不看服务端回值，否则"改了还没保存"时提示是错的）。
-  const premiumReady = premium.enabled && !!premium.model.trim() && premium.roles.length > 0;
+  // 高端模型"真的能用" = 开了 + 选的池条目确实存在于模型池 + 勾了至少一步。
+  const premiumResolved = pool != null && pool.some((p) => p.name === premium.pool_name);
+  const premiumResolvedModel = pool?.find((p) => p.name === premium.pool_name)?.model ?? "";
+  const premiumReady = premium.enabled && premiumResolved && premium.roles.length > 0;
   const premiumOnAgent = premium.enabled && premium.roles.includes("agent");
   // 已保存且真的在生效的用途（用服务端回值，避免把未保存的编辑当成现状）
   const premiumLiveRoles = (llm?.premium?.applies_to || [])
@@ -510,45 +587,58 @@ export function AdminSettingsPage() {
 
         <div className="flex flex-wrap items-center gap-3">
           <Button variant="ghost" onClick={testLlm} disabled={testingLlm}>
-            {testingLlm ? t("Testing…") : t("Test connection")}
+            {testingLlm ? t("Testing all models…") : t("Test all models")}
           </Button>
           <span className="inline-flex items-center text-xs text-ink-500">
-            {t("Tests the set the agent actually calls — and tells you which one that was.")}
-            <Hint text={t("The judge model needs vision (screenshots are evidence). Values here override .env; key stored encrypted.")} />
+            {t("Tests every model the platform may call — all pool entries and any per-purpose override — and lists each.")}
           </span>
         </div>
         {llmTest && (
-          <div
-            className={`rounded-lg px-3 py-2 text-xs ${
-              llmTest.ok
-                ? "bg-[var(--ok-bg,#e8f7ee)] text-[var(--ok-fg,#1a7f4b)]"
-                : "bg-[var(--bad-bg,#fee)] text-[var(--bad-fg)]"
-            }`}
-          >
-            {llmTest.ok ? "✓ " : "✕ "}
-            <span className="break-all">{llmTest.text}</span>
-            {/* 实测能力：换厂商后"能不能跑"就看这几个值，不用去翻日志找 400。
-                json_schema=false 是正常情况（如 DeepSeek）—— 代理会自动改走
-                system prompt 里的 schema，不需要用户做任何事。 */}
-            {llmTest.result?.protocol && (
-              <div className="mt-2 space-y-1 border-t border-[var(--line)] pt-2 text-[11px]">
-                <div className="font-mono">
-                  {t("Detected protocol")}: {llmTest.result.protocol}
-                  {llmTest.result.probed === false ? t(" (assumed, probe failed)") : ""}
-                </div>
-                <div className="flex flex-wrap gap-x-3 gap-y-0.5 font-mono">
-                  <span>{t("JSON object mode")}: {mark(!!llmTest.result.json_object)}</span>
-                  <span>{t("Strict JSON schema")}: {mark(!!llmTest.result.json_schema)}</span>
-                  <span>{t("Tool calling")}: {mark(!!llmTest.result.tools)}</span>
-                  <span>{t("Image input")}: {mark(!!llmTest.result.vision)}</span>
-                </div>
-                {llmTest.result.json_schema === false && (
-                  <div>
-                    {t("This gateway rejects strict JSON schema — the browser agent automatically keeps the schema in the system prompt instead. Nothing to fix.")}
+          <div className="space-y-2">
+            <div
+              className={`rounded-lg px-3 py-2 text-xs ${
+                llmTest.all_ok
+                  ? "bg-[var(--ok-bg,#e8f7ee)] text-[var(--ok-fg,#1a7f4b)]"
+                  : "bg-[var(--bad-bg,#fee)] text-[var(--bad-fg)]"
+              }`}
+            >
+              {llmTest.all_ok
+                ? t("All {{n}} model(s) connected.", { n: llmTest.results.length })
+                : t("{{ok}} of {{n}} model(s) connected — the rest failed.", {
+                    ok: llmTest.results.filter((r) => r.ok).length,
+                    n: llmTest.results.length,
+                  })}
+            </div>
+            <div className="space-y-1.5">
+              {llmTest.results.map((r, i) => (
+                <div
+                  key={`${r.name}-${i}`}
+                  className="rounded-lg border border-[var(--line)] px-3 py-2 text-[11px]"
+                >
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="font-mono font-medium text-ink-900">{r.name}</span>
+                    <span className="text-ink-500">{r.model}</span>
+                    <span className={r.ok ? "text-[var(--ok-fg,#1a7f4b)]" : "text-[var(--bad-fg)]"}>
+                      {r.ok ? "✓" : "✕"}
+                    </span>
                   </div>
-                )}
-              </div>
-            )}
+                  {r.ok ? (
+                    // 实测能力：换厂商后"能不能跑"就看这几个值，不用去翻日志找 400。
+                    // json_schema=false 是正常情况（如 DeepSeek）—— 代理会自动改走
+                    // system prompt 里的 schema，不需要用户做任何事。
+                    <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 font-mono text-ink-500">
+                      <span>{t("Protocol")}: {r.protocol}</span>
+                      <span>{t("JSON object")}: {mark(!!r.json_object)}</span>
+                      <span>{t("JSON schema")}: {mark(!!r.json_schema)}</span>
+                      <span>{t("Tools")}: {mark(!!r.tools)}</span>
+                      <span>{t("Vision")}: {mark(!!r.vision)}</span>
+                    </div>
+                  ) : (
+                    <div className="mt-1 break-all text-[var(--bad-fg)]">{r.error}</div>
+                  )}
+                </div>
+              ))}
+            </div>
           </div>
         )}
       </Card>
@@ -698,41 +788,52 @@ export function AdminSettingsPage() {
 
         {premium.enabled && (
           <>
+            {/* 高端模型 = 从模型池里选一套（连接信息只在池里填） */}
             <div className="flex flex-wrap items-center gap-2">
-              <Input
-                value={premium.model}
-                onChange={(e) => setPremium({ ...premium, model: e.target.value })}
-                placeholder={t("model name (required)")}
-                className="h-9 w-56"
-              />
               <Select
-                value={premium.provider || "auto"}
-                onChange={(e) => setPremium({ ...premium, provider: e.target.value })}
-                className="h-9 w-44"
+                value={premium.pool_name}
+                onChange={(e) => setPremium({ ...premium, pool_name: e.target.value })}
+                className="h-9 w-72"
               >
-                {PROVIDERS.map((p) => (
-                  <option key={p} value={p}>
-                    {t(PROVIDER_LABEL[p])}
+                <option value="">{t("— pick a model from the pool —")}</option>
+                {(pool || []).map((p) => (
+                  <option key={p.name} value={p.name}>
+                    {p.name} · {p.model}
                   </option>
                 ))}
               </Select>
-              <Input
-                value={premium.base_url}
-                onChange={(e) => setPremium({ ...premium, base_url: e.target.value })}
-                placeholder={t("gateway URL (blank = pool's set 1)")}
-                className="h-9 w-64"
-              />
-              <Input
-                type="password"
-                value={premiumKey}
-                onChange={(e) => setPremiumKey(e.target.value)}
-                placeholder={premium.api_key_set ? t("•••••••• (kept)") : t("api key (blank = keep stored)")}
-                className="h-9 w-48"
-              />
+              {premium.pool_name && (
+                <span className="text-[11px] text-ink-500">
+                  {premiumResolvedModel
+                    ? `${t("Premium model")}: ${premiumResolvedModel}`
+                    : t("(not found in pool)")}
+                </span>
+              )}
             </div>
             <div className="text-[11px] text-ink-400">
-              {t("Gateway and key are optional: leave the gateway blank to reuse the pool's set 1, leave the key blank to keep the stored one.")}
+              {t("The premium model is one of the pool entries below — its gateway, key and protocol are configured there, not here.")}
             </div>
+
+            {!premiumResolved && premium.pool_name && (
+              <div className="tp-alert tp-alert-warn text-[11px]">
+                {t("That pool entry no longer exists — pick another one, or the premium model will not take effect.")}
+              </div>
+            )}
+
+            {/* 建议：哪些环节该上高端模型（质量敏感、量小；agent 量大不推荐） */}
+            <PremiumSuggestion
+              poolEmpty={!pool || pool.length === 0}
+              suggested={PREMIUM_ROLES.filter((r) => r !== "agent")}
+              selected={premium.roles}
+              tokenShare={tokenShare}
+              onApply={() =>
+                setPremium((p) => ({
+                  ...p,
+                  enabled: true,
+                  roles: PREMIUM_ROLES.filter((r) => r !== "agent"),
+                }))
+              }
+            />
 
             <div className="space-y-1.5 rounded-lg border border-[var(--line)] p-3">
               <div className="text-[13px] font-medium text-ink-900">
@@ -802,7 +903,7 @@ export function AdminSettingsPage() {
             )}
             {!premiumReady && (
               <div className="tp-alert tp-alert-warn text-[11px]">
-                {t("Not in effect yet: fill in a model name and tick at least one step.")}
+                {t("Not in effect yet: pick a model from the pool and tick at least one step.")}
               </div>
             )}
           </>

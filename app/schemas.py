@@ -357,19 +357,16 @@ class LlmRoleIn(BaseModel):
 class LlmPremiumIn(BaseModel):
     """平台级「高端模型」（贵、聪明，**可选**）。整体替换语义：配置页保存的就是全部。
 
-    为什么单独一个模型而不是复用 LlmRoleIn：这一层要表达的是"开不开 + 管哪几件事"，
-    所以必须带 enabled 与 roles 两个语义位。缺了 enabled 就分不清"关掉它"和"没配过"；
-    缺了 roles 就变成"又一支默认模型"，而它存在的意义正是**只**用在质量敏感的环节上。
+    2026-10-12 起：高端模型**不再自己存连接信息**，而是从模型池里选一套
+    （`pool_name` 指向池里某个条目的 name）。所以这里只有 enabled / pool_name / roles
+    三个语义位——"开不开 + 选池里哪套 + 管哪几件事"。所有网关/钥匙/协议只在模型池里填。
 
-    api_key 只写：留空 = 保留已存的那把（界面只显示掩码，不可能让人重输）。
     roles 里不认识的名字会被服务端丢掉（按 app.llm.PREMIUM_ROLES 白名单过滤）。
     """
 
     enabled: bool = False
-    model: str = ""
-    base_url: str = ""
-    api_key: str | None = None  # 留空 => 保留已存的钥匙
-    provider: str = ""
+    # 指向模型池里某个条目的 name；空 = 没选（等同于没配）。
+    pool_name: str = ""
     roles: list[str] = Field(default_factory=list)
 
 

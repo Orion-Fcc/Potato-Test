@@ -367,8 +367,34 @@ const zh: Record<string, string> = {
     "「执行」占全部 token 的约 95%。把它也交给高端模型等于关掉了省钱的主旋钮 —— 其余环节量都很小，钱其实都花在这一项上。",
   "These steps also have their own model in “Model per purpose” below, and that one wins: {{roles}}. Clear those rows if you want the premium model to take over.":
     "这几个环节在下面的「按用途分模型」里也单独配了模型，而那一层更具体、会盖过这里：{{roles}}。想让高端模型接管，请把那几行清空。",
-  "Not in effect yet: fill in a model name and tick at least one step.":
-    "尚未生效：还需要填模型名，并至少勾选一个环节 —— 否则等于配了不用。",
+  // 2026-10-12：高端模型改为「从模型池里选一条」（不再自带网关/钥匙/协议）
+  "— pick a model from the pool —": "— 从模型池里选一个 —",
+  "Premium model": "高端模型",
+  "The premium model is one of the pool entries below — its gateway, key and protocol are configured there, not here.":
+    "高端模型就是下面模型池里的某一条 —— 它的网关、钥匙、协议都在那里配置，不在这里。",
+  "That pool entry no longer exists — pick another one, or the premium model will not take effect.":
+    "那条模型池条目已经不存在了 —— 换一条，否则高端模型不会生效。",
+  "Suggested: give the premium model to quality-sensitive, low-volume steps":
+    "建议：把高端模型给那些质量敏感、量小的环节",
+  "Apply suggestion": "应用建议",
+  "Suggestion applied": "已应用建议",
+  "These add up to about {{pct}}% of tokens — small volume, so the premium model is cheap here. Execution is ~{{agent}}% of tokens, so it is deliberately not recommended.":
+    "这几项加起来约占总 token 的 {{pct}}% —— 量小，所以在这里用高端模型很便宜。执行约占 {{agent}}%，所以特意不建议给它上高端模型。",
+  "Add at least one model to the pool first, then pick it above as the premium model.":
+    "先在模型池里加至少一个模型，再到上面把它选作高端模型。",
+  "Not in effect yet: pick a model from the pool and tick at least one step.":
+    "尚未生效：还需要从模型池里选一个模型，并至少勾选一个环节。",
+  // 2026-10-12：连通性检测改为「检测所有模型」（模型池全部条目 + 任何逐用途覆盖）
+  "Test all models": "检测所有模型",
+  "Testing all models…": "正在检测所有模型…",
+  "Tests every model the platform may call — all pool entries and any per-purpose override — and lists each.":
+    "检测平台可能调用的每一个模型 —— 所有模型池条目以及任何逐用途覆盖 —— 并逐一列出。",
+  "All {{n}} model(s) connected.": "全部 {{n}} 个模型均已连通。",
+  "{{ok}} of {{n}} model(s) connected — the rest failed.": "{{ok}} / {{n}} 个模型连通，其余失败。",
+  "JSON object": "JSON 对象",
+  "JSON schema": "JSON schema",
+  "Tools": "工具",
+  "Vision": "视觉",
   "You assigned the premium model to judging review, but two-tier judging is off — so it will never be called. Turn that switch on for it to actually do something.":
     "你把高端模型挂到了「判定复核」上，但两级判定开关是关的 —— 那它一次都不会被调用（复核只由两级判定触发）。要让它真起作用，请把下面那个开关打开。",
   "Save premium model": "保存高端模型",
@@ -876,6 +902,7 @@ const zh: Record<string, string> = {
   "set": "已设置",
   "not set — calls will likely be rejected": "未设置 —— 调用大概率会被拒绝",
   "(not set)": "（未设置）",
+  "(not found in pool)": "（模型池里找不到）",
   // LLM 协议与能力（2026-10-11）：换厂商不改代码，协议自动识别、能力实测
   "Protocol": "协议",
   "Auto-detect": "自动识别",

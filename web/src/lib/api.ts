@@ -258,14 +258,15 @@ export interface LlmStatus {
   premium?: LlmPremiumStatus;
 }
 
-// 平台级「高端模型」的现状。`usable` 不只看 enabled ——
-// 没填模型、或一个用途都没勾，都算"看起来配了其实没用"，界面必须如实说。
+// 平台级「高端模型」的现状。2026-10-12 起：高端模型**只从模型池里选一套**
+// （pool_name 指向池里某条目的 name），自己不再存连接信息。
+// `usable` 不只看 enabled —— 没选池条目、或一个用途都没勾，都算"看起来配了其实没用"。
 export interface LlmPremiumStatus {
   enabled: boolean;
-  model: string;
-  base_url: string;
-  provider: string;
-  api_key_set: boolean;
+  // 从模型池里选的那套的 name（空 = 没选）
+  pool_name: string;
+  // 选中的那套在池里的模型名（解析不到就是空串）—— 界面直接显示"高端模型 = X"
+  resolved_model: string;
   // 勾选的用途（已按后端固定顺序归一）
   roles: string[];
   usable: boolean;
@@ -308,13 +309,11 @@ export interface LlmSettingsIn {
 }
 
 // 保存平台级「高端模型」。整体替换语义：发上去的就是全部。
-// api_key 留空 = 保留已存的那把（界面只显示掩码，不可能让用户重输）。
+// 2026-10-12 起：高端模型只从模型池里选一套（pool_name），自己不存连接信息。
 export interface LlmPremiumIn {
   enabled: boolean;
-  model?: string;
-  base_url?: string;
-  api_key?: string;
-  provider?: string;
+  // 指向模型池里某个条目的 name
+  pool_name?: string;
   roles?: string[];
 }
 
@@ -341,12 +340,11 @@ export interface LlmPoolEntry {
 // 探活结果：不只是"通不通"，还把实测到的协议与能力一起报出来 ——
 // 换厂商之后"到底能不能跑、哪个特性不可用"看这几个布尔值就够了。
 export interface LlmTestResult {
-  ok: boolean;
+  /** 测的是哪一套（池条目的 name，或 role:override）。让"测通了"不至于不知道测的谁。 */
+  name: string;
   model?: string;
   reply_model?: string;
   api_key_set?: boolean;
-  /** 测的是哪一套（池条目的名字）。让"测通了"不至于不知道测的谁。 */
-  profile?: string;
   base_url?: string;
   protocol?: string;
   json_object?: boolean;
@@ -354,7 +352,15 @@ export interface LlmTestResult {
   tools?: boolean;
   vision?: boolean;
   probed?: boolean;
+  ok: boolean;
   error?: string;
+}
+
+// 连通性检测报告：一次性测「平台可能调用的每一套模型」，逐条列出。
+export interface LlmTestReport {
+  ok: boolean;
+  all_ok: boolean;
+  results: LlmTestResult[];
 }
 
 export interface FeishuStatus {
@@ -1220,7 +1226,7 @@ export const api = {
     req<{ pool: LlmPoolEntry[]; count: number; source: "pool" | "env"; seeded: boolean }>(
       "/admin/settings/llm/pool",
     ),
-  testLlmSettings: () => req<LlmTestResult>("/admin/settings/llm/test", { method: "POST" }),
+  testLlmSettings: () => req<LlmTestReport>("/admin/settings/llm/test", { method: "POST" }),
   // 各角色 token 占比：真实实测（执行流 by_role 聚合）优先，无数据回退结构估算。
   getLlmTokenShare: () =>
     req<{

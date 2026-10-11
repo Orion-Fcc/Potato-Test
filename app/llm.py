@@ -71,6 +71,21 @@ PREMIUM_ROLES: tuple[str, ...] = (
 # 输入几 k）。judge 不在里面 —— 判定的初判刻意留给便宜模型，那正是两级判定的意义。
 PREMIUM_DEFAULT_ROLES: tuple[str, ...] = ("judge_escalate", "specgen", "narrative")
 
+# 设置页「建议把高端模型用在哪些环节」的候选清单（2026-10-12）。
+#
+# 取舍依据（与 ROLE_TOKEN_SHARE_ESTIMATE 一致）：agent 占全部 token 的约 94%，
+# 把执行步换贵等于把"省钱主旋钮"关掉，所以**不在建议里**；其余用途都是"质量敏感、
+# 量小"——判定/复核决定用例成败、需规/叙述决定交付物质量、助手偶发——用更好的模型
+# 性价比最高。judge 也在内：初判刻意留便宜，但复核/升级值得用强模型，而建议只是
+# "勾哪些"，最终由人决定。
+SUGGESTED_PREMIUM_ROLES: tuple[str, ...] = (
+    "judge_escalate",
+    "judge",
+    "specgen",
+    "narrative",
+    "assistant",
+)
+
 # 各角色 token 占比的**结构估算**（2026-10-12）。
 #
 # 用途：设置页在「高端模型接管」每个用途勾选项旁显示「这个用途占全部 token 的百分之几」，
@@ -116,33 +131,39 @@ class RoleOverride:
 class PremiumModel:
     """平台级的「高端模型」槽位（贵、聪明，可选）。
 
-    语义刻意做得很窄，因为它的价值就在"一句话说清"：**开或不开**，开了管哪几个环节。
-    所以只需要一份连接信息 + 一份用途名单，而不是每个用途各存一套。
+    2026-10-12 改：高端模型**不再自己存连接信息**，而是从「模型池」里选一套
+    （`pool_name` 指向池里某个条目的 name）。模型的所有连接信息（网关/钥匙/协议）
+    只在模型池里填 —— 这样"哪套模型"只有一处真相，避免 premium 和池各写一份、
+    改了池却不知道 premium 还在用旧的。
+
+    语义仍然很窄：开或不开，开了管哪几个环节。所以只需要一个 pool_name + 一份用途名单。
 
     不生效的三种情形都必须老老实实回落，不能"看起来配了其实没用"：
       · enabled 关；
-      · 没填 model（只填了网关/钥匙等于说不出要调什么模型）；
+      · pool_name 空（没从池里选一套）；
       · roles 空（开了却没说管哪几件事）。
     """
 
     enabled: bool = False
-    model: str = ""
-    base_url: str = ""
-    api_key: str = ""
-    provider: str = ""
+    # 指向模型池里某个条目的 name。空 = 还没选（等于没配）。
+    pool_name: str = ""
     roles: tuple[str, ...] = ()
 
     @property
     def usable(self) -> bool:
-        """能不能真的派上用场（三个条件缺一不可）。"""
-        return bool(self.enabled and self.model and self.roles)
+        """结构上的可用性：开了、选了池里的某套、且勾了至少一个用途。
+
+        注意：pool_name 指向的条目是否真的存在，是运行时才确定的（池可能被改），
+        所以"真正能不能派上用场"以 role_profile / premium_for_ui 解析池后的结论为准。
+        """
+        return bool(self.enabled and self.pool_name and self.roles)
 
     def covers(self, role: str) -> bool:
         return self.usable and role in self.roles
 
     @property
     def empty(self) -> bool:
-        return not (self.enabled or self.model or self.base_url or self.api_key or self.roles)
+        return not (self.enabled or self.pool_name or self.roles)
 
 
 @dataclass(frozen=True)
@@ -407,10 +428,10 @@ async def load_premium() -> PremiumModel:
                 ]
                 out = PremiumModel(
                     enabled=bool(it.get("enabled")),
-                    model=(it.get("model") or "").strip(),
-                    base_url=(it.get("base_url") or "").strip(),
-                    api_key=(it.get("api_key") or "").strip(),
-                    provider=(it.get("provider") or "").strip(),
+                    # 2026-10-12 起高端模型只指向模型池里的某套（pool_name）；
+                    # 旧的 model/base_url/api_key/provider 字段已被废弃、读取时忽略，
+                    # 它们若是还留在库里，等价于"没选池条目"，高端模型自然回落。
+                    pool_name=(it.get("pool_name") or "").strip(),
                     # 按 PREMIUM_ROLES 的固定顺序归一，界面勾选顺序不该影响存储内容
                     roles=tuple(r for r in PREMIUM_ROLES if r in set(added)),
                 )
@@ -421,20 +442,43 @@ async def load_premium() -> PremiumModel:
     return out
 
 
+async def _premium_target(prem: "PremiumModel") -> "LLMProfile | None":
+    """把 premium 解析成真正要用的 profile（指向模型池里那套）。
+
+    解析不出来（没开 / 没选 / 选的名字在池里已不存在）返回 None —— 调用方据此回落，
+    绝不拿一个不存在的模型硬上。这样"改了池把某条目删了"不会让 premium 悄悄指向
+    一个无效配置。
+    """
+    if not (prem.enabled and prem.pool_name and prem.roles):
+        return None
+    pool = await load_pool()
+    for p in pool:
+        if p.name == prem.pool_name:
+            return LLMProfile(
+                name=f"premium:{p.name}",
+                base_url=p.base_url,
+                api_key=p.api_key,
+                model=p.model,
+                # 换了模型就不再沿用默认的 agent_model —— 那个默认名在新模型上多半不存在。
+                agent_model="",
+                provider=p.provider,
+            )
+    return None
+
+
 async def premium_for_ui() -> dict:
-    """给设置页看的高端模型配置（钥匙只回"有没有存过"，不回明文）。"""
+    """给设置页看的高端模型配置（不再含钥匙明文 —— 钥匙只存在于模型池里）。"""
     prem = await load_premium()
+    pp = await _premium_target(prem)
     return {
         "enabled": prem.enabled,
-        "model": prem.model,
-        "base_url": prem.base_url,
-        "provider": prem.provider,
-        "api_key_set": bool(prem.api_key),
+        "pool_name": prem.pool_name,
+        # 选中的那套在池里的模型名（解析不到就空）：界面直接显示"高端模型 = X"。
+        "resolved_model": pp.model if pp else "",
         "roles": list(prem.roles),
-        # 配了但用不起来（缺 model 或一个用途都没勾）—— 界面必须说清，否则用户
-        # 会以为"开了就生效了"，实际一分钱没花、质量也没提升。
-        "usable": prem.usable,
-        "applies_to": [r for r in ROLES if prem.covers(r)],
+        # 真正可用 = 解析到了池里的某套，且至少勾了一个用途。
+        "usable": pp is not None and bool(prem.roles),
+        "applies_to": [r for r in ROLES if r in prem.roles] if pp is not None else [],
     }
 
 
@@ -489,17 +533,11 @@ async def role_profile(role: str) -> LLMProfile:
     base = pool[0]
 
     prem = await load_premium()
-    if prem.covers(role):
-        # 只写 model 也能用：网关/钥匙没填就沿用池第 1 套的（多数人是同一个网关换模型名）。
-        base = LLMProfile(
-            name=f"premium:{prem.model}",
-            base_url=prem.base_url or base.base_url,
-            api_key=prem.api_key or base.api_key,
-            model=prem.model,
-            # 换了模型就不再沿用默认的 agent_model —— 那个默认名在新模型上多半不存在。
-            agent_model="",
-            provider=prem.provider or base.provider,
-        )
+    pp = await _premium_target(prem)
+    if pp is not None and role in prem.roles:
+        # 高端模型就是池里的某一套（pool_name 指向它）：连接信息全在那套里，
+        # 这里只是把它"提拔"到这个用途。换模型就不再沿用默认的 agent_model。
+        base = pp
 
     ov = (await load_roles()).get(role)
     if ov is None or ov.empty:
@@ -524,7 +562,8 @@ async def role_source(role: str) -> str:
     ov = (await load_roles()).get(role)
     if ov is not None and not ov.empty:
         return "override"
-    if (await load_premium()).covers(role):
+    prem = await load_premium()
+    if (await _premium_target(prem)) is not None and role in prem.roles:
         return "premium"
     return "pool"
 
@@ -833,6 +872,7 @@ from app.llm_protocol import Capabilities, capabilities_for  # noqa: E402
 __all__ = [
     "PREMIUM_DEFAULT_ROLES",
     "PREMIUM_ROLES",
+    "SUGGESTED_PREMIUM_ROLES",
     "ROLES",
     "LLMConfig",
     "LLMProfile",

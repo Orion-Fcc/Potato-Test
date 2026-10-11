@@ -667,28 +667,22 @@ async def set_admin_llm(body: LlmSettingsIn) -> dict:
         if body.premium is not None:
             # 平台级「高端模型」：整体替换（None 才表示"不动"）。
             #
-            # 钥匙留空 = 保留已存的那把（界面只显示掩码，不可能逼用户重输）。
+            # 2026-10-12 起：高端模型只存「从池里选哪套」(pool_name) + 用途名单，
+            # 不再自己存连接信息 —— 钥匙只存在于模型池里，premium 不重复存。
             # 用途名按 PREMIUM_ROLES 白名单过滤：一个拼错的用途如果被存下来，
             # 界面会显示它"已生效"而实际从不生效 —— 正是这一版要消灭的那类错觉。
-            old_prem = await llm_mod.load_premium()  # 已存的钥匙（加密），用于"留空=保留"
-            roles_in = {r for r in body.premium.roles if r in llm_mod.PREMIUM_ROLES}
+            roles_in = {r for r in (body.premium.roles or []) if r in llm_mod.PREMIUM_ROLES}
             item = {
                 "enabled": bool(body.premium.enabled),
-                "model": (body.premium.model or "").strip(),
-                "base_url": (body.premium.base_url or "").strip(),
-                "api_key": (body.premium.api_key or "").strip() or old_prem.api_key,
-                "provider": (body.premium.provider or "").strip(),
+                "pool_name": (body.premium.pool_name or "").strip(),
                 # 按固定顺序归一：界面勾选顺序不该泄漏进存储内容。
                 "roles": [r for r in llm_mod.PREMIUM_ROLES if r in roles_in],
             }
-            empty = not (
-                item["enabled"] or item["model"] or item["base_url"]
-                or item["api_key"] or item["roles"]
-            )
+            empty = not (item["enabled"] or item["pool_name"] or item["roles"])
             await set_setting(
                 s, llm_mod.LLM_PREMIUM_KEY,
                 "" if empty else json.dumps(item, ensure_ascii=False),
-                secret=not empty,
+                secret=False,
             )
     llm_mod.invalidate_llm_cache()
     # 回真实生效的那一套（池的第 1 条 + 用途覆盖），不是旧单值字段 ——
@@ -769,49 +763,83 @@ async def get_admin_llm_token_share() -> dict:
 
 @router.post("/admin/settings/llm/test", dependencies=[Depends(auth.require_admin)])
 async def test_admin_llm() -> dict:
-    """Ping the gateway the platform is ACTUALLY using, with a 1-token completion.
+    """连通性检测：测「平台可能调用的每一套模型」，而不只是 agent 在跑的那一套。
 
-    Exists because "saved but nothing works" is otherwise indistinguishable from a bad
-    key, a wrong base URL, or a model name the gateway does not serve. Returns ok=False
-    with the upstream message rather than raising, so the UI can show it inline.
+    为什么测全部（2026-10-12）：配了模型池之后，真正在跑的不止池第 1 条——
+    高端模型可能指向池里另一套、按用途覆盖也可能指向池外的模型。只测 agent 那一套，
+    "测通了"只代表其中一套通，其余几套配错（错 key / 错模型名 / 错网关）时界面会
+    让人误以为全都对。所以一次性把每一套都探一遍，界面逐条告诉用户哪套通、哪套挂。
 
-    ★ 2026-10-11 修正：以前测的是 env / 旧单值字段（`llm_config()` + `active_profile()`），
-    而配了池之后真正在跑的是池的第 1 条 —— 于是"测试通过"和"实际 401"可以同时成立，
-    而用户会以为是平台坏了。现在固定测 `pool_for_role("agent")[0]`，
-    也就是 agent 每步执行真正用的那一套（占全部 token 的约 95%）。
+    探测并发进行（asyncio.gather）：一套超时（25s）不会拖住其它套，整体等待约等于
+    最慢那套而不是累加。每套都带 force=True 绕过能力缓存 —— 这个按钮的语义就是"现在实测"。
     """
-    from app import llm as llm_mod
+    import asyncio
 
-    profile = (await llm_mod.pool_for_role("agent"))[0]
-    model = (profile.agent_model or profile.model or "").strip()
-    if not profile.base_url:
-        return {"ok": False, "error": "Base URL is empty — nothing to call."}
-    if not model:
-        return {"ok": False, "error": "No model name set — fill in Model first."}
-    try:
-        # 协议与能力一起报出来：换厂商之后"能不能跑"就看这几个布尔值，
-        # 不用再去翻日志找 400。force=True 绕过缓存 —— 这个按钮的语义就是"现在实测"。
-        caps = await llm_mod.capabilities_for(profile, force=True)
-        res = await llm_mod.chat(
-            profile, user="ping", max_tokens=16, timeout=25.0
+    from app import llm as llm_mod
+    from app.llm import LLMProfile
+
+    # 1) 模型池里的每一套 —— 这是高端模型 / 429 兜底真正会用的集合。
+    profiles = list(await llm_mod.load_pool())
+
+    # 2) 把「按用途覆盖」里**不在池里**的模型也补进来：它们也是平台会真实调用的模型，
+    #    但界面已不再提供编辑入口，漏测它们就等于留了一处"静默可能配错"的点。
+    roles = await llm_mod.load_roles()
+    seen = {(p.base_url, p.model, p.api_key) for p in profiles}
+    for role, ov in roles.items():
+        if ov is None or ov.empty:
+            continue
+        bu = (ov.base_url or (profiles[0].base_url if profiles else "")).strip()
+        mdl = (ov.model or "").strip()
+        key = (ov.api_key or "").strip()
+        if not mdl:
+            continue
+        k = (bu, mdl, key)
+        if k in seen:
+            continue
+        seen.add(k)
+        profiles.append(
+            LLMProfile(
+                name=f"{role}:override",
+                base_url=bu,
+                api_key=key,
+                model=mdl,
+                provider=(ov.provider or "auto").strip() or "auto",
+            )
         )
-        return {
-            "ok": True,
-            "model": model,
-            "reply_model": getattr(res.raw, "model", model),
-            "api_key_set": bool(profile.api_key),
-            # 测的是哪一套：名字 + 网关。界面上直接显示，避免"测通了但不知道测的谁"。
-            "profile": profile.name,
-            "base_url": profile.base_url,
-            "protocol": caps.protocol,
-            "json_object": caps.json_object,
-            "json_schema": caps.json_schema,
-            "tools": caps.tools,
-            "vision": caps.vision,
-            "probed": caps.probed,
-        }
-    except Exception as exc:  # noqa: BLE001 — surfaced verbatim to the operator
-        return {"ok": False, "error": f"{type(exc).__name__}: {exc}", "model": model}
+
+    async def _one(p: LLMProfile) -> dict:
+        model = (p.agent_model or p.model or "").strip()
+        if not p.base_url:
+            return {"name": p.name, "model": model, "ok": False,
+                    "error": "Base URL is empty — nothing to call."}
+        if not model:
+            return {"name": p.name, "model": model, "ok": False,
+                    "error": "No model name set — fill in Model first."}
+        try:
+            # 协议与能力一起报出来：换厂商之后"能不能跑"就看这几个布尔值。
+            caps = await llm_mod.capabilities_for(p, force=True)
+            res = await llm_mod.chat(p, user="ping", max_tokens=16, timeout=25.0)
+            return {
+                "name": p.name,
+                "model": model,
+                "ok": True,
+                "reply_model": getattr(res.raw, "model", model),
+                "api_key_set": bool(p.api_key),
+                "base_url": p.base_url,
+                "protocol": caps.protocol,
+                "json_object": caps.json_object,
+                "json_schema": caps.json_schema,
+                "tools": caps.tools,
+                "vision": caps.vision,
+                "probed": caps.probed,
+            }
+        except Exception as exc:  # noqa: BLE001 — surfaced verbatim to the operator
+            return {"name": p.name, "model": model, "ok": False,
+                    "error": f"{type(exc).__name__}: {exc}"}
+
+    results = await asyncio.gather(*[_one(p) for p in profiles])
+    all_ok = all(r["ok"] for r in results)
+    return {"ok": all_ok, "all_ok": all_ok, "results": list(results)}
 
 
 @router.put("/admin/settings/gitlab-token", dependencies=[Depends(auth.require_admin)])

@@ -419,6 +419,58 @@ button, a, input, textarea, [role="button"] {
   user-select: none;
 }
 
+/* Mermaid 图的尺寸（2026-10-12 修）。
+ *
+ * mermaid 生成的 `<svg width="100%" style="max-width:1320px">` **没有 height**。
+ * `width:100%` 必须配 `height:auto` 才会按 viewBox 比例缩放 ——
+ * 少了 height:auto，宽图会被压成一条细线：实测 viewBox 是 1320x76，
+ * 在 950px 宽的容器里渲染成 932x**54**，七个节点的文字挤成一团。
+ *
+ * `!important` 是必须的：mermaid 把 width/max-width 写成**内联样式**，
+ * 不加盖不住。`max-width:100%` 防止图比容器还宽。
+ */
+/* ★ SVG 也要自己限高，否则纵向长图会被裁掉（2026-10-12 修）。
+ *
+ * 只给外层容器 max-height 是**不够的**：SVG 的宽度由 `width:100%` 撑满容器，
+ * 高度按 viewBox 比例算出来 —— 10 个节点的纵向链是 932x**2822**，
+ * 于是用户看到的是"窗口里只有前两个节点"，剩下八个要滚 2800px 才看得到。
+ * 那不是"图"，那是一张被裁开的图。
+ *
+ * `max-height:100%` 让它**整体等比缩小**到容器高度以内：2822px 缩到 600px，
+ * 宽从 932 缩到约 198px —— 图形完整、不用滚动。字会变小，但这是
+ * "看得全"和"字够大"之间必须选一个，而看不清的完整图比看得清的一角有用。
+ * 外层 overflow:auto 保证极端情况下仍可滚。
+ */
+/* ★ SVG 自己限高，才有"看得全的完整图"（2026-10-12 修，试了三轮）。
+ *
+ * 走过两个弯路，记下来免得重犯：
+ *   1. 只给外层容器 max-height → SVG 仍按 `width:100%` 撑满容器宽度，
+ *      纵向链的高度按 viewBox 比例长到 2822px，用户只看到头两个节点；
+ *   2. 给 SVG 写 `max-height:100%` → 普通块父元素只有 max-height 没有 height，
+ *      百分比解析成 none，**完全没生效**；改成 flex 父元素也没用（SVG 是
+ *      `width:100%` 的替换元素，它会按宽度算高度）。
+ *
+ * 所以直接用**具体数值**：520px 上限让过高的图整体等比缩小到看得全，
+ * 不会出现"只看到一半"的情况。代价是超高的图字会变小 ——
+ * 这由提示词那边控制（6~10 个节点），极端情况交给 overflow 滚动。
+ */
+.tp-mermaid-box {
+  max-height: 600px;
+  overflow: auto;
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+}
+.tp-mermaid-box svg {
+  /* mermaid 把 width/max-width 内联写在元素上，不加 !important 盖不住 */
+  height: auto !important;
+  max-width: 100% !important;
+  max-height: 520px !important;
+  display: block;
+  margin: 0 auto;
+  flex: 0 0 auto;
+}
+
 /* 多行截断（2026-10-10，用户反馈"看不到所有界面"）。
  *
  * 为什么不直接用 Tailwind 的 `line-clamp-4`：它要 `@tailwindcss/line-clamp`

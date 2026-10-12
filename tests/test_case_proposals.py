@@ -27,6 +27,7 @@ import pytest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 from app.case_optimize import (  # noqa: E402
+    _fix_flow_direction,
     build_prompt,
     group_cases_by_module,
     parse_proposals,
@@ -477,6 +478,53 @@ class TestParseProposals:
             assert got[0].payload["priority"] == want
 
 
+class TestFlowDirection:
+    """★ 过长的横向流程图要改成纵向（2026-10-12）。
+
+    实测：7 个节点的 `flowchart LR` 渲染出 1320x76 —— **17:1**。
+    缩进提案页 950px 宽的容器后每个节点只剩十几像素，文字看不清。
+    图是用来判断"为什么要改这条用例"的，看不清等于没有。
+
+    提示词里已经让模型按步骤数选方向，但模型不总听，所以代码里兜一道。
+    """
+
+    def test_a_long_lr_chain_becomes_td(self):
+        src = (
+            'flowchart LR\n  A["甲"] --> B["乙"]\n  B --> C["丙"]\n'
+            '  C --> D["丁"]\n  D --> E["戊"]'
+        )
+        out = _fix_flow_direction(src)
+        assert out.split("\n")[0].strip() == "flowchart TD"
+        # 只改方向那一行，节点与边必须原样保留
+        assert 'A["甲"] --> B["乙"]' in out
+        assert 'D["丁"]' in out
+
+    def test_a_short_lr_chain_is_left_alone(self):
+        """≤4 步时 LR 正好（扁扁的填满宽度），不该动。"""
+        src = 'flowchart LR\n  A["甲"] --> B["乙"]\n  B --> C["丙"]'
+        assert _fix_flow_direction(src).split("\n")[0].strip() == "flowchart LR"
+
+    def test_td_is_never_touched(self):
+        src = 'flowchart TD\n  A["甲"] --> B["乙"]\n  B --> C["丙"]\n  C --> D["丁"]\n  D --> E["戊"]'
+        assert _fix_flow_direction(src) == src
+
+    def test_a_leading_comment_does_not_confuse_it(self):
+        """`%%` 注释可能在声明之前 —— 声明行不一定是第一行。"""
+        src = (
+            '%% 说明\nflowchart LR\n  A["甲"] --> B["乙"]\n  B --> C["丙"]\n'
+            '  C --> D["丁"]\n  D --> E["戊"]'
+        )
+        out = _fix_flow_direction(src)
+        assert "flowchart TD" in out
+        assert "%% 说明" in out, "注释被吃掉了"
+
+    def test_empty_is_safe(self):
+        assert _fix_flow_direction("") == ""
+
+    def test_a_proposal_flow_with_no_edges_is_safe(self):
+        assert _fix_flow_direction("flowchart LR\n  A[\"孤立节点\"]") == "flowchart LR\n  A[\"孤立节点\"]"
+
+
 class TestBuildPrompt:
     def test_includes_module_cases_and_spec(self):
         p = build_prompt("模块A", [{"case_key": "TP-A-001", "name": "进列表", "expected": "有数据"}], "需规正文")
@@ -489,7 +537,30 @@ class TestBuildPrompt:
         cases = [{"case_key": f"K{i}", "name": f"用例{i}"} for i in range(100)]
         p = build_prompt("M", cases, "x")
         assert "只列了前" in p
-        assert "未列出的不要提 remove" in p
+        assert "不要提 remove" in p
+
+    def test_prompt_stays_under_the_gateway_limit(self):
+        """★ 提示词总长必须低于网关的"空回复"边界（2026-10-12）。
+
+        实测：这个话题的网关对超过约 4.5~5k 字符的 user 提示词
+        返回 HTTP 200 + **空内容**（无报错）。40 条用例的完整提示词约 9700 字符，
+        于是 12 个模块**全部**失败（"共 0 字符"），一次都跑不成。
+
+        这条测试就是防止有人再把上限调大回去 —— 调大不会报错，
+        只会在真跑的时候一个模块都出不来。
+        """
+        cases = [
+            {
+                "case_key": f"TP-X-{i:03d}",
+                "name": f"很长的用例名称{'甲' * 40}{i}",
+                "expected": "预期的内容" * 20,
+                "prompt": "给浏览器 agent 的任务描述" * 20,
+                "role": "sittrapprovea",
+            }
+            for i in range(200)
+        ]
+        p = build_prompt("M", cases, "需规正文" * 2000, [{"role": "sittrapprovea", "healthy": True}])
+        assert len(p) < 5000, f"提示词 {len(p)} 字符，会撞上网关的空回复边界"
 
     def test_module_with_no_cases_says_so(self):
         assert "还没有任何用例" in build_prompt("空模块", [], "需规")

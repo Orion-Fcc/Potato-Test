@@ -893,6 +893,10 @@ def _read_roots() -> list[pathlib.Path]:
     return out
 
 
+# Windows 盘符/UNC 绝对路径（见 `_resolve_readable` 里的说明）。
+_WIN_ABS_RE = re.compile(r"^(?:[A-Za-z]:[\\/]|\\\\)")
+
+
 def _resolve_readable(target: str) -> tuple[pathlib.Path | None, str]:
     """Resolve ``target`` and confirm it sits inside an allowed root.
 
@@ -907,9 +911,27 @@ def _resolve_readable(target: str) -> tuple[pathlib.Path | None, str]:
     # ~ 目录，私钥就进来了。展开必须发生在解析之前。
     raw = os.path.expanduser(raw)
     p = pathlib.Path(raw)
-    if not p.is_absolute():
+    # ★ Windows 上 `C:/Windows/...` 这种**正斜杠的盘符路径**会被
+    #   `pathlib.Path.is_absolute()` 判成**相对**路径（WindowsPath 把 "/" 当锚、
+    #   而不把 "C:" 当锚，只有 `C:\` 才算绝对）。
+    #
+    # 不拦的后果很严重：`p = cwd / p` 会把这个绝对路径**拼到项目目录后面**，
+    # 于是 `C:/Windows/System32/drivers/etc/hosts` 变成 `<cwd>/hosts`，
+    # 再被下面"按文件名在允许目录里找"的兜底逻辑搜到桌面上的同名文件，
+    # 最后**当作合法路径返回**。实测就是这样：越权路径被解析成了
+    # `C:\Users\16132\Desktop\hosts` —— 等于"随便给一个绝对路径"都能读到
+    # 桌面/文档里恰好同名的文件（`~/.ssh/id_rsa` 只要名字撞上就出去了）。
+    #
+    # 判据用正则而不是 is_absolute()：`C:/x`、`C:\x`、`\\server\share` 全算绝对。
+    if _WIN_ABS_RE.match(raw):
+        p = pathlib.Path(raw)
+        was_absolute = True
+    elif p.is_absolute():
+        was_absolute = True
+    else:
         # 相对路径按项目目录解释：用户说「docs/需规.docx」时，他要的是项目里那份。
         p = pathlib.Path.cwd() / p
+        was_absolute = False
     try:
         rp = p.resolve()
     except Exception as exc:  # noqa: BLE001
@@ -926,6 +948,22 @@ def _resolve_readable(target: str) -> tuple[pathlib.Path | None, str]:
             return rp, ""
         except ValueError:
             continue
+
+    # ★ 给的是**绝对路径**却不在允许目录里 → 直接拒绝，**不许**走下面的文件名兜底
+    #   （2026-10-12 修，测试暴露的真漏洞）。
+    #
+    # 原来这里会继续往下"按文件名在允许目录里找"，于是
+    # `C:/Windows/System32/drivers/etc/hosts` 被解析成了
+    # `C:\Users\16132\Desktop\hosts` —— 桌面恰好有个叫 hosts 的文件。
+    # 后果是**随便给一个绝对路径**都能读到桌面/文档里的同名文件
+    # （`~/.ssh/id_rsa`、`.env` 之类只要名字撞上就出去了），而且返回的路径
+    # 看起来完全合法，调用方不会察觉。
+    #
+    # 兜底的本意是帮"只说了文件名"的用户，不是帮"说了越权绝对路径"的人 ——
+    # 对后者，正确答复就是拒绝。
+    if was_absolute:
+        allowed = "\n".join(f"  - {r}" for r in roots)
+        return None, f"不在允许读取的目录下。可读目录：\n{allowed}\n（其他路径需先由用户复制进来）"
 
     # 也接受「用户没给绝对路径、但文件名唯一落在某个允许根下」的情况 ——
     # 直接报「不在允许目录」对用户没有帮助，因为他可能压根不知道绝对路径。

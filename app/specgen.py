@@ -387,19 +387,57 @@ async def _call_json(system: str, user: str, max_tokens: int = 8000) -> tuple[di
     失败往上抛，由调用方决定怎么报给用户 —— 生成失败必须说出来，不能静默返回空列表。
 
     协议由 profile 决定（门面内部处理）：OpenAI 兼容 / Anthropic / Gemini 都能生成。
+
+    ## ★ 空回复要自动缩提示词重试（2026-10-12 加）
+
+    实测这个网关有个**没有任何报错**的边界：user 提示词超过约 4.5~5k 字符时，
+    它返回 HTTP 200 但内容是**空字符串**。表现是"模型未返回 JSON 对象（共 0 字符）"，
+    看起来像模型抽风，实际是提示词太大。
+
+    实测证据（同一模块、同一份提示词，只改长度）：
+        3500 字符 → OK    4000 → OK    4500 → OK
+        5000 字符 → 空     8000 → 空    11000 → 空
+
+    这件事**伤到的不止一个功能**：`_call_json` 有四个调用方
+    （case_optimize / spec_overview 的规划与分节 / specgen 的生成与规划），
+    日志里 "未返回 JSON 对象" 累计 47 次，来自 case_optimize(37) 与 spec_overview(10)。
+    所以防护做在**这里**，而不是让每个调用方各自小心。
+
+    缩到 70% / 45% 再试：提示词都是按"最重要的在前"拼的，截尾丢的是次要部分，
+    比整批失败好得多。缩完仍空就照旧往上抛 —— 不掩盖问题。
     """
     from app import llm as _llm
 
-    res, _prof = await _llm.chat_with_pool(
-        role="specgen",
-        system=system,
-        user=user,
-        json_mode=True,
-        temperature=0,
-        max_tokens=min(max_tokens, get_settings().gateway_max_tokens or max_tokens),
-        timeout=180.0,
-    )
-    data = res.json(default=None)
+    attempts = [user]
+    for ratio in (0.7, 0.45):
+        shorter = user[: max(500, int(len(user) * ratio))]
+        if shorter and shorter != attempts[-1]:
+            attempts.append(shorter)
+
+    last_res: Any = None
+    last_prompt = user
+    data: Any = None
+    for i, prompt in enumerate(attempts):
+        res, _prof = await _llm.chat_with_pool(
+            role="specgen",
+            system=system,
+            user=prompt,
+            json_mode=True,
+            temperature=0,
+            max_tokens=min(max_tokens, get_settings().gateway_max_tokens or max_tokens),
+            timeout=180.0,
+        )
+        data = res.json(default=None)
+        if isinstance(data, dict):
+            if i:
+                log.warning(
+                    "specgen: 提示词 %d 字符时网关回空，缩到 %d 字符后成功",
+                    len(user),
+                    len(prompt),
+                )
+            return data, dict(res.usage or _llm.empty_usage())
+        last_res, last_prompt = res, prompt
+    res = last_res
     if not isinstance(data, dict):
         # ★ 报错要能区分两种完全不同的病（2026-10-12）：
         #   * 输出被 max_tokens **截断** → 末尾没有收尾的 `}`，
@@ -410,6 +448,13 @@ async def _call_json(system: str, user: str, max_tokens: int = 8000) -> tuple[di
         text = res.text or ""
         truncated = bool(text) and not text.rstrip().endswith("}")
         hint = "（输出被截断了：末尾没有收尾的 }）" if truncated else ""
+        if not text and len(user) >= 4000:
+            # 空回复 + 大提示词 = 上面那个网关边界。把话说明白，
+            # 否则后来的人会去查模型，而真正的原因是提示词长度。
+            hint = (
+                f"（网关对 {len(user)} 字符的提示词返回了空内容；"
+                f"已缩到 {len(last_prompt)} 字符重试过）"
+            )
         head = text[:120].replace("\n", " ")
         tail = text[-160:].replace("\n", " ")
         # ★ 把原始输出挂在异常上（2026-10-12 加）。调用方有时能从这段**残缺的**文本里

@@ -95,6 +95,34 @@ def test_traversal_out_of_the_project_is_refused(target):
     assert err
 
 
+def test_an_out_of_root_absolute_path_cannot_fall_back_to_a_filename_match(tmp_path, monkeypatch):
+    """★ 越权的**绝对路径**绝不能走"按文件名兜底"（2026-10-12 修的真漏洞）。
+
+    上面那个参数化测试只有在这台机器上**恰好**存在同名文件时才会失败 ——
+    实测就是这样：`C:/Windows/System32/drivers/etc/hosts` 被解析成了
+    `C:\\Users\\16132\\Desktop\\hosts`（桌面有个 hosts）。也就是说
+    "随便给一个绝对路径"都能读到桌面/文档里的同名文件
+    （`~/.ssh/id_rsa`、`.env` 之类只要名字撞上就出去了），
+    而且返回的路径看起来完全合法，调用方不会察觉。
+
+    这条测试**自己造**那个同名文件，所以不依赖环境，任何机器上都能抓到回归。
+    """
+    root = tmp_path / "allowed"
+    root.mkdir()
+    decoy = root / "id_rsa"
+    decoy.write_text("SECRET", encoding="utf-8")  # 允许目录里放一个同名诱饵
+    monkeypatch.setattr(assistant, "_read_roots", lambda: [root])
+
+    # 绝对路径在根之外 —— 即使根下有个同名的诱饵，也必须拒绝
+    path, err = assistant._resolve_readable("C:/Users/someone/.ssh/id_rsa")
+    assert path is None, f"越权绝对路径被兜底成了 {path}"
+    assert "不在允许读取的目录下" in err
+
+    # 而**裸文件名**仍然要能兜底命中（这是那个兜底本来的用途）
+    ok, e2 = assistant._resolve_readable("id_rsa")
+    assert ok == decoy.resolve(), f"裸文件名兜底被误伤：{ok} / {e2}"
+
+
 def test_a_home_relative_path_is_expanded_before_the_check():
     """★ ``~`` must be expanded *before* the allowlist runs.
 

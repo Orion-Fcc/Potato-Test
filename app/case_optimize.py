@@ -30,16 +30,29 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 
 log = logging.getLogger("potato-test.case_optimize")
 
 # 每个模块最多带多少条现存用例给模型看。超过就截断并**说明截断了** ——
 # 不说明的话模型会对没看到的部分照样下结论。
-_MAX_CASES_PER_MODULE = 40
+#
+# ★ 从 40 降到 12（2026-10-12 实测）。
+# 40 条用例的提示词约 9700 字符，而**这个网关对超过约 4.5~5k 字符的提示词
+# 返回空内容**（HTTP 200、正文空、无报错）。实测：同一模块、同一提示词，
+#   3500 字符→OK  4000→OK  4500→OK  5000→空  8000→空  11000→空
+# 于是 12 个模块**全部**报"模型未返回 JSON 对象（共 0 字符）"—— 一次都跑不成。
+#
+# 12 条 + 1500 字需规 ≈ 4200 字符，落在安全区。
+# 代价是模型看不到全部用例（它可能因此漏判"与某条重复"），
+# 所以提示词里会**明说只列了前 N 条**，并且优化入口优先取用例最多的模块。
+_MAX_CASES_PER_MODULE = 12
 
 # 需规内容最多给多少字符。
-_MAX_SPEC_CHARS = 4000
+# 同样为提示词总长让路：4000 → 1500。需规是判断依据，但它只用来提供
+# "这个模块应该有什么"，1500 字足够覆盖一个模块的规则描述。
+_MAX_SPEC_CHARS = 1500
 
 # 一次运行最多收多少条提案（防止模型话多到把审阅页撑爆）。
 _MAX_PROPOSALS = 120
@@ -78,17 +91,27 @@ _SYSTEM = """你是资深测试架构师。用户会给你：
 用户会拿它来判断"你为什么要加/改/删这条用例"。所以：
 * 图上要能看出**谁（哪个角色）在什么环节做什么、进入什么状态**；
 * 节点标签里**带上角色名**（例如 `A["审批人 · 审批申请"]`），这样图和账号能对上；
-* 只画需规里写了的环节，不要补不存在的分支。
+* 只画需规里写了的环节，不要补不存在的分支；
+* 如果这一批**只有 remove 提案**（比如"需规没写兼容性，建议删掉那几条"），
+  `flow` 就留空字符串 —— 删一条用例不需要流程图，硬画一张反而让人以为
+  改动涉及那条流程。别为了凑字段而画。
 
 Mermaid 写法要求（写错就渲染不出来）：
-* 第一行必须是 `flowchart LR` 或 `flowchart TD`。
-  **优先 `LR`（从左到右）**：提案页的容器很宽而纵向空间有限 ——
-  实测 TD 画 5 个节点就是 184x664 的一条细长条，右边一大片空白，
-  用户得往下滚才看得全。步骤超过 6 个、或明显是"逐级下沉"的流程才用 `TD`。
+* 第一行必须是 `flowchart LR` 或 `flowchart TD`。**按步骤数选方向**：
+  * 步骤 **≤4 个** → `LR`（从左到右，扁扁的正好，不容易显得空）；
+  * 步骤 **≥5 个** → `TD`（从上到下）。
+    为什么：`LR` 把 N 个节点横向串起来，而提案页的容器只有 ~950px 宽 ——
+    实测 7 个节点的 `LR` 是 1320x76（**17:1**），缩到容器里每个节点只剩
+    十几像素宽，文字根本看不清。`TD` 同样的 7 个节点是竖向排布，
+    宽高比接近 1:1，字看得清也不用横向滚动。
 * 节点 ID 只用 **ASCII 字母数字**（`A`、`B1`），中文只能出现在标签里；
 * 标签一律方括号加引号：`A["提交申请"]`；**不要**在标签里用 `()`、`[]`、`{}`；
 * 判断节点用花括号：`B{"是否通过"}`；连线 `A -->|"通过"| B`；
-* 节点 **6~18 个**；不要写 `%%` 注释、`classDef`/`style`/`linkStyle`。
+* 节点 **6~10 个**，不要更多。实测一个 10 节点的纵向链渲染出来是 932x2822
+  （近三屏），再多就没法看了 —— 图是给人一眼看懂用的，不是把整条链路抄一遍。
+  一个环节里有多个角色时，合并成一个节点写清（`A["发起人/审批人 · 提交并审批"]`）
+  比拆成两个节点好。
+  不要写 `%%` 注释、`classDef`/`style`/`linkStyle`。
 
 ## 输出格式
 
@@ -184,19 +207,28 @@ def build_prompt(
     shown = cases[:_MAX_CASES_PER_MODULE]
     lines = []
     for c in shown:
+        # ★ 每条只给"判定够用"的信息（2026-10-12 收紧）。
+        #
+        # 用例是用来判"需规有没有覆盖、有没有写错"，靠的是**名称 + 预期**；
+        # `prompt`（给浏览器 agent 的任务描述）常常几百字，塞进来会挤掉
+        # 别的用例的位置 —— 而提示词总长有硬上限（见 _MAX_CASES_PER_MODULE 的注释）。
+        # 所以 prompt 只留 60 字当线索，够看出"这条在测什么"就行。
         bits = [f"- [{c.get('case_key') or '?'}] {c.get('name') or ''}"]
         if c.get("role"):
             bits.append(f"    账号：{c['role']}")
         if c.get("expected"):
-            bits.append(f"    预期：{str(c['expected'])[:160]}")
+            bits.append(f"    预期：{str(c['expected'])[:120]}")
         if c.get("prompt"):
-            bits.append(f"    任务：{str(c['prompt'])[:160]}")
-        if c.get("preconditions"):
-            bits.append(f"    前置：{str(c['preconditions'])[:120]}")
+            bits.append(f"    任务：{str(c['prompt'])[:60]}")
         lines.append("\n".join(bits))
     more = ""
     if len(cases) > len(shown):
-        more = f"\n（该模块共 {len(cases)} 条用例，上面只列了前 {len(shown)} 条。未列出的不要提 remove。）"
+        # 必须说明截断了：不说的话模型会以为这就是全部，
+        # 然后对没看到的用例照样下"没覆盖 / 重复"的结论。
+        more = (
+            f"\n（该模块共 {len(cases)} 条用例，上面**只列了前 {len(shown)} 条**。"
+            "没看到的不要提 remove，也不要断言它重复。）"
+        )
 
     # 账号清单：只给**可用的**和**不可用的**分开列。
     # 不可用的也要列出来 —— 模型才知道"这个角色存在但现在跑不了"，
@@ -369,6 +401,47 @@ class ModuleResult:
     flow: str = ""
 
 
+def _fix_flow_direction(src: str) -> str:
+    """把过长的 `LR` 流程图改成 `TD`。纯函数。
+
+    ## 为什么要有这个兜底
+
+    提示词里已经让模型按步骤数选方向（≤4 步用 LR，≥5 步用 TD），但**模型不总听**：
+    实测 7 个节点的 `LR` 渲染出来是 1320x76 —— **17:1**，缩进 950px 宽的容器后
+    每个节点只剩十几像素，文字根本看不清。图是给用户判断"为什么要改这条用例"用的，
+    看不清就等于没有。
+
+    方向是**第一行**的事，所以改起来只用动一行，不必让模型重画。
+
+    ## 判据为什么用"箭头数"而不是"节点数"
+
+    数节点要解析 ID 与标签，中文标签里还可能带 `-`、`|` 之类；
+    而流程图的边数就是 `-->` 的个数，正则一数就准。一条链上 N 个节点有 N-1 条边，
+    用边数当"步骤数"是等价的、且不会误判。
+    """
+    if not src.strip():
+        return src
+    lines = src.split("\n")
+    # 找第一行非空、非注释的行（declaration 必须在那）
+    head_i = -1
+    for i, ln in enumerate(lines):
+        s = ln.strip()
+        if not s or s.startswith("%%"):
+            continue
+        head_i = i
+        break
+    if head_i < 0:
+        return src
+    head = lines[head_i].strip()
+    if not head.lower().startswith(("flowchart lr", "graph lr")):
+        return src
+    edges = len(re.findall(r"--+>|--+x|==+>|-\.->", src))
+    if edges < 4:  # ≤4 步：LR 正好，扁扁的填满宽度
+        return src
+    lines[head_i] = re.sub(r"(?i)^(\s*(?:flowchart|graph))\s+LR", r"\1 TD", lines[head_i])
+    return "\n".join(lines)
+
+
 async def optimize_module(
     module: str,
     cases: list[dict],
@@ -397,7 +470,7 @@ async def optimize_module(
             if raw_flow:
                 cand = normalize_mermaid(raw_flow)
                 if mermaid_looks_renderable(cand)[0]:
-                    flow = cand
+                    flow = _fix_flow_direction(cand)
             return ModuleResult(
                 module=module,
                 proposals=parse_proposals(data, known, module, roles),

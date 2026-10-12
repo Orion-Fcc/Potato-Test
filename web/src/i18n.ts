@@ -379,6 +379,10 @@ const zh: Record<string, string> = {
   "JSON schema": "JSON schema",
   "Tools": "工具",
   "Vision": "视觉",
+  "Probe": "探测",
+  "Probing…": "探测中…",
+  "Probe this entry (uses the saved config)": "探测此条（用已保存的配置）",
+  "Name and save this entry first.": "先给这条起个名并保存，再探测。",
   advanced: "高级",
   "A value here also wins over the premium model above — this card is the most specific layer.":
     "这里填的值同样盖过上面的高端模型 —— 这张卡是最具体的一层。",

@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { ChevronRight } from "lucide-react";
-import { api, type FeishuStatus, type LlmPoolEntry, type LlmPremiumStatus, type LlmStatus, type LlmTestReport } from "../lib/api";
+import { api, type FeishuStatus, type LlmPoolEntry, type LlmPremiumStatus, type LlmStatus, type LlmTestReport, type LlmTestResult } from "../lib/api";
 import { useAuth } from "../lib/auth";
 import { Button, Card, Checkbox, Field, Input, Select } from "../components/ui";
 import { useToast, useErrorToast } from "../components/toast";
@@ -256,6 +256,24 @@ function PremiumSuggestion({
   );
 }
 
+function RowTestResult({ result }: { result: LlmTestResult }) {
+  const { t } = useTranslation();
+  const mark = (b?: boolean) => (b ? "✓" : "✕");
+  if (!result.ok) {
+    return <div className="text-[11px] text-[var(--bad-fg)]">✕ {result.error || "failed"}</div>;
+  }
+  return (
+    <div className="flex flex-wrap gap-x-3 gap-y-0.5 font-mono text-[11px] text-ink-500">
+      <span className="font-medium text-[var(--ok-fg,#1a7f4b)]">✓ {result.model}</span>
+      <span>{t("Protocol")}: {result.protocol}</span>
+      <span>{t("JSON object")}: {mark(result.json_object)}</span>
+      <span>{t("JSON schema")}: {mark(result.json_schema)}</span>
+      <span>{t("Tools")}: {mark(result.tools)}</span>
+      <span>{t("Vision")}: {mark(result.vision)}</span>
+    </div>
+  );
+}
+
 export function AdminSettingsPage() {
   const { t } = useTranslation();
   const toast = useToast();
@@ -269,6 +287,8 @@ export function AdminSettingsPage() {
   const [llm, setLlm] = useState<LlmStatus | null>(null);
   const [testingLlm, setTestingLlm] = useState(false);
   const [llmTest, setLlmTest] = useState<LlmTestReport | null>(null);
+  // 每行「探测」：精测模型池里单一条目（按 name 走后端过滤），结果就地显示在该行。
+  const [rowTests, setRowTests] = useState<Record<number, { loading: boolean; result?: LlmTestResult }>>({});
   const [loadError, setLoadError] = useState("");
 
   // LLM 池（多套网关，按顺序 429 兜底）—— 这是**唯一**的网关配置入口。
@@ -333,6 +353,7 @@ export function AdminSettingsPage() {
       .then((r) => {
         setPool(r.pool.map((p) => ({ ...p, api_key: "" })));
         setPoolSeeded(!!r.seeded);
+        setRowTests({}); // 重新装载后旧的逐行结果可能对不上条目，清掉
       })
       .catch((e) => setLoadError(e?.message || String(e)));
 
@@ -413,6 +434,25 @@ export function AdminSettingsPage() {
     }
   };
 
+  const testRow = async (i: number, name: string) => {
+    const nm = (name || "").trim();
+    if (!nm) {
+      setRowTests((m) => ({
+        ...m,
+        [i]: { loading: false, result: { name: "", ok: false, error: t("Name and save this entry first.") } },
+      }));
+      return;
+    }
+    setRowTests((m) => ({ ...m, [i]: { loading: true } }));
+    try {
+      const rep = await api.testLlmSettings([nm]);
+      const r = rep.results.find((x) => x.name === nm) ?? rep.results[0];
+      setRowTests((m) => ({ ...m, [i]: { loading: false, result: r } }));
+    } catch (e: any) {
+      setRowTests((m) => ({ ...m, [i]: { loading: false, result: { name: nm, ok: false, error: e?.message || String(e) } } }));
+    }
+  };
+
   const save = async () => {
     setSaving(true);
     try {
@@ -484,6 +524,15 @@ export function AdminSettingsPage() {
             </option>
           ))}
         </Select>
+        <Button
+          variant="ghost"
+          className="h-7 text-[11px]"
+          onClick={() => testRow(i, row.name)}
+          disabled={rowTests[i]?.loading}
+          title={t("Probe this entry (uses the saved config)")}
+        >
+          {rowTests[i]?.loading ? t("Probing…") : t("Probe")}
+        </Button>
         {/* 第 1 套不给"移除"：它是 agent 实际在跑的那一套，清掉整池就空了。
             想换掉它就直接改地址/模型。 */}
         {i > 0 && (
@@ -523,6 +572,7 @@ export function AdminSettingsPage() {
           placeholder={row.api_key_set ? t("•••••••• (kept)") : "sk-…"}
         />
       </div>
+      {rowTests[i]?.result && <RowTestResult result={rowTests[i]!.result!} />}
     </div>
   );
 

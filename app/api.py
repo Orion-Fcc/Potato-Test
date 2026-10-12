@@ -87,6 +87,7 @@ from app.schemas import (
     IssuePatch,
     KnowledgeIn,
     LlmSettingsIn,
+    LlmTestIn,
     LoginIn,
     MemberIn,
     MemberPatch,
@@ -769,7 +770,7 @@ _LLM_TEST_TTL_S = 60.0
 
 
 @router.post("/admin/settings/llm/test", dependencies=[Depends(auth.require_admin)])
-async def test_admin_llm() -> dict:
+async def test_admin_llm(body: LlmTestIn | None = None) -> dict:
     """连通性检测：测「平台可能调用的每一套模型」，而不只是 agent 在跑的那一套。
 
     为什么测全部（2026-10-12）：配了模型池之后，真正在跑的不止池第 1 条——
@@ -782,6 +783,8 @@ async def test_admin_llm() -> dict:
 
     短 TTL 缓存：连点 / 切页面再点在 60s 内且配置没变时直接复用上次结果，省掉对每一套
     的重复真实调用；过了 TTL 或改了模型 / 网关 / 钥匙会重新实测。想强制重测就等 60s。
+
+    可按名字精测（body.names）：设置页「每行一个探测按钮」只测指定那一套；不传 / 空 = 全部。
     """
     import asyncio
     import time
@@ -818,8 +821,23 @@ async def test_admin_llm() -> dict:
             )
         )
 
-    # 配置签名：任一模型 / 网关 / 钥匙变化都会换签名 ⇒ 缓存自动失效。
-    sig = tuple(
+    # 3) 可选：只测指定名字（设置页「每行一个探测按钮」精测单套）。没传 / 空 = 全部；
+    #    传了就把 profiles 收敛到这些名字，未找到的如实回一条失败，不静默跳过。
+    want = [n.strip() for n in ((body.names if body else None) or []) if n and n.strip()]
+    not_found: list[dict] = []
+    if want:
+        have = {p.name for p in profiles}
+        wset = set(want)
+        profiles = [p for p in profiles if p.name in wset]
+        not_found = [
+            {"name": n, "ok": False, "error": "No saved model with this name — save it first."}
+            for n in want
+            if n not in have
+        ]
+
+    # 配置签名：把"要测哪些名字"也并进去 —— 精测单套与测全部互不串味；其余字段任一
+    # 变化都会换签名 ⇒ 缓存自动失效。
+    sig = (tuple(want),) + tuple(
         (p.name, p.base_url, p.model, p.agent_model, p.provider, bool(p.api_key))
         for p in profiles
     )
@@ -861,9 +879,10 @@ async def test_admin_llm() -> dict:
             return {"name": p.name, "model": model, "ok": False,
                     "error": f"{type(exc).__name__}: {exc}"}
 
-    results = await asyncio.gather(*[_one(p) for p in profiles])
+    probed = await asyncio.gather(*[_one(p) for p in profiles])
+    results = list(probed) + not_found
     all_ok = all(r["ok"] for r in results)
-    report = {"ok": all_ok, "all_ok": all_ok, "results": list(results)}
+    report = {"ok": all_ok, "all_ok": all_ok, "results": results}
     # 落缓存：ts 用探测完成的时刻，让"60s 新鲜期"从结果就绪起算。
     cached["sig"] = sig
     cached["ts"] = time.monotonic()

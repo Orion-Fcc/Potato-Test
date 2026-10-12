@@ -1570,7 +1570,11 @@ export const api = {
     req<{ pool: LlmPoolEntry[]; count: number; source: "pool" | "env"; seeded: boolean }>(
       "/admin/settings/llm/pool",
     ),
-  testLlmSettings: () => req<LlmTestReport>("/admin/settings/llm/test", { method: "POST" }),
+  testLlmSettings: (names?: string[]) =>
+    req<LlmTestReport>("/admin/settings/llm/test", {
+      method: "POST",
+      body: names && names.length ? JSON.stringify({ names }) : undefined,
+    }),
   // 各角色 token 占比：真实实测（执行流 by_role 聚合）优先，无数据回退结构估算。
   getLlmTokenShare: () =>
     req<{

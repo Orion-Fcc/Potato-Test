@@ -378,6 +378,17 @@ class LlmPremiumIn(BaseModel):
     roles: list[str] = Field(default_factory=list)
 
 
+class LlmTestIn(BaseModel):
+    """连通性检测的可选过滤：只测指定名字的模型。
+
+    不传 / 空列表 = 测全部（模型池全部条目 + 任何逐用途覆盖），与历史行为一致 ——
+    「检测所有模型」按钮走这条。传了名字 = 只测这些，供设置页「每行一个探测按钮」
+    精测单套；没找到的名字会以一条 ok=False 的结果如实回报，而不是静默跳过。
+    """
+
+    names: list[str] = Field(default_factory=list)
+
+
 class LlmSettingsIn(BaseModel):
     # Non-secret fields: None => leave unchanged; "" => clear the override (env fallback).
     base_url: str | None = None

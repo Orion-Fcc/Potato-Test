@@ -2,6 +2,7 @@ import clsx from "clsx";
 import {
   Bug,
   ChevronUp,
+  FileText,
   FlaskConical,
   GitCompareArrows,
   Layers,
@@ -14,6 +15,7 @@ import {
   Search,
   Settings as SettingsIcon,
   ShieldCheck,
+  Sparkle,
   Sparkles,
   Users,
 } from "lucide-react";
@@ -34,6 +36,11 @@ const NAV_GROUPS = [
     label: null, // the first group needs no header — it sits right under the project name
     items: [
       { key: "overview", label: "Overview", Icon: LayoutDashboard },
+      // 「项目文档」放在概览之后、助手之前（2026-10-12）。
+      // 为什么这个位置：它回答的是"这个项目是什么"——那是看任何东西之前的第一问；
+      // 而助手是"让 AI 帮你做事"，属于第二问。放在测试资产组里也不对，
+      // 因为它不是测试资产，是项目的说明材料。
+      { key: "docs", label: "Project Docs", Icon: FileText },
       { key: "assistant", label: "Assistant", Icon: Sparkles },
     ],
   },
@@ -42,6 +49,9 @@ const NAV_GROUPS = [
     label: "Test Assets",
     items: [
       { key: "cases", label: "Test Cases", Icon: FlaskConical },
+      // 「AI 用例优化」紧挨着测试用例（2026-10-12）：它改的就是用例，
+      // 放在这一组里才找得到 —— 放进"项目"组用户不会想到去那儿找。
+      { key: "proposals", label: "AI Optimization", Icon: Sparkle },
       { key: "suites", label: "Suites", Icon: Layers },
     ],
   },

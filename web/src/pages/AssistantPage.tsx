@@ -1,9 +1,9 @@
-import { Bot, BookOpen, Send, Trash2, Upload, User, Wrench } from "lucide-react";
+import { BookOpen, Bot, Loader2, Paperclip, Send, Trash2, User, Wrench, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { useParams } from "react-router-dom";
+import { Link, useParams } from "react-router-dom";
 import clsx from "clsx";
-import { api } from "../lib/api";
+import { api, type AssistantAttachment } from "../lib/api";
 import { isAbort, useAbortSignal } from "../lib/hooks";
 
 interface MsgAction {
@@ -19,18 +19,12 @@ interface Msg {
 
 const chatKey = (pid: number) => `tp.assistant.chat.${pid}`;
 
-/** How much of the extracted document we echo into the textarea after an upload.
- *  The full text is already saved server-side; pulling a 20 MB corpus into a
- *  <textarea> just to show it is what made large uploads unusable before. */
-const KB_PREVIEW_CHARS = 200_000;
-
 /**
- * In-app assistant — an OPERATOR with a knowledge base:
- *  - POST /api/projects/:pid/assistant  → LLM + tools (generic `potato-test_api`, search_knowledge, create_case…)
- *  - GET/PUT/POST /api/projects/:pid/knowledge[/append] → the spec/requirement text it searches
- *    Stored as chunks server-side (app/knowledge.py), so a large merged spec stays intact
- *    and search cost does not grow with document size.
- * The chat is persisted per project in localStorage so reloads don't lose it.
+ * 内置助手 —— 一个能读需规、能操作平台的**操作型**助手。
+ *  - POST /api/projects/:pid/assistant  → LLM + 工具（potato-test_api / search_knowledge / create_case…）
+ *  - 需规/资料（搜索用的知识库）在**「项目文档」页**管理与上传（2026-10-12 移过去）。
+ *    助手仍能用 search_knowledge 检索它；这一页只是不再做它的编辑界面。
+ *  - 对话按项目存在 localStorage，刷新不丢。
  */
 export function AssistantPage() {
   const { pid } = useParams();
@@ -44,17 +38,32 @@ export function AssistantPage() {
   const [err, setErr] = useState<string | null>(null);
   const endRef = useRef<HTMLDivElement>(null);
 
-  const [kbOpen, setKbOpen] = useState(false);
-  const [kb, setKb] = useState("");
-  const [kbChars, setKbChars] = useState(0);
-  const [kbSaving, setKbSaving] = useState(false);
-  const [kbBusy, setKbBusy] = useState(false);
-  const [kbNote, setKbNote] = useState<string | null>(null);
-  /** True when the textarea holds only the first KB_PREVIEW_CHARS of the saved corpus.
-   *  Saving from this state would silently discard the rest, so it is blocked until the
-   *  operator explicitly acknowledges it. */
-  const [kbPreviewOnly, setKbPreviewOnly] = useState(false);
-  const fileRef = useRef<HTMLInputElement>(null);
+  // 需规相关的状态（kb / kbChars / kbSaving / kbBusy / kbPreviewOnly / fileRef）
+  // 随面板一起删掉了（2026-10-12）—— 留着这些死状态会让人以为这一页还能改需规。
+
+  // 对话框里的附件（粘贴 / 拖入 / 点选）。文件先经后端解析成文本再随这一轮发出。
+  const [atts, setAtts] = useState<AssistantAttachment[]>([]);
+  const [attBusy, setAttBusy] = useState(false);
+  const [drag, setDrag] = useState(false);
+  const attRef = useRef<HTMLInputElement>(null);
+
+  /** 解析并挂上文件。**逐个失败逐个报**，不让一个坏文件把好的也丢掉。 */
+  async function addFiles(files: File[]) {
+    if (!files.length) return;
+    setAttBusy(true);
+    const ok: AssistantAttachment[] = [];
+    const bad: string[] = [];
+    for (const f of files) {
+      try {
+        ok.push(await api.parseAssistantAttachment(projectId, f));
+      } catch (e) {
+        bad.push(`${f.name}: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+    if (ok.length) setAtts((s) => [...s, ...ok]);
+    if (bad.length) setErr(bad.join("；"));
+    setAttBusy(false);
+  }
 
   // --- persist chat per project ---
   useEffect(() => {
@@ -74,105 +83,37 @@ export function AssistantPage() {
   }, [turns, projectId]);
 
   // --- knowledge ---
-  useEffect(() => {
-    api
-      .getKnowledge(projectId)
-      .then((r) => {
-        // The corpus can be tens of MB. Put a bounded preview in the textarea (which is
-        // the only editable surface) and keep the true size in kbChars — the saved text
-        // itself is never truncated.
-        setKb(r.text.length > KB_PREVIEW_CHARS ? r.text.slice(0, KB_PREVIEW_CHARS) : r.text);
-        setKbChars(r.chars);
-        setKbPreviewOnly(r.text.length > KB_PREVIEW_CHARS);
-        setKbOpen(r.chars === 0); // nudge to fill it in when empty
-      })
-      .catch(() => {});
-  }, [projectId]);
-
+  // ★ 这一页不再读写需规（2026-10-12）。原来这里会 getKnowledge + 把正文塞进
+  // 一个 textarea，并在保存时提醒"只载入了前 20 万字符"。整个面板搬到
+  // 「项目文档」页之后，这些状态与守卫都成了死代码 —— 留着只会让人以为
+  // 这一页还能改需规。需规的编辑与守卫（含那个 20 万字符的提醒）在那边。
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [turns, busy]);
 
-  async function saveKb() {
-    // Guard the one destructive path: when only a preview is loaded, "保存" would
-    // replace a multi-MB corpus with its first 200k chars. Append (upload) is safe and
-    // unaffected; a deliberate full rewrite is the only thing blocked here.
-    if (kbPreviewOnly) {
-      const ok = window.confirm(
-        t(
-          "当前编辑框只载入了前 20 万字符的预览。若直接保存，超出的部分会被删除。确定要保存吗？",
-        ),
-      );
-      if (!ok) return;
-    }
-    setKbSaving(true);
-    try {
-      const r = await api.setKnowledge(projectId, kb);
-      setKbChars(r.chars);
-      setKbPreviewOnly(false);
-    } catch (e) {
-      setErr(String(e));
-    } finally {
-      setKbSaving(false);
-    }
-  }
-
-  /** Import one or many spec documents. Each file is parsed server-side (docx /
-   *  pdf / xlsx / html / rtf / plain text), appended under a `## <filename>` heading
-   *  so the origin of every block stays visible to the assistant, then saved. */
-  async function onPickFiles(list: FileList | null) {
-    const files = Array.from(list ?? []);
-    if (files.length === 0) return;
-    setKbBusy(true);
-    setErr(null);
-    setKbNote(null);
-    const imported: string[] = [];
-    const problems: string[] = [];
-    // Each extracted document is appended server-side. Doing it file-by-file (rather
-    // than building one giant local string and PUTting it) is what lets a 100 MB spec
-    // through: the browser never has to hold the whole merged document, and the API
-    // never receives it back as one request body.
-    for (const f of files) {
-      try {
-        const r = await api.extractKnowledge(projectId, f);
-        const block = `## ${r.filename}\n${r.text}\n`;
-        const saved = await api.appendKnowledge(projectId, block);
-        const added = r.chars.toLocaleString();
-        imported.push(
-          `${r.filename} · ${added} ${t("chars")}${r.truncated ? ` · ${t("truncated")}` : ""}`,
-        );
-        if (r.warnings.length > 0) problems.push(`${r.filename}: ${r.warnings.join("; ")}`);
-        setKbChars(saved.chars);
-        // Show the head of the new document so the operator can eyeball what landed,
-        // without pulling the entire multi-MB corpus into the textarea.
-        setKb((prev) => {
-          const head = r.text.slice(0, KB_PREVIEW_CHARS);
-          const more = r.text.length > KB_PREVIEW_CHARS ? "\n\n…（其余内容已保存，展开预览可查看前 20 万字符）" : "";
-          const base = prev.trimEnd();
-          return `${base}${base ? "\n\n" : ""}${block.slice(0, head.length)}${more}`;
-        });
-      } catch (e) {
-        problems.push(`${f.name}: ${e instanceof Error ? e.message : String(e)}`);
-      }
-    }
-    setKbOpen(true);
-    if (imported.length > 0) setKbNote(`${t("Imported")}: ${imported.join("、")}`);
-    if (problems.length > 0) setErr(problems.join("；"));
-    setKbBusy(false);
-    if (fileRef.current) fileRef.current.value = ""; // allow re-picking the same file
-  }
-
   async function send(text?: string) {
     const msg = (text ?? input).trim();
-    if (!msg || busy) return;
+    // ★ 只有附件、没有文字也要能发（用户拖进来一份需规就想问"这是什么"很常见）。
+    if ((!msg && atts.length === 0) || busy) return;
     const history = turns.map((m) => ({ role: m.role, content: m.content }));
-    const next: Msg[] = [...turns, { role: "user", content: msg }];
+    // 对话里显示一条带附件名的用户消息，这样回看历史时知道当时附了什么 ——
+    // 附件正文本身不进历史（太占篇幅），但要让人看得见"这一轮基于什么"。
+    const label = atts.length
+      ? `${msg || t("（见附件）")}\n📎 ${atts.map((a) => a.filename).join("、")}`
+      : msg;
+    const next: Msg[] = [...turns, { role: "user", content: label }];
     setTurns(next);
     setInput("");
+    const sent = atts;
+    setAtts([]);
     setBusy(true);
     setErr(null);
     try {
-      const res = await api.assistant(projectId, { message: msg, history }, { signal });
+      const res = await api.assistant(
+        projectId,
+        { message: msg || t("请看附件内容。"), history, attachments: sent },
+        { signal },
+      );
       setTurns([...next, { role: "assistant", content: res.reply, actions: res.actions }]);
     } catch (e) {
       // A navigation away mid-answer is not an error worth showing.
@@ -213,20 +154,11 @@ export function AssistantPage() {
           </p>
         </div>
         <div className="ml-auto flex items-center gap-2">
-          <button
-            onClick={() => setKbOpen((v) => !v)}
-            aria-expanded={kbOpen}
-            className={clsx(
-              "flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-[12px] font-medium outline-none transition-[background-color,border-color,color]",
-              kbOpen
-                ? "border-brand-200 bg-brand-50 text-brand-700"
-                : "border-[var(--line)] text-ink-700 hover:border-brand-200 hover:bg-brand-50",
-            )}
-          >
-            <BookOpen className="h-3.5 w-3.5" />
-            {t("Spec / Docs")}
-            {kbChars > 0 && <span className="tabular-nums opacity-70">· {kbChars.toLocaleString()}</span>}
-          </button>
+          {/* ★ 需规入口整体移走了（2026-10-12）。
+              用户明确说过「需归的上传放在前面那个里面」，我上次只是把**上传按钮**
+              换成了链接，却把这个「需规 / 资料 · 459416」的入口留在这儿 ——
+              于是他看到的仍然是"需规放在助手页"。现在整个按钮与折叠面板都去掉，
+              助手页只做对话一件事；需规的查看与上传都在「项目文档」页。 */}
           <button
             onClick={() => setTurns([])}
             title={t("Clear chat")}
@@ -238,59 +170,22 @@ export function AssistantPage() {
         </div>
       </div>
 
-      {kbOpen && (
-        <div className="tp-card mb-3 max-h-[42dvh] shrink-0 overflow-auto border border-[var(--line)] p-4">
-          <div className="mb-2.5 flex items-center gap-2 text-[12px] text-ink-500">
-            <BookOpen className="h-3.5 w-3.5 text-ink-400" />
-            {t("Paste your spec/requirement here — the assistant searches it before answering.")}
-            <span className="ml-auto rounded-full bg-[var(--panel2)] px-2 py-0.5 tabular-nums text-[11px] text-ink-400">
-              {kbChars.toLocaleString()} {t("chars")}
-            </span>
-          </div>
-          <textarea
-            value={kb}
-            onChange={(e) => setKb(e.target.value)}
-            rows={8}
-            placeholder={t("e.g. paste the requirement spec, page rules, field definitions…")}
-            className="w-full resize-y rounded-lg border border-[var(--line)] bg-[var(--panel2)] p-2.5 font-mono text-[12px] leading-relaxed text-ink-900 outline-none transition-[border-color,box-shadow] focus:border-brand-500 focus:ring-2 focus:ring-brand-100"
-          />
-          <div className="mt-2.5 flex flex-wrap items-center gap-2">
-            <input
-              ref={fileRef}
-              type="file"
-              multiple
-              accept=".md,.markdown,.txt,.json,.csv,.tsv,.log,.yaml,.yml,.xml,.docx,.pdf,.xlsx,.xlsm,.html,.htm,.rtf"
-              className="hidden"
-              onChange={(e) => onPickFiles(e.target.files)}
-            />
-            <button
-              onClick={() => fileRef.current?.click()}
-              disabled={kbBusy}
-              title={t("Supports md, txt, json, csv, docx, pdf, xlsx, html, rtf — multiple files at once")}
-              className="flex items-center gap-1.5 rounded-lg border border-[var(--line)] px-2.5 py-1.5 text-[12px] font-medium text-ink-700 outline-none transition-[background-color,border-color] hover:border-[var(--line-strong)] hover:bg-[var(--panel2)] disabled:opacity-40"
-            >
-              <Upload className="h-3.5 w-3.5" />
-              {kbBusy ? t("Reading…") : t("Upload docs")}
-            </button>
-            <button
-              onClick={saveKb}
-              disabled={kbSaving || kbBusy}
-              className="rounded-lg bg-brand-600 px-3 py-1.5 text-[12px] font-medium text-[var(--on-brand)] shadow-[var(--shadow-1)] transition-[filter] hover:brightness-[1.06] disabled:opacity-40"
-            >
-              {kbSaving ? t("Saving…") : t("Save")}
-            </button>
-            <span className="text-[11px] text-ink-400">
-              {t("Supports md, txt, json, csv, docx, pdf, xlsx, html, rtf — multiple files at once")}
-            </span>
-          </div>
-          {kbNote && (
-            <div className="mt-2.5 flex items-start gap-1.5 rounded-lg bg-[var(--ok-bg)] px-2.5 py-1.5 text-[11.5px] text-[var(--ok-fg)]">
-              <span>✓</span>
-              <span>{kbNote}</span>
-            </div>
-          )}
-        </div>
-      )}
+      {/* ★ 需规的查看 / 粘贴 / 上传整个面板都移走了（2026-10-12）。
+          用户说的是「需归的上传放在前面那个里面」，而他截图里仍然看到
+          「需规 / 资料 · 459416」挂在助手页 —— 那说明我上次只搬了上传按钮，
+          没搬这个入口。现在助手页**只做对话**一件事；需规在「项目文档」页。
+          想改需规时点这里过去，不必在这一页再放一个编辑器 ——
+          两个地方都能改同一份文本，早晚会出现"改哪边为准"的困惑。 */}
+      <div className="mb-3 flex flex-wrap items-center gap-2 rounded-lg border border-[var(--line)] bg-[var(--panel2)] px-3 py-2 text-[12px] text-ink-500">
+        <BookOpen className="h-3.5 w-3.5 shrink-0 text-ink-400" />
+        <span>{t("需规 / 资料 已移到「项目文档」页（查看、粘贴、上传都在那里）。")}</span>
+        <Link
+          to={`/projects/${projectId}/docs`}
+          className="font-medium text-brand-700 hover:underline"
+        >
+          {t("去「项目文档」")}
+        </Link>
+      </div>
 
       <div className="tp-card min-h-0 flex-1 space-y-4 overflow-auto border border-[var(--line)] p-5">
         {turns.length === 0 && (
@@ -368,10 +263,83 @@ export function AssistantPage() {
         <div ref={endRef} />
       </div>
 
-      <div className="mt-3 flex items-end gap-2">
+      {/* ★ 附件区：粘贴/拖入/点选文件（2026-10-12 用户要求「和其他 agent 一样
+          有粘贴文件在对话框的能力」）。
+          文件先被后端解析成文本再挂进这一轮对话 —— 所以模型看到的是**内容**，
+          而不是"这里有个文件"这种它没法处理的占位。 */}
+      {atts.length > 0 && (
+        <div className="mt-2 flex flex-wrap gap-1.5">
+          {atts.map((a, i) => (
+            <span
+              key={i}
+              className="flex items-center gap-1.5 rounded-lg border border-[var(--line)] bg-[var(--panel2)] px-2 py-1 text-[11px] text-ink-700"
+              title={a.truncated ? t("内容过长，只带了开头部分") : undefined}
+            >
+              <Paperclip className="h-3 w-3 shrink-0 text-ink-400" />
+              <span className="max-w-[220px] truncate">{a.filename}</span>
+              <span className="tabular-nums text-ink-400">
+                {a.chars.toLocaleString()}
+                {a.truncated ? "+" : ""}
+              </span>
+              <button
+                onClick={() => setAtts((s) => s.filter((_, j) => j !== i))}
+                className="rounded p-0.5 text-ink-400 hover:text-[var(--bad-fg)]"
+                aria-label={t("移除附件")}
+              >
+                <X className="h-3 w-3" />
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
+
+      <div
+        className={
+          "mt-3 flex items-end gap-2 rounded-xl " +
+          (drag ? "ring-2 ring-brand-300 ring-offset-0" : "")
+        }
+        onDragOver={(e) => {
+          // 必须 preventDefault，否则浏览器会用默认行为（直接打开文件）
+          e.preventDefault();
+          setDrag(true);
+        }}
+        onDragLeave={() => setDrag(false)}
+        onDrop={(e) => {
+          e.preventDefault();
+          setDrag(false);
+          void addFiles(Array.from(e.dataTransfer?.files ?? []));
+        }}
+      >
+        <input
+          ref={attRef}
+          type="file"
+          multiple
+          className="hidden"
+          onChange={(e) => {
+            void addFiles(Array.from(e.target.files ?? []));
+            e.target.value = ""; // 同一个文件还能再选
+          }}
+        />
+        <button
+          onClick={() => attRef.current?.click()}
+          disabled={busy || attBusy}
+          title={t("附加文件（也可以直接粘贴或拖进来）")}
+          className="grid h-11 w-11 shrink-0 place-items-center rounded-xl border border-[var(--line)] text-ink-600 outline-none transition-[background-color,border-color] hover:border-[var(--line-strong)] hover:bg-[var(--panel2)] disabled:opacity-40"
+          aria-label={t("附加文件")}
+        >
+          {attBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Paperclip className="h-4 w-4" />}
+        </button>
         <textarea
           value={input}
           onChange={(e) => setInput(e.target.value)}
+          onPaste={(e) => {
+            // 粘贴板里带文件（截图、复制的文件）也要能进来
+            const files = Array.from(e.clipboardData?.files ?? []);
+            if (files.length) {
+              e.preventDefault();
+              void addFiles(files);
+            }
+          }}
           onKeyDown={(e) => {
             if (e.key === "Enter" && !e.shiftKey) {
               e.preventDefault();
@@ -379,12 +347,14 @@ export function AssistantPage() {
             }
           }}
           rows={2}
-          placeholder={t("Ask the assistant… (Enter to send, Shift+Enter for newline)")}
+          placeholder={t(
+            "问助手…（Enter 发送，Shift+Enter 换行；可直接粘贴 / 拖入文件）",
+          )}
           className="flex-1 resize-none rounded-xl border border-[var(--line)] bg-[var(--panel)] px-3.5 py-2.5 text-[13px] text-ink-900 outline-none transition-[border-color,box-shadow] placeholder:text-ink-400/80 focus:border-brand-500 focus:ring-2 focus:ring-brand-100"
         />
         <button
           onClick={() => send()}
-          disabled={busy || !input.trim()}
+          disabled={busy || (!input.trim() && atts.length === 0)}
           className="grid h-11 w-11 shrink-0 place-items-center rounded-xl bg-gradient-to-br from-brand-500 to-brand-700 text-[var(--on-brand)] shadow-[0_3px_10px_-4px_color-mix(in_oklch,var(--brand-700)_70%,transparent)] outline-none transition-[opacity,transform,filter] hover:brightness-[1.06] focus-visible:ring-2 focus-visible:ring-brand-100 active:translate-y-px disabled:pointer-events-none disabled:opacity-40"
           aria-label={t("Send")}
         >
@@ -394,4 +364,6 @@ export function AssistantPage() {
     </div>
   );
 }
+
+
 

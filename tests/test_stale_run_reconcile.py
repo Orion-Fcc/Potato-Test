@@ -129,6 +129,73 @@ async def test_reconcile_finishes_a_run_whose_worker_died() -> None:
         assert run.summary["passed"] == 1
 
 
+async def test_an_orphan_row_under_a_finished_run_is_swept() -> None:
+    """★ 父运行**已终态**、结果行却还挂着 running（2026-10-12 补的真漏洞）。
+
+    上面那一轮扫描只查 `finished_at IS NULL` 的运行 —— 语义是"终结还没结束的运行"。
+    但有一类行它永远够不着：运行已经 `failed`（终态），却因为崩溃/取消
+    留下一条 running 的结果。
+
+    实测：run 20 状态 `failed`，而 run_result 228 从 2026-10-11 09:09
+    一直挂着 running —— 查不到、也修不掉，报告里就是一条永远"运行中"的行。
+
+    判据必须"绝不误伤在跑的行"：只处理**父运行已终态**的，所以下面还要
+    断言一个正常运行没被动。
+    """
+    from app.db import db_session, init_db
+    from app.models import Project, Run, RunResult, TestCase
+
+    await init_db()
+    now = datetime.now(UTC)
+    async with db_session() as s:
+        project = Project(name="orphan-check", base_url="http://x")
+        s.add(project)
+        await s.flush()
+        case = TestCase(project_id=project.id, name="c1", prompt="p")
+        s.add(case)
+        await s.flush()
+
+        # ① 已失败（终态）的运行 + 一条没落定的结果 = 孤儿
+        dead = Run(
+            project_id=project.id,
+            name="failed but left a running row",
+            case_ids=[case.id],
+            status="failed",
+            total_count=1,
+            processed_count=0,
+            started_at=now,
+            created_at=now,
+            finished_at=now,
+        )
+        # ② 正在跑的运行 —— 它的 running 行**绝不能被扫掉**
+        live = Run(
+            project_id=project.id,
+            name="still going",
+            case_ids=[case.id],
+            status="running",
+            total_count=1,
+            processed_count=0,
+            started_at=now,
+            created_at=now,
+        )
+        s.add_all([dead, live])
+        await s.flush()
+        orphan = RunResult(run_id=dead.id, case_id=case.id, status="running", created_at=now)
+        in_flight = RunResult(run_id=live.id, case_id=case.id, status="running", created_at=now)
+        s.add_all([orphan, in_flight])
+        await s.flush()
+        orphan_id, flight_id = orphan.id, in_flight.id
+
+    await reconcile_stale_runs()
+
+    async with db_session() as s:
+        o = await s.get(RunResult, orphan_id)
+        f = await s.get(RunResult, flight_id)
+        assert o.status == "error", f"孤儿行没被收敛：{o.status}"
+        assert o.error and "没有落定" in o.error, f"没说清原因：{o.error!r}"
+        assert f.status == "running", "★ 误伤了正在跑的结果行"
+
+
 async def test_reconcile_leaves_a_live_run_alone() -> None:
     """The whole risk of a watchdog: killing a run that is merely slow."""
     from app.db import db_session, init_db

@@ -761,6 +761,13 @@ async def get_admin_llm_token_share() -> dict:
     }
 
 
+# 连通性检测结果短缓存（2026-10-12）：按钮语义仍是"实测"，但连点 / 切页面再点在
+# TTL 内直接复用上次结果，避免对每一套模型重复发起真实调用（每套含能力探测 + ping
+# 多次 API 请求）。只有"配置没变"（签名相同）才复用；改模型 / 网关 / 钥匙立刻失效。
+_LLM_TEST_CACHE: dict = {"sig": None, "ts": 0.0, "report": None}
+_LLM_TEST_TTL_S = 60.0
+
+
 @router.post("/admin/settings/llm/test", dependencies=[Depends(auth.require_admin)])
 async def test_admin_llm() -> dict:
     """连通性检测：测「平台可能调用的每一套模型」，而不只是 agent 在跑的那一套。
@@ -771,9 +778,13 @@ async def test_admin_llm() -> dict:
     让人误以为全都对。所以一次性把每一套都探一遍，界面逐条告诉用户哪套通、哪套挂。
 
     探测并发进行（asyncio.gather）：一套超时（25s）不会拖住其它套，整体等待约等于
-    最慢那套而不是累加。每套都带 force=True 绕过能力缓存 —— 这个按钮的语义就是"现在实测"。
+    最慢那套而不是累加。每套都带 force=True 绕过能力缓存。
+
+    短 TTL 缓存：连点 / 切页面再点在 60s 内且配置没变时直接复用上次结果，省掉对每一套
+    的重复真实调用；过了 TTL 或改了模型 / 网关 / 钥匙会重新实测。想强制重测就等 60s。
     """
     import asyncio
+    import time
 
     from app import llm as llm_mod
     from app.llm import LLMProfile
@@ -807,6 +818,19 @@ async def test_admin_llm() -> dict:
             )
         )
 
+    # 配置签名：任一模型 / 网关 / 钥匙变化都会换签名 ⇒ 缓存自动失效。
+    sig = tuple(
+        (p.name, p.base_url, p.model, p.agent_model, p.provider, bool(p.api_key))
+        for p in profiles
+    )
+    cached = _LLM_TEST_CACHE
+    if (
+        cached["report"] is not None
+        and cached["sig"] == sig
+        and time.monotonic() - cached["ts"] < _LLM_TEST_TTL_S
+    ):
+        return cached["report"]
+
     async def _one(p: LLMProfile) -> dict:
         model = (p.agent_model or p.model or "").strip()
         if not p.base_url:
@@ -839,7 +863,12 @@ async def test_admin_llm() -> dict:
 
     results = await asyncio.gather(*[_one(p) for p in profiles])
     all_ok = all(r["ok"] for r in results)
-    return {"ok": all_ok, "all_ok": all_ok, "results": list(results)}
+    report = {"ok": all_ok, "all_ok": all_ok, "results": list(results)}
+    # 落缓存：ts 用探测完成的时刻，让"60s 新鲜期"从结果就绪起算。
+    cached["sig"] = sig
+    cached["ts"] = time.monotonic()
+    cached["report"] = report
+    return report
 
 
 @router.put("/admin/settings/gitlab-token", dependencies=[Depends(auth.require_admin)])
@@ -1474,6 +1503,51 @@ async def set_gitlab_config(pid: int, body: GitLabConfigIn, request: Request) ->
         }
 
 
+@router.post("/projects/{pid}/assistant/parse")
+async def assistant_parse_attachment(pid: int, request: Request, file: UploadFile = File(...)) -> dict:
+    """解析一个要粘进对话的文件，返回文本（2026-10-12）。
+
+    ## 为什么单独一个端点，而不是让对话那一路收文件
+
+    对话那一路是 JSON、消息还有 4000 字上限；把文件塞进去会让请求体随附件线性变大
+    （base64 还再涨三分之一）。这里先把文件变成文本，对话那边只传文本 ——
+    而且**文本能被裁剪、能标出处**，模型看到的东西和用户上传的是同一份。
+
+    ## 两个上限都不是随手定的
+
+    * 单文件 201,000 字符：与知识库那条路的上限一致（`docparse` 里同一个理由 ——
+      一份 46 万字的需规塞进一次对话只会把上下文挤爆，而模型也用不上那么多）；
+    * 只认 `docparse` 支持的格式：不支持的（老的 `.doc`）**明确报 400 并说怎么改**，
+      而不是回一段空文本让用户以为"上传成功但没内容"。
+    """
+    await _project_access(request, pid, "viewer")
+    from app import docparse
+
+    name = (file.filename or "").strip() or "attachment"
+    data = await _read_upload_capped(file, 80 * 1024 * 1024)
+    try:
+        # extract 直接吃 (文件名, 字节)：文件不必落盘 —— 少一次写盘、少一处清理。
+        res = docparse.extract(name, data)
+    except docparse.UnsupportedDocument as exc:
+        # 格式不支持要**明确报错并说怎么改**，不能回一段空文本 ——
+        # 那会变成"上传成功但没内容"这种最难查的故障。
+        raise HTTPException(400, str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(400, f"读不了「{name}」：{type(exc).__name__}: {exc}") from exc
+
+    text = res.text or ""
+    return {
+        # `ExtractResult` 里没有文件名（它只描述"解析出来的东西"），
+        # 所以这里回填上传时的原名 —— 对话里要显示"附了哪个文件"，没有名字就没法引用。
+        "filename": name,
+        "fmt": res.fmt,
+        "chars": len(text),
+        "text": text,
+        "truncated": bool(res.truncated),
+        "warnings": list(res.warnings or []),
+    }
+
+
 @router.post("/projects/{pid}/assistant")
 async def project_assistant(pid: int, body: AssistantIn, request: Request) -> dict:
     """In-app chat assistant: one turn against this project, with tools that read
@@ -1481,7 +1555,38 @@ async def project_assistant(pid: int, body: AssistantIn, request: Request) -> di
     await _project_access(request, pid, "viewer")
     from app.assistant import assistant_turn
 
-    return await assistant_turn(pid, body.message, body.history)
+    return await assistant_turn(pid, body.message, body.history, body.attachments)
+
+
+@router.get("/projects/{pid}/knowledge/formats")
+async def knowledge_formats(pid: int, request: Request) -> dict:
+    """**后端实际支持**的需规文件格式（2026-10-12）。
+
+    为什么要做成接口而不是在前端写死一份列表：前端写死的清单会和
+    `docparse` 真实支持的集合**慢慢漂移** —— 加了新格式前端不知道，
+    删了旧格式前端还在放行。放行一个后端读不了的格式，
+    用户拿到的是"上传成功但内容为空"这种最难查的故障。
+
+    分三组返回，让界面能说清"推荐用什么、哪些不支持"：
+      * text   纯文本类（md/txt/csv/json…）
+      * office 压缩格式的 Office（docx/xlsx/pdf/html/rtf）
+      * legacy 老二进制格式（doc/xls/ppt）——**读不了**，但要明确列出来，
+        否则用户会一直试 .doc 然后不知道为什么失败
+    """
+    await _project_access(request, pid, "viewer")
+    from app import docparse
+
+    text_exts = sorted(docparse._TEXT_EXTS)
+    # docparse 里 Office/PDF/HTML/RTF 走的是各自的解析分支，不在 _TEXT_EXTS 里
+    office_exts = sorted({".docx", ".docm", ".pdf", ".xlsx", ".xlsm", ".xltx", ".html", ".htm", ".xhtml", ".rtf"})
+    legacy = sorted(docparse._LEGACY_BINARY)
+    return {
+        "text": text_exts,
+        "office": office_exts,
+        "legacy_unsupported": legacy,
+        "accept": ",".join(text_exts + office_exts),
+        "label": docparse.SUPPORTED_EXT_LABEL,
+    }
 
 
 @router.get("/projects/{pid}/knowledge")
@@ -1579,6 +1684,905 @@ async def search_project_knowledge(pid: int, request: Request, body: KnowledgeIn
 # 串起原本散落的三步：文档已进知识库 → 按章节生成草稿 → 人工审阅后启用/直接跑。
 # 刻意**不**做成一个大而全的"一键生成全部"：一份 46 万字的需规一次生成几十上百条，
 # 调用会失控，而且生成质量无法逐节确认。所以接口按"列章节 → 逐节生成 → 审阅"三段拆开。
+
+
+# ---- 项目文档：需求分析 / 总览 / 流程图（2026-10-12）------------------------
+#
+# 用户的原话：「我希望你加上一栏，里面放上需求分析或者该项目的总览……
+# 里面要有该项目的需规和流程图……最好是和我上传的大需规一样，
+# 但是你那个要是 AI 分析并截取过的」。
+#
+# 与知识库的分工：知识库存**原件**（检索用），这里存**提炼**（人读用）。
+# 正文是富文本 HTML（用户要求能改字体/颜色/字号/贴图），渲染前必须净化。
+
+_DOC_KINDS = ("overview", "analysis", "flow", "spec_source", "custom")
+_DOC_TITLE_DEFAULT = {
+    "overview": "项目总览",
+    "analysis": "需求分析",
+    "flow": "流程图",
+    # 上传的资料原文（2026-10-12）。单独一种 kind 而不是塞进 custom：
+    # 它要能按文件名重复上传时**覆盖同一份**（见 create_doc_from_file），
+    # 而 custom 允许多篇同名，定位不到"哪一份是重传"。
+    "spec_source": "资料原文",
+    "custom": "自定义文档",
+}
+
+
+def _sanitize_doc_html(html: str) -> str:
+    """富文本净化的**唯一入口**。所有写文档的路径都必须过这里。
+
+    单独包一层而不是直接调 `doc_sanitize.sanitize`：这样"哪些地方在存 HTML"
+    可以 grep 出来，而漏掉一处就是一条存储型 XSS（见 doc_sanitize 的注释）。
+    """
+    from app import doc_sanitize
+
+    return doc_sanitize.sanitize(html or "")
+
+
+def _doc_row(r) -> dict:
+    return {
+        "id": r.id,
+        "kind": r.kind,
+        "title": r.title or _DOC_TITLE_DEFAULT.get(r.kind, ""),
+        "html": r.html or "",
+        "sources": r.sources or [],
+        "origin": r.origin or "",
+        # 助手能不能改这份文档（2026-10-12）。前端据此显示"只有我能改"的开关；
+        # 助手侧由 `_write_project_doc` 强制 —— 界面上的开关只是提示，
+        # 真正的门在服务端（否则绕过界面就能改）。
+        "ai_editable": bool(getattr(r, "ai_editable", True)),
+        "updated_at": r.updated_at.isoformat() if r.updated_at else None,
+    }
+
+
+@router.get("/projects/{pid}/docs")
+async def list_project_docs(pid: int, request: Request) -> dict:
+    """项目文档列表（含内置文档的占位，界面不用自己编）。"""
+    await _project_access(request, pid, "viewer")
+    from sqlalchemy import select
+
+    from app.models import ProjectDoc
+
+    async with db_session() as s:
+        await _get_project_or_404(s, pid)
+        rows = (
+            (
+                await s.execute(
+                    select(ProjectDoc)
+                    .where(ProjectDoc.project_id == pid)
+                    .order_by(ProjectDoc.kind, ProjectDoc.id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    docs = [_doc_row(r) for r in rows]
+    have = {d["kind"] for d in docs if d["kind"] != "custom"}
+    # 三种内置文档都补上占位，这样左侧栏永远是同一组入口 ——
+    # 缺哪一项就少一个按钮，用户会以为是权限问题。
+    # `spec_source` **不补占位**：它是"上传了哪几份资料"，没有资料时就不该有一个
+    # 空条目摆在那儿（用户会点进去发现是空的）。有上传才出现。
+    for k in ("overview", "analysis", "flow"):
+        if k not in have:
+            docs.append(
+                {
+                    "id": 0, "kind": k, "title": _DOC_TITLE_DEFAULT[k],
+                    "html": "", "sources": [], "origin": "", "updated_at": None,
+                    # 占位也要带这个字段：前端 `active.ai_editable` 会读到 undefined，
+                    # 而 undefined 在"是否可改"的判断里是假值 —— 于是新建的总览
+                    # 会显示成"被锁住"。占位代表"还没有这份文档"，按可改处理。
+                    "ai_editable": True,
+                }
+            )
+    docs.sort(
+        key=lambda d: (
+            _DOC_KINDS.index(d["kind"]) if d["kind"] in _DOC_KINDS else 9,
+            d["title"],
+        )
+    )
+    return {"docs": docs}
+
+
+@router.put("/projects/{pid}/docs")
+async def upsert_project_doc(pid: int, request: Request, body: dict) -> dict:
+    """新建或更新一份文档。
+
+    按 (project_id, kind) 定位现有行再更新 —— 一个项目的"总览"就该只有一份，
+    不然会出现两份互相矛盾的总览，而用户不知道该信哪个。
+    `custom` 例外：允许任意多篇，靠标题区分。
+    """
+    await _project_access(request, pid, "editor")
+    from sqlalchemy import select
+
+    from app.models import ProjectDoc
+
+    kind = str(body.get("kind") or "custom").strip()
+    if kind not in _DOC_KINDS:
+        raise HTTPException(400, f"kind 必须是 {_DOC_KINDS} 之一")
+    title = str(body.get("title") or _DOC_TITLE_DEFAULT.get(kind, "")).strip()[:200]
+    raw = str(body.get("html") or "")
+    html = _sanitize_doc_html(raw)
+    # 「只有我能改」（2026-10-12）：上传/新建时可以带上这个选择。
+    # 只有显式传了才动它 —— 否则每次保存正文都会把权限重置回默认值，
+    # 而用户根本不知道自己改过权限。
+    perm = body.get("ai_editable")
+    perm_set = isinstance(perm, bool)
+    # 净化前后差距过大 = 有一段被丢掉了（脚本、iframe…）。
+    # 静默丢弃会让用户以为"保存成功但内容不见了"，所以要把这件事说出来。
+    dropped = len(raw) - len(html) > 200
+
+    doc_id = body.get("id")
+    async with db_session() as s:
+        await _get_project_or_404(s, pid)
+        row = None
+        if doc_id:
+            row = (
+                await s.execute(
+                    select(ProjectDoc).where(
+                        ProjectDoc.id == int(doc_id), ProjectDoc.project_id == pid
+                    )
+                )
+            ).scalar_one_or_none()
+        if row is None and kind != "custom":
+            row = (
+                await s.execute(
+                    select(ProjectDoc).where(
+                        ProjectDoc.project_id == pid, ProjectDoc.kind == kind
+                    )
+                )
+            ).scalars().first()
+        if row is None:
+            row = ProjectDoc(project_id=pid, kind=kind, title=title, origin="human")
+            s.add(row)
+        row.title = title or row.title
+        row.html = html
+        if perm_set:
+            # 只在显式传入时改 —— 见上面 perm_set 的注释。
+            row.ai_editable = bool(perm)
+        # 人改过就标 human —— AI 生成的标 ai，用户一眼能看出哪些还没被人看过。
+        row.origin = "human"
+        from app.models import _utcnow
+
+        row.updated_at = _utcnow()
+        await s.flush()
+        out = _doc_row(row)
+    return out | {"dropped_content": dropped}
+
+
+@router.post("/projects/{pid}/docs/from-file")
+async def create_doc_from_file(
+    pid: int,
+    request: Request,
+    file: UploadFile = File(...),
+) -> dict:
+    """把一个上传文件变成**可查看、可编辑的文档**（2026-10-12）。
+
+    ## 为什么需要它
+
+    用户反馈「上传的需归文档也无法查看修改」。查下来：上传走的是
+    `/knowledge/append`，内容只进**知识库**（喂给 AI 检索的分块），
+    而文档列表里那份「需归文档」是他自己新建的**空文档**（html 7 字节）——
+    文件和文档之间根本没有连线，所以他看不到、也改不了上传的东西。
+
+    知识库和项目文档是两件事，都该有：
+      * 知识库 = AI 检索用的分块（大文档靠它，不必整篇进上下文）；
+      * 项目文档 = 人读、人改的正文（也是"只有我能改"这条权限的载体）。
+    所以这里把解析出的原文写进一份 `spec_source` 文档：同一份文件
+    既进了知识库、也在文档页里看得见改得动。
+
+    ## 助手对它的权限
+
+    **永远只读**（`ai_editable=False`）。这是外部原件，助手往里写就等于篡改，
+    而用户日后核对时看到的是被改过的版本 —— 那种错误几乎发现不了。
+    助手仍然能读它（`read_project_docs` 不看这一列）。
+    """
+    await _project_access(request, pid, "editor")
+    from app import docparse
+    from app.doc_sanitize import sanitize
+    from app.models import ProjectDoc, _utcnow
+
+    name = (file.filename or "").strip() or "上传的文档"
+    data = await _read_upload_capped(file, 80 * 1024 * 1024)
+    try:
+        res = docparse.extract(name, data)
+    except docparse.UnsupportedDocument as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(400, f"读不了「{name}」：{type(exc).__name__}: {exc}") from exc
+
+    text = (res.text or "").strip()
+    if not text:
+        raise HTTPException(400, f"「{name}」解析出来是空的，没有内容可存入文档。")
+
+    # ★ 上传的资料原文**始终不允许助手改写**（2026-10-12）。
+    #
+    # 理由：它是**外部原件**（客户给的说明书、别人写的需规）。助手往里写东西
+    # 就等于篡改原件，而用户日后核对时看到的是被改过的版本 ——
+    # 这种错误极难发现。助手仍然能**读**它（read_project_docs 不看这一列）。
+    #
+    # 所以这一列恒为 False，不给调用方"传错就解锁"的机会。
+    editable = False
+    # 文本 → HTML。用 escape + <p> 保留段落：上传的是纯文本资料，
+    # 不该去猜它的 markdown 结构（猜错了正文会变形），所以逐段成 <p>。
+    from html import escape as _escape
+
+    paras = [p.strip() for p in text.split("\n") if p.strip()]
+    body = "".join(f"<p>{_escape(p)}</p>" for p in paras[:20000])
+    html = sanitize(f"<h2>{_escape(name)}</h2>{body}")
+
+    async with db_session() as s:
+        row = (
+            await s.execute(
+                select(ProjectDoc).where(
+                    ProjectDoc.project_id == pid,
+                    ProjectDoc.kind == "spec_source",
+                    ProjectDoc.title == name[:200],
+                )
+            )
+        ).scalars().first()
+        created = row is None
+        if row is None:
+            row = ProjectDoc(
+                project_id=pid,
+                kind="spec_source",
+                title=name[:200],
+                # ★ 别忘了正文！漏掉这一个参数的效果是"创建成功但文档是空的" ——
+                # 而这恰好就是用户报的那个症状（7 字节的空壳），
+                # 所以测试必须断言**正文内容**，只断言 created=True 会漏过去。
+                html=html,
+                origin="human",
+                ai_editable=editable,
+            )
+            s.add(row)
+        else:
+            # 同一个文件重新上传 = 用新解析结果替换旧的，而不是越追加越长。
+            # 用户重传通常正是因为上次解析得不理想。
+            row.html = html
+            row.ai_editable = editable
+            row.origin = "human"
+        row.updated_at = _utcnow()
+        await s.flush()
+        out = _doc_row(row)
+
+    return {
+        "ok": True,
+        "created": created,
+        "doc": out,
+        "chars": len(text),
+        "truncated": bool(res.truncated),
+        "warnings": list(res.warnings or []),
+    }
+
+
+@router.post("/projects/{pid}/docs/analyze")
+async def analyze_project_docs(pid: int, request: Request, body: dict | None = None) -> dict:
+    """让 AI 把整份需规读成一份项目概况，并**存成可编辑的文档**。
+
+    请求体可选：{"kind": "overview"|"analysis"|"flow", "replace": true}
+    `replace=false`（默认）时把生成结果**追加**在现有内容后面 ——
+    用户已经改过的地方不该被一次重新生成抹掉。
+    """
+    await _project_access(request, pid, "editor")
+    from sqlalchemy import select
+
+    from app import doc_sanitize, spec_overview
+    from app.models import ProjectDoc
+
+    body = body or {}
+    kind = str(body.get("kind") or "overview").strip()
+    if kind not in ("overview", "analysis", "flow"):
+        raise HTTPException(400, "kind 必须是 overview / analysis / flow 之一")
+    replace = bool(body.get("replace"))
+
+    res = await spec_overview.analyze(pid)
+    if res.error and not res.sections:
+        # 失败要如实报，不能回一份空文档让用户以为"这个项目没内容"。
+        return {
+            "ok": False,
+            "error": res.error,
+            "usage": res.usage or None,
+            "headings_used": res.headings_used,
+            "doc_chars": res.doc_chars,
+        }
+
+    # ★ 只把**属于这份文档的**节写进去（2026-10-12 修一个真实的功能错位）。
+    #
+    # 问题：`analyze` 一次生成全部六节（总览/模块/流程/角色/规则/名词表），
+    # 而这里原来把**六节全写进当前文档**。于是用户在「流程图」上点生成，
+    # 拿到的文档开头是「项目总览」、流程图埋在很下面 —— 他点的是"画流程图"，
+    # 看到的却是文案。实测截图就是这样。
+    #
+    # 现在按文档类型挑节：流程图只要那张图，需求分析要"是什么/有哪些/怎么走"这三块，
+    # 项目总览拿其余全部（含名词表）。这样每份文档都只说它该说的事。
+    _KIND_SECTIONS: dict[str, tuple[str, ...]] = {
+        "flow": ("flow",),
+        "analysis": ("overview", "modules", "roles", "rules"),
+        "overview": ("overview", "modules", "flow", "roles", "rules", "glossary"),
+    }
+    wanted = _KIND_SECTIONS.get(kind, _KIND_SECTIONS["overview"])
+    picked = [s for s in res.sections if s.key in wanted]
+    if not picked:
+        return {
+            "ok": False,
+            "error": f"这次没有生成出「{kind}」需要的内容，可以再试一次。",
+            "usage": res.usage or None,
+            "headings_used": res.headings_used,
+            "doc_chars": res.doc_chars,
+        }
+    generated = doc_sanitize.sanitize(spec_overview.sections_to_html(picked))
+    sources = sorted({x for sec in picked for x in sec.sources})
+
+    async with db_session() as s:
+        await _get_project_or_404(s, pid)
+        row = (
+            await s.execute(
+                select(ProjectDoc).where(ProjectDoc.project_id == pid, ProjectDoc.kind == kind)
+            )
+        ).scalars().first()
+        if row is None:
+            row = ProjectDoc(project_id=pid, kind=kind, title=_DOC_TITLE_DEFAULT[kind])
+            s.add(row)
+        existing = (row.html or "").strip()
+        appended = bool(existing and not replace)
+        row.html = f"{existing}\n<hr>\n{generated}" if appended else generated
+        row.sources = sources[:200]
+        row.origin = "ai"
+        from app.models import _utcnow
+
+        row.updated_at = _utcnow()
+        await s.flush()
+        out = _doc_row(row)
+
+    return {
+        "ok": True,
+        "doc": out,
+        "sections": [x.as_dict() for x in picked],
+        "usage": res.usage or None,
+        "headings_used": res.headings_used,
+        "doc_chars": res.doc_chars,
+        "appended": appended,
+    }
+
+
+@router.patch("/projects/{pid}/docs/{doc_id}/permission")
+async def set_doc_permission(pid: int, doc_id: int, request: Request, body: dict) -> dict:
+    """设置「只有我能改」（2026-10-12 用户要求）。
+
+    用户原话：「ai 可以阅读那里面所有文档，但是有些文档 ai 无法修改，
+    我上传文档的时候可以加个选择，也就是只有我自己能修改」。
+
+    ★ 读不受影响：助手永远能读全部文档（`read_project_docs` 不看这一列）。
+    这一列只拦**写**。
+    """
+    await _project_access(request, pid, "editor")
+    from app.models import ProjectDoc, _utcnow
+
+    async with db_session() as s:
+        row = await s.get(ProjectDoc, doc_id)
+        if row is None or row.project_id != pid:
+            raise HTTPException(404, "document not found")
+        row.ai_editable = bool(body.get("ai_editable", True))
+        row.updated_at = _utcnow()
+        await s.flush()
+        out = _doc_row(row)
+    return out
+
+
+@router.delete("/projects/{pid}/docs/{doc_id}")
+async def delete_project_doc(pid: int, doc_id: int, request: Request) -> dict:
+    """删一份自定义文档。内置的三种不允许删（删了左侧栏会缺一项）。"""
+    await _project_access(request, pid, "editor")
+    from app.models import ProjectDoc
+
+    async with db_session() as s:
+        row = await s.get(ProjectDoc, doc_id)
+        if row is None or row.project_id != pid:
+            raise HTTPException(404, "document not found")
+        if row.kind != "custom":
+            raise HTTPException(400, "内置文档不能删除，清空内容即可")
+        await s.delete(row)
+    return {"deleted": doc_id}
+
+
+@router.post("/projects/{pid}/docs/image")
+async def upload_doc_image(pid: int, request: Request, file: UploadFile = File(...)) -> dict:
+    """富文本文档里粘贴/插入的图片（2026-10-12）。
+
+    为什么必须走服务端而不是塞 data: URI：data URI 会让每个文档正文变大几十倍
+    （一张截图转 base64 约 +33%），而文档是**每次打开页面都要整份读出来**的。
+    存成文件、正文里只放 URL，读页面的代价就和图片大小脱钩了。
+
+    校验只认图片 MIME + 扩展名白名单：这个端点会把文件原样存到一个**公网可读**的
+    路径下（`/artifacts`），所以"允许上传任意文件"等于开了一个静态文件托管。
+    """
+    await _project_access(request, pid, "editor")
+    from app import storage
+
+    name = (file.filename or "image.png").rsplit(".", 1)[-1].lower()
+    allowed = {"png", "jpg", "jpeg", "gif", "webp", "bmp"}
+    ctype = (file.content_type or "").lower()
+    if name not in allowed or (ctype and not ctype.startswith("image/")):
+        raise HTTPException(400, f"只支持图片（{sorted(allowed)}），收到 {file.filename!r} / {ctype!r}")
+    data = await _read_upload_capped(file, 8 * 1024 * 1024)  # 8MB：截图够用
+    import uuid as _uuid
+
+    key = f"docs/{pid}/{_uuid.uuid4().hex[:12]}.{name}"
+    import os as _os
+    import tempfile as _tempfile
+
+    with _tempfile.TemporaryDirectory(prefix="tp_docimg_") as td:
+        p = _os.path.join(td, f"up.{name}")
+        with open(p, "wb") as f:
+            f.write(data)
+        url = await storage.upload(p, key)
+    return {"url": url, "bytes": len(data)}
+
+
+# ---- 用例优化提案（2026-10-12）----------------------------------------------
+#
+# 用户的原话：「我希望 ai 能根据这个页面去优化测试用例和增加测试用例
+# 同删除不必要的测试用例」。他选的是**先出提案、逐条审阅后再入库**。
+#
+# 所以这里有一条硬规矩：**本组端点里只有 `apply` 会碰 `test_case` 表**，
+# 生成阶段只写 `case_proposal`。一次静默的误删会让"通过率"从有依据变成没依据，
+# 而报告上一个异常都不会有 —— 用例库是这个系统真正的资产，不该由模型直接改。
+
+_PROPOSAL_ACTIONS = ("add", "update", "remove")
+
+
+@router.get("/projects/{pid}/case-proposals")
+async def list_case_proposals(pid: int, request: Request, status: str = "") -> dict:
+    """提案清单 + 统计。"""
+    await _project_access(request, pid, "viewer")
+    from sqlalchemy import select
+
+    from app.models import CaseProposal
+
+    async with db_session() as s:
+        await _get_project_or_404(s, pid)
+        stmt = select(CaseProposal).where(CaseProposal.project_id == pid)
+        if status in ("pending", "accepted", "rejected"):
+            stmt = stmt.where(CaseProposal.status == status)
+        rows = (
+            (await s.execute(stmt.order_by(CaseProposal.status, CaseProposal.action, CaseProposal.id)))
+            .scalars()
+            .all()
+        )
+    items = [
+        {
+            "id": r.id,
+            "action": r.action,
+            "case_key": r.case_key,
+            "case_id": r.case_id,
+            "summary": r.summary,
+            "reason": r.reason,
+            "evidence": r.evidence or [],
+            "payload": r.payload or {},
+            # 相关流程图（Mermaid 源码）与账号 —— 用户要求"告诉我为啥要加这个用例"
+            # 时能看到的证据。
+            "mermaid": r.mermaid or "",
+            "role": r.role or "",
+            "status": r.status,
+            "applied_case_id": r.applied_case_id,
+            "created_at": r.created_at.isoformat() if r.created_at else None,
+            "decided_at": r.decided_at.isoformat() if r.decided_at else None,
+        }
+        for r in rows
+    ]
+    counts = {"pending": 0, "accepted": 0, "rejected": 0}
+    by_action: dict[str, int] = {}
+    for it in items:
+        counts[it["status"]] = counts.get(it["status"], 0) + 1
+        if it["status"] == "pending":
+            by_action[it["action"]] = by_action.get(it["action"], 0) + 1
+    return {"proposals": items, "counts": counts, "pending_by_action": by_action}
+
+
+@router.post("/projects/{pid}/case-proposals/generate")
+async def generate_case_proposals(pid: int, request: Request, body: dict | None = None) -> dict:
+    """让 AI 按项目文档审一遍用例库，产出提案。
+
+    请求体可选：{"replace_pending": true} —— 先清掉还没决定的旧提案再生成。
+    默认**保留**旧提案（用户可能已经看了一半，重新生成不该把它冲掉）。
+    """
+    await _project_access(request, pid, "editor")
+    from sqlalchemy import delete, select
+
+    from app import case_optimize
+    from app.models import CaseProposal, ProjectDoc, TestCase
+
+    body = body or {}
+    replace_pending = bool(body.get("replace_pending"))
+
+    async with db_session() as s:
+        await _get_project_or_404(s, pid)
+        # 需规内容取"项目总览"，它本身就是从整份需规提炼的骨架 ——
+        # 拿原件（46 万字）反而塞不进提示词。
+        doc = (
+            await s.execute(
+                select(ProjectDoc).where(
+                    ProjectDoc.project_id == pid, ProjectDoc.kind == "overview"
+                )
+            )
+        ).scalars().first()
+        spec_html = (doc.html if doc else "") or ""
+        if not spec_html.strip():
+            return {
+                "ok": False,
+                "error": "还没有项目文档。先到「项目文档」页点『AI 分析与生成』，再回来优化用例。",
+                "created": 0,
+            }
+        case_rows = (
+            (
+                await s.execute(
+                    select(TestCase).where(
+                        TestCase.project_id == pid, TestCase.status == "active"
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        cases = [
+            {
+                "id": c.id,
+                "case_key": c.case_key,
+                "name": c.name,
+                "module": c.module,
+                "status": c.status,
+                "role": c.role,
+                "prompt": c.prompt,
+                "expected": c.expected,
+                "preconditions": c.preconditions,
+            }
+            for c in case_rows
+        ]
+        if not cases:
+            return {"ok": False, "error": "这个项目还没有生效中的用例，无从优化。", "created": 0}
+
+        # ★ 把这个项目**真实存在**的账号给模型（2026-10-12 用户要求「附上账号」）。
+        #
+        # 不给的话它会照需规里的角色名编一个（"结算单发起人"），
+        # 而 credential 表里那个账号叫 `sittrapply` —— 采纳后用例会因为
+        # "找不到账号"直接失败，而用户看不出是提案的问题。
+        # 实测项目里已经有 2 条用例踩了这个坑（role 写成了中文角色名）。
+        cred_rows = (
+            (
+                await s.execute(
+                    select(Credential).where(
+                        Credential.project_id == pid, Credential.is_active == True  # noqa: E712
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        accounts = [
+            {"role": c.role, "label": c.label, "healthy": bool(c.healthy)}
+            for c in cred_rows
+            if c.role
+        ]
+
+        groups = case_optimize.group_cases_by_module(cases)
+        # 只取用例最多的前 12 个模块：一轮全跑会撞网关限额，而且用户第一屏也看不完。
+        groups = groups[:12]
+        payload_groups = [
+            (m, cs, case_optimize.spec_text_for_module(spec_html, m)) for m, cs in groups
+        ]
+
+        proposals, usage, failed, failed_modules, mod_of = await case_optimize.optimize_project(
+            payload_groups, accounts
+        )
+
+        if replace_pending:
+            await s.execute(
+                delete(CaseProposal).where(
+                    CaseProposal.project_id == pid, CaseProposal.status == "pending"
+                )
+            )
+        # 已经提过的提案不重复插入。去重键分两种：
+        #   add            → (action, summary)
+        #   update/remove  → (action, case_key)
+        #
+        # ★ 为什么 add 不能只用 case_key：新增提案的 case_key 是 None，
+        #   用 None 当键会把**第二条新增提案**当成重复直接丢掉
+        #   （实测就是这样：一次生成里两条 add 只进库了一条，而界面上看不出来）。
+        existing: set[tuple] = set()
+        for r in (
+            (await s.execute(select(CaseProposal).where(CaseProposal.project_id == pid)))
+            .scalars()
+            .all()
+        ):
+            existing.add((r.action, r.summary if r.action == "add" else r.case_key))
+        by_key = {str(c.get("case_key")): c["id"] for c in cases if c.get("case_key")}
+        created = 0
+        for p in proposals:
+            if (p.action, p.summary if p.action == "add" else p.case_key) in existing:
+                continue
+            s.add(
+                CaseProposal(
+                    project_id=pid,
+                    action=p.action,
+                    case_key=p.case_key,
+                    case_id=by_key.get(p.case_key) if p.case_key else None,
+                    summary=p.summary[:400],
+                    reason=p.reason,
+                    evidence=p.evidence,
+                    payload=p.payload,
+                    # 流程图是**按模块**生成的一张，复制到该模块的每条提案上。
+                    # 每条各画一张会把同一个调用付十几遍钱，而且图会各说各话。
+                    mermaid=p.flow,
+                    role=p.role,
+                )
+            )
+            existing.add((p.action, p.case_key))
+            created += 1
+
+    return {
+        "ok": True,
+        "created": created,
+        "modules_scanned": len(groups),
+        "modules_failed": failed,
+        # 点名失败的模块：只说"有 3 个失败"用户不知道是哪 3 个，也就无法判断要不要补。
+        "failed_modules": failed_modules,
+        "usage": usage or None,
+    }
+
+
+@router.post("/projects/{pid}/case-proposals/{prop_id}/decide")
+async def decide_case_proposal(pid: int, prop_id: int, request: Request, body: dict) -> dict:
+    """采纳或驳回**一条**提案。
+
+    采纳的落地方式（三种动作各不相同，理由见 models.CaseProposal 的注释）：
+      add    → 新建用例
+      update → 只合并 payload 里出现的字段（不整条覆盖）
+      remove → 改成 status='deprecated'，**不真删**
+    """
+    await _project_access(request, pid, "editor")
+    return await _apply_proposals(pid, [prop_id], str(body.get("decision") or ""), request)
+
+
+@router.post("/projects/{pid}/case-proposals/decide")
+async def decide_case_proposals_bulk(pid: int, request: Request, body: dict) -> dict:
+    """批量采纳/驳回。审阅动辄几十条，一条条点会让人放弃审阅 —— 那等于回到"直接改"。"""
+    await _project_access(request, pid, "editor")
+    ids = body.get("ids")
+    if not isinstance(ids, list) or not ids:
+        raise HTTPException(400, "ids 必须是非空数组")
+    return await _apply_proposals(
+        pid, [int(x) for x in ids][:500], str(body.get("decision") or ""), request
+    )
+
+
+async def _apply_proposals(pid: int, ids: list[int], decision: str, request: Request) -> dict:
+    """采纳/驳回的公共实现。"""
+    if decision not in ("accept", "reject"):
+        raise HTTPException(400, "decision 必须是 accept 或 reject")
+
+    from app.models import CaseProposal, _utcnow
+
+    applied: list[dict] = []
+    skipped: list[dict] = []
+    async with db_session() as s:
+        await _get_project_or_404(s, pid)
+        # 记下"谁采纳的"。审计需要它：一条用例被改/被作废必须有经手人，
+        # 否则出问题时只能看到"它变了"，查不到是谁点的。
+        _u = await auth.current_user(request)
+        who = _u.email if _u else None
+        for prop_id in ids:
+            row = await s.get(CaseProposal, prop_id)
+            if row is None or row.project_id != pid:
+                skipped.append({"id": prop_id, "why": "提案不存在"})
+                continue
+            if row.status != "pending":
+                skipped.append({"id": prop_id, "why": f"已经{ '采纳' if row.status == 'accepted' else '驳回' }过"})
+                continue
+            row.decided_by = who
+            row.decided_at = _utcnow()
+            if decision == "reject":
+                row.status = "rejected"
+                applied.append({"id": prop_id, "action": row.action, "result": "rejected"})
+                continue
+            try:
+                res = await _apply_one(s, pid, row)
+            except HTTPException as exc:
+                skipped.append({"id": prop_id, "why": str(exc.detail)})
+                continue
+            row.status = "accepted"
+            row.applied_case_id = res.get("case_id")
+            applied.append({"id": prop_id, "action": row.action, **res})
+    return {"ok": True, "applied": applied, "skipped": skipped}
+
+
+async def _apply_one(s, pid: int, row) -> dict:
+    """把一条提案落到 `test_case`。**这是本组端点里唯一写用例库的地方。**"""
+    from sqlalchemy import select
+
+    from app.models import TestCase, _utcnow
+
+    payload = row.payload or {}
+    if row.action == "add":
+        if not (payload.get("prompt") or "").strip():
+            raise HTTPException(400, "这条新增提案没有任务描述，无法生成用例")
+        key = await _next_case_key(s, pid)
+        case = TestCase(
+            project_id=pid,
+            case_key=key,
+            name=(payload.get("name") or row.summary or "AI 新增用例")[:300],
+            module=(payload.get("module") or "")[:200] or None,
+            priority=payload.get("priority") or "P1",
+            preconditions=payload.get("preconditions") or "",
+            prompt=payload.get("prompt") or "",
+            expected=payload.get("expected") or "",
+            # 账号以**提案自己那一列**为准（它已经过账号清单校验），
+            # payload 里的 role 是同一份数据，但列才是权威。
+            role=(row.role or payload.get("role") or None),
+            tags=payload.get("tags") or [],
+            # 出处：这条用例是从"AI 提案"来的，并且指向生成它的那次分析。
+            # 没有它，用户无法回答"这 20 条新用例是哪儿冒出来的"。
+            source=f"AI 提案 #{row.id}",
+        )
+        s.add(case)
+        await s.flush()
+        return {"case_id": case.id, "case_key": key, "result": "created"}
+
+    # update / remove 都要先找到目标用例
+    target = None
+    if row.case_id:
+        target = (
+            await s.execute(
+                select(TestCase).where(TestCase.id == row.case_id, TestCase.project_id == pid)
+            )
+        ).scalar_one_or_none()
+    if target is None and row.case_key:
+        target = (
+            await s.execute(
+                select(TestCase).where(
+                    TestCase.project_id == pid, TestCase.case_key == row.case_key
+                )
+            )
+        ).scalar_one_or_none()
+    if target is None:
+        raise HTTPException(400, f"找不到用例 {row.case_key or row.case_id}（可能已被别处删除）")
+
+    if row.action == "remove":
+        # ★ 不真删。删掉之后报告里那条编号会消失，而真删不可逆 ——
+        # 用户想反悔时没有任何办法。作废可以在用例页一键改回来。
+        target.status = "deprecated"
+        target.updated_at = _utcnow()
+        return {"case_id": target.id, "case_key": target.case_key, "result": "deprecated"}
+
+    # update：只合并 payload 里出现的字段
+    allowed = ("name", "priority", "preconditions", "prompt", "expected", "role", "module", "tags")
+    changed: list[str] = []
+    for k in allowed:
+        if k not in payload:
+            continue
+        v = payload[k]
+        if v is None or (isinstance(v, str) and not v.strip()):
+            continue
+        if k == "priority":
+            v = str(v).strip().upper()
+            if v not in ("P0", "P1", "P2"):
+                continue
+        setattr(target, k, v if not isinstance(v, str) else v[:4000])
+        changed.append(k)
+    if not changed:
+        raise HTTPException(400, "这条修改提案没有任何可落地的字段")
+    target.updated_at = _utcnow()
+    return {"case_id": target.id, "case_key": target.case_key, "result": "updated", "fields": changed}
+
+
+@router.get("/projects/{pid}/verified-coverage")
+async def verified_coverage(pid: int, request: Request) -> dict:
+    """**人工确认过的**通过率，按模块统计（2026-10-12）。
+
+    ## 为什么不直接用自动判定结果
+
+    自动判定里有相当一部分不是产品结论：环境没起来、agent 没做完、
+    判定器自己挂了。把这些当"失败"算进通过率，会让一个模块看起来千疮百孔，
+    而实际上可能一条真缺陷都没有 —— 用户拿着一份不可信的数字做不了决定。
+
+    所以这里只认**人工改判过的**结果（`verdict_override` 非空）：
+    那是唯一一条"有人看过并负责"的证据链。同时如实报出另外两个数：
+    自动判定的原始通过率、以及有多少条还等着人看 ——
+    让用户自己判断"人工样本够不够"，而不是把这个判断藏起来。
+    """
+    await _project_access(request, pid, "viewer")
+    from sqlalchemy import select
+
+    from app.models import Run, RunResult, TestCase
+
+    async with db_session() as s:
+        await _get_project_or_404(s, pid)
+        rows = (
+            await s.execute(
+                select(
+                    TestCase.module,
+                    TestCase.case_key,
+                    RunResult.status,
+                    RunResult.verdict_override,
+                    RunResult.attribution,
+                )
+                .join(RunResult, RunResult.case_id == TestCase.id)
+                .join(Run, Run.id == RunResult.run_id)
+                .where(TestCase.project_id == pid)
+            )
+        ).all()
+
+    per_module: dict[str, dict] = {}
+    for module, _key, status, override, attribution in rows:
+        m = (module or "").strip() or "未分类"
+        b = per_module.setdefault(
+            m,
+            {
+                "module": m,
+                "verified_pass": 0,
+                "verified_fail": 0,
+                "auto_pass": 0,
+                "auto_fail": 0,
+                "awaiting_review": 0,
+                "product_defects": 0,
+            },
+        )
+        # 人工确认过的：以 override 为准
+        if override in ("passed", "failed"):
+            if override == "passed":
+                b["verified_pass"] += 1
+            else:
+                b["verified_fail"] += 1
+        else:
+            b["awaiting_review"] += 1
+            if status == "passed":
+                b["auto_pass"] += 1
+            elif status in ("failed", "error"):
+                b["auto_fail"] += 1
+        if attribution == "product" or attribution == "product_defect":
+            b["product_defects"] += 1
+
+    out = []
+    for b in per_module.values():
+        vn = b["verified_pass"] + b["verified_fail"]
+        an = b["auto_pass"] + b["auto_fail"]
+        b["verified_total"] = vn
+        b["auto_total"] = an
+        b["verified_rate"] = round(b["verified_pass"] / vn * 100, 1) if vn else None
+        b["auto_rate"] = round(b["auto_pass"] / an * 100, 1) if an else None
+        out.append(b)
+    out.sort(key=lambda x: (-(x["verified_total"] + x["auto_total"]), x["module"]))
+    tot_v = sum(x["verified_total"] for x in out)
+    tot_p = sum(x["verified_pass"] for x in out)
+    return {
+        "modules": out,
+        "summary": {
+            "verified_total": tot_v,
+            "verified_pass": tot_p,
+            "verified_rate": round(tot_p / tot_v * 100, 1) if tot_v else None,
+            "awaiting_review": sum(x["awaiting_review"] for x in out),
+            "product_defects": sum(x["product_defects"] for x in out),
+        },
+    }
+
+
+@router.get("/projects/{pid}/insights")
+async def project_insights(pid: int, request: Request) -> dict:
+    """项目概况面板（2026-10-12）：需求覆盖矩阵 / 规则 / 接口 / 账号 / 变更 / 失败台账。
+
+    ★ 这一层**不算、只查**，一个 LLM 调用都不发 —— 所以它永远可用、秒出、不花 token。
+    理由见 `app/project_insights.py` 的模块注释：把事实交给 AI 复述一遍
+    只会引入漂移（文档说"覆盖良好"，而实际有条需求一条用例都没测）。
+    """
+    await _project_access(request, pid, "viewer")
+    from app import project_insights as insights
+
+    async with db_session() as s:
+        await _get_project_or_404(s, pid)
+    # 读库是同步 sqlite 只读连接，放到线程里跑，免得堵住事件循环。
+    # 用标准库的 asyncio.to_thread（而不是 anyio）：不额外依赖一个包，
+    # 而 anyio 虽然被 starlette 间接带进来，但"间接依赖"不该被当接口用。
+    import asyncio
+
+    return await asyncio.to_thread(insights.read_insights, pid)
 
 
 @router.get("/projects/{pid}/api-endpoints")

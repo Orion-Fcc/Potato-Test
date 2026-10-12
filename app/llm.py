@@ -67,10 +67,6 @@ PREMIUM_ROLES: tuple[str, ...] = (
     "agent",
 )
 
-# 一开开关就默认勾上的用途：都是"量小、质量关键"的那几个（每条用例零到一次，
-# 输入几 k）。judge 不在里面 —— 判定的初判刻意留给便宜模型，那正是两级判定的意义。
-PREMIUM_DEFAULT_ROLES: tuple[str, ...] = ("judge_escalate", "specgen", "narrative")
-
 # 设置页「建议把高端模型用在哪些环节」的候选清单（2026-10-12）。
 #
 # 取舍依据（与 ROLE_TOKEN_SHARE_ESTIMATE 一致）：agent 占全部 token 的约 94%，
@@ -870,7 +866,6 @@ from app.llm_chat import ChatResult, chat, chat_with_pool, empty_usage, extract_
 from app.llm_protocol import Capabilities, capabilities_for  # noqa: E402
 
 __all__ = [
-    "PREMIUM_DEFAULT_ROLES",
     "PREMIUM_ROLES",
     "SUGGESTED_PREMIUM_ROLES",
     "ROLES",

@@ -21,6 +21,36 @@ export const CASE_STATUS_LABELS: L = {
   blocked: { zh: "受阻", en: "Blocked" },
 };
 
+/** 失败归因（2026-10-10 用户反馈后补到界面上）。
+ *
+ *  ★ 为什么必须显示在报告里：`failed` 这一个状态混了两种完全相反的东西 ——
+ *  「被测系统真的有缺陷」和「agent 自己没做完」。用户实测反馈的原话是
+ *  「我不希望 agent 出现以下错误」：一条 P0 判 failed，看起来是产品缺陷，
+ *  实际是 agent 打开了弹窗、点了两次「新增规则」、**从未点「保存」**，
+ *  而且它的 final_answer 只是一行工具回显 `Clicked button "新增规则"`。
+ *
+ *  不把归因显示出来，用户拿到的每个红条都要点进去读一遍长文本才能判断
+ *  该不该提单 —— 而"该不该提单"正是这张报告存在的意义。
+ *  `fileable` 语义（见后端 failure_attrib.VERDICT_INFO）决定了措辞：
+ *  只有 system 才算产品缺陷。
+ */
+export const ATTRIBUTION_LABELS: L = {
+  system: { zh: "疑似系统缺陷", en: "Likely product defect" },
+  setup: { zh: "环境/前置未就绪", en: "Environment / setup" },
+  transient: { zh: "页面未就绪", en: "Page not ready" },
+  agent: { zh: "执行方问题（agent 没做完）", en: "Agent did not finish" },
+  unknown: { zh: "待人工确认", en: "Needs review" },
+};
+
+/** 归因是否值得作为缺陷提单 —— 与后端 `fileable` 保持一致（只有 system 为真）。 */
+export const ATTRIBUTION_IS_FILEABLE: Record<string, boolean> = {
+  system: true,
+  setup: false,
+  transient: false,
+  agent: false,
+  unknown: false,
+};
+
 /** P0-P3 are shown verbatim (they are the industry-standard shorthand), so the map
  *  exists mainly to give the bare "P0" a readable tooltip/label where one is wanted. */
 export const PRIORITY_LABELS: L = {

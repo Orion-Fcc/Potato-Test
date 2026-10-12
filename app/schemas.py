@@ -35,6 +35,14 @@ class AssistantIn(BaseModel):
     message: str = Field(min_length=1, max_length=4000)
     # prior turns: [{"role": "user"|"assistant", "content": str}]
     history: list[dict] = Field(default_factory=list)
+    # ★ 粘贴/拖入对话的文件（2026-10-12 用户要求「和其他 agent 一样有粘贴文件在对话框的能力」）。
+    #
+    # 每个元素是**已经解析好的文本**（前端先调 `/assistant/parse` 拿到），而不是原始字节：
+    #   * 解析放服务端（docx/pdf/xlsx 都需要 Python 库），但**不必把文件塞进这一路请求**——
+    #     100MB 的需规走 JSON base64 会让请求体膨胀三分之一，
+    #     而这一路是对话、不该被附件撑大；
+    #   * 文本进来后能被裁剪、能标出处，模型看到的和用户上传的是同一份东西。
+    attachments: list[dict] = Field(default_factory=list)
 
 
 class KnowledgeIn(BaseModel):

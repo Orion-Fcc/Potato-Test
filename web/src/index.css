@@ -295,8 +295,164 @@ button, a, input, textarea, [role="button"] {
 }
 
 /* ============================================================================
-   Tables
+   富文本排版（项目文档用，2026-10-12）
    ========================================================================= */
+
+/* 编辑器与只读渲染共用同一套排版。
+ *
+ * 为什么必须共用：AI 生成的内容落进编辑器，用户改完再保存 —— 如果"生成的"
+ * 和"编辑中的"长得不一样，用户会以为自己改坏了。同一份 CSS 就没有这个问题。
+ *
+ * 为什么不装 @tailwindcss/typography：那会多一个依赖，而这里只需要覆盖
+ * 用户能产出的那些标签（p/h2/h3/ul/ol/table/img/blockquote/span[style]）。
+ */
+.tp-prose {
+  font-size: 14px;
+  line-height: 1.75;
+  color: var(--ink-700);
+  word-break: break-word;
+}
+.tp-prose > * + * { margin-top: 0.6em; }
+.tp-prose h1 { font-size: 1.6em; font-weight: 700; margin-top: 1em; }
+.tp-prose h2 {
+  font-size: 1.28em;
+  font-weight: 650;
+  margin-top: 1.2em;
+  padding-bottom: 0.25em;
+  border-bottom: 1px solid var(--line);
+  color: var(--ink-900);
+}
+.tp-prose h3 { font-size: 1.1em; font-weight: 650; margin-top: 1em; color: var(--ink-900); }
+.tp-prose h4 { font-size: 1em; font-weight: 650; color: var(--ink-800); }
+.tp-prose ul { list-style: disc; padding-left: 1.5em; }
+.tp-prose ol { list-style: decimal; padding-left: 1.5em; }
+.tp-prose li { margin: 0.15em 0; }
+.tp-prose li > p { margin: 0; }
+.tp-prose a { color: var(--brand-700); text-decoration: underline; }
+.tp-prose strong { font-weight: 650; color: var(--ink-900); }
+.tp-prose em { font-style: italic; }
+.tp-prose code {
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 0.9em;
+  background: var(--panel2);
+  padding: 0.1em 0.35em;
+  border-radius: 4px;
+}
+.tp-prose blockquote {
+  border-left: 3px solid var(--line-strong);
+  padding-left: 0.85em;
+  color: var(--ink-500);
+  background: var(--panel2);
+  border-radius: 0 6px 6px 0;
+  padding-top: 0.35em;
+  padding-bottom: 0.35em;
+}
+.tp-prose hr { border: 0; border-top: 1px solid var(--line); margin: 1.2em 0; }
+.tp-prose img {
+  max-width: 100%;
+  height: auto;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+}
+/* 表格：需求文档里的字段表/权限矩阵全靠它，所以给足可读性 */
+.tp-prose table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 0.95em;
+  table-layout: auto;
+}
+.tp-prose th, .tp-prose td {
+  border: 1px solid var(--line);
+  padding: 0.35em 0.55em;
+  vertical-align: top;
+  text-align: left;
+}
+.tp-prose th { background: var(--panel2); font-weight: 600; color: var(--ink-700); }
+/* 选中一格时给个提示，否则用户不知道表格能不能编辑 */
+.tp-prose .selectedCell:after {
+  background: color-mix(in oklch, var(--brand-500) 18%, transparent);
+  content: "";
+  inset: 0;
+  pointer-events: none;
+  position: absolute;
+  z-index: 2;
+}
+.tp-prose td, .tp-prose th { position: relative; }
+
+/* 空编辑器的占位提示（TipTap 的 placeholder 扩展要额外装包，这里用纯 CSS） */
+.tp-prose p.is-editor-empty:first-child::before {
+  content: attr(data-placeholder);
+  color: var(--ink-400);
+  float: left;
+  height: 0;
+  pointer-events: none;
+}
+
+/* 流程图源码在编辑器里的显示（2026-10-12，用户反馈"流程图无法点开查看"）。
+ *
+ * 问题：流程图文档的正文就是一段 mermaid 源码。19 个节点渲染出来是
+ * 860x199 的一张小图，而**源码本身有 20 多行、占满整个编辑区** ——
+ * 用户点开「流程图」看到的是满屏 `U1["..."] -->|"..."| P1["..."]`，
+ * 真正的图被挤到页面最底部（实测在 2000px 处），所以他觉得"打不开"。
+ *
+ * 做法：把源码框限高并可滚动 —— 图是主体，源码是"要改的时候才看"的东西。
+ * 不隐藏它：那是文档正文，藏起来就没法编辑了。
+ */
+.tp-prose pre {
+  max-height: 13rem;
+  overflow: auto;
+  font-size: 0.72rem;
+  line-height: 1.45;
+  background: var(--panel2);
+  border-radius: 0.375rem;
+  padding: 0.5rem 0.65rem;
+}
+/* 提醒用户这段是图不是文本（它下面/上面会渲染出真正的图） */
+.tp-prose pre::before {
+  content: "图表源码（下面会渲染成图）";
+  display: block;
+  margin-bottom: 0.3rem;
+  font-size: 0.62rem;
+  letter-spacing: 0.02em;
+  color: var(--ink-400);
+  /* 不让这行提示被当成正文复制出去 */
+  user-select: none;
+}
+
+/* 多行截断（2026-10-10，用户反馈"看不到所有界面"）。
+ *
+ * 为什么不直接用 Tailwind 的 `line-clamp-4`：它要 `@tailwindcss/line-clamp`
+ * 插件（Tailwind 3.3 之前），而本项目的 `plugins: []` 是空的 ——
+ * 写了那个类名不会有任何效果，也不会有任何报错，只会静默失效。
+ * 手写这三行反而确定。
+ *
+ * 用途：运行报告里"判定理由"那一列。判定理由是全表最长的文本
+ * （实测有 200+ 字中文），原来被 truncate 到 160px 只能靠 hover 看，
+ * 而 tooltip 一移动鼠标就没了，长文本根本读不完。
+ */
+.tp-clamp-4 {
+  display: -webkit-box;
+  -webkit-line-clamp: 4;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* 运行报告的"操作"列固定在右侧（2026-10-10，用户两次反馈"看不到"）。
+ *
+ * 为什么需要它：无论怎么按断点收列，窗口不够宽时最右一列总会被推出视口 ——
+ * 而这一列是唯一能操作那条结果的地方（看用例/改判/回放）。把它钉住比省宽度重要。
+ *
+ * 背景必须不透明，否则横向滚动时下面的内容会透过来，看起来像渲染坏了。
+ * 用变量而不是固定色：行 hover 时要跟着变（`.tp-row:hover` 给这一格设了
+ * --tp-sticky-bg），否则鼠标划过时这一格颜色不动，视觉上像"卡住"的一块。
+ * 优先级也要够 —— 否则会被 `.tp-table td` 的规则盖掉。
+ */
+.tp-sticky-actions {
+  background: var(--tp-sticky-bg, var(--panel));
+}
+.tp-row:hover .tp-sticky-actions {
+  --tp-sticky-bg: color-mix(in oklch, var(--brand-50) 40%, var(--panel));
+}
 .tp-thead th {
   font-weight: 600;
   letter-spacing: 0.06em;
@@ -383,6 +539,21 @@ button, a, input, textarea, [role="button"] {
 .tp-alert-warn {
   background: var(--warn-bg);
   color: var(--warn-fg);
+  font-size: 0.75rem;
+  line-height: 1rem;
+}
+/* ★ 补上 info 这一档（2026-10-12）。
+ *
+ * 我先前在用例页、项目文档页写了 `tp-alert tp-alert-info`，但**这个类根本不存在** ——
+ * 于是一个没有背景、没有文字颜色的裸块：浅色主题下还勉强能看，
+ * 深色主题下就是"黑底黑字"，用户看到的是"字体没颜色"。
+ * `--info-bg` / `--info-fg` 两个变量一直在，只是没人用它。
+ *
+ * 这也说明按类名拼样式时容易漏：`.tp-alert-warn` 和 `.tp-alert-bad` 都在，
+ * 缺一个不会有任何报错，只会在深色主题下肉眼可见。 */
+.tp-alert-info {
+  background: var(--info-bg);
+  color: var(--info-fg);
   font-size: 0.75rem;
   line-height: 1rem;
 }

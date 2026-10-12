@@ -421,6 +421,17 @@ class Settings(BaseSettings):
     agent_use_judge: bool = False
     # 单次 LLM 调用的墙钟上限（秒）。browser-use 默认 None = 不限制，一次卡住的调用会
     # 一直占着用例预算；step_timeout 管的是"整步"，管不住单次调用内部的挂起。
+    #
+    # ★ 不变量：llm_timeout_s **必须小于** step_timeout_s。
+    # 否则一次慢调用会活过整步 —— 步在上限处被砍掉，而那次调用还在网关那头继续跑，
+    # 纯浪费，而且占着并发位（并发上限是 1，占住就是整条队列停住）。
+    #
+    # 2026-10-10 实测重定（真库 1227 个真实步）：
+    #   每步耗时 p50=15.2s p90=45.5s p99=98.7s max=121.2s
+    # 而当时 llm_timeout 是 35s —— **p90 以上全部被误杀**（实测 13 次
+    # "LLM call timed out after 35 seconds"，那些步总耗时 51~121s，
+    # 说明模型正在正常工作、只是慢）。砍掉它的代价是整步白费 + 重来一遍。
+    # 取 90s（覆盖到 p99），配 step_timeout_s=120 留 30s 给 DOM 采集与动作执行。
     llm_timeout_s: int = 90
     # ★ 传输层 LLM 重试次数（OpenAI SDK 的 max_retries）。
     #

@@ -129,3 +129,61 @@ def test_a_run_object_without_the_attribute_falls_back_to_global():
         pass
 
     assert effective_retries(_Legacy(), _Settings(case_retries=1)) == 1
+
+
+# ---------------------------------------------------------------------------
+# 回调分段计时（2026-10-10）
+# ---------------------------------------------------------------------------
+#
+# ## 为什么加这个
+#
+# 实测每步 17.8 秒，而**同样大小**的请求直测网关只要 4.8 秒
+# （12,719 prompt token + 253 输出，约 2,660 tok/s）。
+# 也就是每步约 13 秒花在模型调用之外 —— 但原有埋点里 `step_elapsed` 是
+# "两次回调之间的墙钟"，把模型、DOM、动作、页面就绪、截图全揉成一个数，
+# 分不出该往哪砍。这组测试守的是"这几项确实被分开记了、且没有重复计数"。
+
+
+def _stage_and_phase():
+    stage = {"browser_up": 3.0, "agent": 100.0, "close": 101.0, "video": 102.0}
+    phase = {"prune_ms": 800.0, "shot_ms": 4200.0, "cb_ms": 6000.0, "steps": 10}
+    return stage, phase
+
+
+def test_phase_breakdown_is_recorded():
+    """prune / shot / callback 三项都要落库，否则下次还是只能猜。"""
+    stage, phase = _stage_and_phase()
+    p = _timing_payload(stage, 0.0, 110.0, 10, phase)
+    assert p["prune_ms"] == 800
+    assert p["shot_ms"] == 4200
+    assert p["callback_ms"] == 6000
+    assert p["callback_per_step_ms"] == 600  # 6000ms / 10 步
+
+
+def test_phase_breakdown_does_not_double_count():
+    """★ 关键：分段是**拆分**不是**新增**。
+
+    回调耗时本来就含在 agent_ms 里，如果再把它加进 total_ms，
+    就会凭空多出一段并不存在的时间 —— 而"五段之和 == total"正是
+    判断"有没有哪段没测到"的依据，破了它就等于把这套埋点废掉。
+    """
+    stage, phase = _stage_and_phase()
+    p = _timing_payload(stage, 0.0, 110.0, 10, phase)
+    segs = p["browser_up_ms"] + p["agent_ms"] + p["wrap_up_ms"] + p["video_ms"] + p["judge_ms"]
+    assert segs == p["total_ms"], f"五段之和不等于 total：{segs} != {p['total_ms']}"
+
+
+def test_the_breakdown_is_optional():
+    """不带 phase 时必须照常工作 —— 老调用点（capture_session 等）不传这个参数。"""
+    stage, _ = _stage_and_phase()
+    p = _timing_payload(stage, 0.0, 110.0, 10)
+    assert p["total_ms"] == 110000
+    assert "prune_ms" not in p, "没传 phase 却出现了分段键"
+
+
+def test_a_zero_step_case_does_not_divide_by_zero():
+    """0 步的用例（启动就失败）也要能算出分解，不能 ZeroDivisionError。"""
+    p = _timing_payload({"browser_up": 1.0, "agent": 2.0}, 0.0, 3.0, 0, {"cb_ms": 0.0})
+    assert p["steps"] == 0
+    assert p["per_step_ms"] == 0
+    assert p["callback_per_step_ms"] == 0

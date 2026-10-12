@@ -12,6 +12,8 @@ import { Select } from "./ui";
 
 const SECTION_LABEL: Record<string, string> = {
   overview: "Overview",
+  docs: "Project Docs",
+  proposals: "AI Optimization",
   assistant: "Assistant",
   cases: "Test Cases",
   suites: "Suites",

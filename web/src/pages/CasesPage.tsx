@@ -1,7 +1,7 @@
 import { FlaskConical as FlaskConicalIcon, Wand2 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { api, relTime, type CasePriority, type CaseStatus, type CaseType, type TestCase } from "../lib/api";
 import { useAbortSignal, useDebounced } from "../lib/hooks";
 import { rateColor, rateTone } from "../lib/metrics";
@@ -62,6 +62,45 @@ export function CasesPage() {
   const [cases, setCases] = useState<TestCase[]>([]);
   const xlsxRef = useRef<HTMLInputElement>(null);
 
+  // ★ 深链筛选（2026-10-12）：`?keys=TC-001,TC-002` 只显示这几条。
+  //
+  // 为什么需要它：项目概况的「需求覆盖矩阵」和「业务规则清单」里，
+  // 每行都列着验证它的用例编号。没有深链时，用户看到 `TP-ACFG-016` 之后
+  // 只能自己去搜索框里敲一遍 —— 而核对的需求恰恰是"点一下就看到"。
+  // 用 URL 而不是组件状态：这样链接可以分享、可以收藏、刷新不丢。
+  const [params, setParams] = useSearchParams();
+  const onlyKeys = useMemo(
+    () =>
+      new Set(
+        (params.get("keys") ?? "")
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean),
+      ),
+    [params],
+  );
+  // ★ 另一个筛选维度：按**需求 ID** 筛（2026-10-12 实测后加的）。
+  //
+  // 为什么不能只靠 keys：实测点需求矩阵里那个"357"，生成的 URL 有 **6000 字符**
+  // —— 把 357 个编号全塞进查询串。那种链接没法分享、有的浏览器还会截断，
+  // 而且用户根本看不出它筛了什么。
+  // 按需求 ID 筛则是"`?refs=DES-TRAINRES-001`"，短、可读、可分享：
+  // 它表达的正是用户想看的那个意思 ——"测这条需求的用例"。
+  const onlyRefs = useMemo(
+    () =>
+      (params.get("refs") ?? "")
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean),
+    [params],
+  );
+  const clearDeepLink = () => {
+    const next = new URLSearchParams(params);
+    next.delete("keys");
+    next.delete("refs");
+    setParams(next, { replace: true });
+  };
+
   // filters + selection + drawer
   const [q, setQ] = useState("");
   const [tag, setTag] = useState("");
@@ -105,6 +144,13 @@ export function CasesPage() {
   const filtered = useMemo(
     () =>
       cases.filter((c) => {
+        // 深链筛选最先判：它表达的是"我只要看这几条"，
+        // 而此时其它下拉框的默认值不该把它顶掉。
+        if (onlyKeys.size > 0 && !onlyKeys.has(c.case_key ?? "")) return false;
+        if (onlyRefs.length > 0) {
+          const refs = c.references ?? "";
+          if (!onlyRefs.some((r) => refs.includes(r))) return false;
+        }
         if (dq && !`${c.case_key ?? ""} ${c.name} ${c.prompt}`.toLowerCase().includes(dq.toLowerCase()))
           return false;
         if (tag && !(c.tags ?? []).includes(tag)) return false;
@@ -118,7 +164,7 @@ export function CasesPage() {
         if (resultFilter === "never" && c.last_status) return false;
         return true;
       }),
-    [cases, dq, tag, priorityFilter, typeFilter, statusFilter, enabledFilter, resultFilter],
+    [cases, dq, tag, priorityFilter, typeFilter, statusFilter, enabledFilter, resultFilter, onlyKeys, onlyRefs],
   );
   // 生成后还没人审的草稿数。用 enabled+status 两个字段一起判：
   // 草稿即使被手动打开 enabled 也不会被 "run all" 选中（run-all 只收 active），
@@ -153,7 +199,19 @@ export function CasesPage() {
   /** Rows rendered per group before a "show more" row takes over. */
   const ROW_PAGE = 50;
   const [shownRows, setShownRows] = useState<Record<string, number>>({});
+  // ★ 深链筛选生效时，**关掉这两个"性能优化"**（2026-10-12 实测发现）。
+  //
+  // 两个优化本来都是对的（一个 370 条的表格全量挂载很重），但它们都会**静默藏掉**
+  // 深链要找的那条用例：
+  //   * 大组默认折叠（>40 条）→ 目标用例根本不在 DOM 里；
+  //   * 每组只渲染前 50 行 → 深链指向第 200 条时看不到。
+  // 实测症状：需求矩阵写"357 条"，点进去只看到 315 行，而用户完全不知道为什么。
+  //
+  // 深链场景下这两个优化本来也不需要：用户已经明确说"我只看这几条"，
+  // 渲染量小（实测 RULE-TRAINRES-116 → 2 行，DES-TRAINRES-001 → 357 行，可接受）。
+  const deepLinked = onlyKeys.size > 0 || onlyRefs.length > 0;
   const isOpen = (m: string, size: number) => {
+    if (deepLinked) return true;
     if (forcedOpen.has(m)) return true;
     if (collapsed.has(m)) return false;
     if (touched.has(m)) return true;
@@ -298,6 +356,27 @@ export function CasesPage() {
 
   return (
     <div className="space-y-6">
+      {/* 深链筛选要显式说明"你现在只看到一部分" ——
+          否则用户会以为用例库就剩这几条，而这是个很吓人的结论。
+          ★ 这里报的是**实际筛出来的条数**（filtered.length），不是链接里声称的条数：
+          两者不一致时以前者为准，否则界面会自相矛盾（实测：矩阵写 357，
+          列表只渲染 315 —— 用户完全不知道为什么对不上）。 */}
+      {(onlyKeys.size > 0 || onlyRefs.length > 0) && (
+        <div className="tp-alert tp-alert-info flex flex-wrap items-center gap-2 px-3 py-2 text-[12px]">
+          <span>
+            {onlyRefs.length > 0
+              ? t("只显示「{{refs}}」相关的 {{n}} 条用例（共 {{total}} 条）。", {
+                  refs: onlyRefs.join("、"),
+                  n: filtered.length,
+                  total: cases.length,
+                })
+              : t("只显示指定的 {{n}} 条用例（来自链接）。", { n: filtered.length })}
+          </span>
+          <Button size="sm" variant="outline" onClick={clearDeepLink}>
+            {t("显示全部用例")}
+          </Button>
+        </div>
+      )}
       <PageHeader
         eyebrow={t("Project")}
         title={t("Test Cases")}
@@ -518,7 +597,10 @@ export function CasesPage() {
             // Render a window of rows per group instead of the whole module: a
             // 400-case module is ~400 <tr> with a checkbox, badges and buttons
             // each, which is what made scrolling this page feel heavy.
-            const shown = shownRows[module] ?? ROW_PAGE;
+            //
+            // 但深链筛选时不设窗口（见 deepLinked 的注释）：那时"少渲染"的代价是
+            // 用户要看的用例根本不在页面上，而这是他要找的东西。
+            const shown = deepLinked ? list.length : (shownRows[module] ?? ROW_PAGE);
             const visible = list.slice(0, shown);
             const hidden = list.length - visible.length;
             return (

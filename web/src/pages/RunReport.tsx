@@ -17,6 +17,7 @@ import "@vidstack/react/player/styles/default/layouts/video.css";
 import { api, type Run, type RunResult, type TestCase } from "../lib/api";
 import { usePolling, useShowThoughts } from "../lib/hooks";
 import { fmtSpan, fmtTokens } from "../lib/metrics";
+import { ATTRIBUTION_IS_FILEABLE, ATTRIBUTION_LABELS, label } from "../lib/labels";
 import { Badge, Button, Card, Input, LiveDot } from "../components/ui";
 import { Modal } from "../components/Modal";
 import { chartTooltip } from "../components/table";
@@ -54,7 +55,9 @@ export function RunReport() {
   const navigate = useNavigate();
   const toast = useToast();
   const fail = useErrorToast();
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
+  // 归因徽标要走 labels 的 {zh,en} 映射（它们不是 i18n key —— 见 labels.ts 顶部说明）。
+  const lang = i18n.resolvedLanguage ?? "en";
   const [run, setRun] = useState<Run | null>(null);
   const [results, setResults] = useState<RunResult[]>([]);
   const [cases, setCases] = useState<TestCase[]>([]);
@@ -516,20 +519,37 @@ export function RunReport() {
               </div>
             </div>
           </div>
-          <table className="w-full text-sm tp-table">
+          {/* min-w 是**故意**的（2026-10-10 用户第二次反馈"依旧看不到"）：
+              没有它时表格会一直压缩列宽，压到最后就靠"内容换行"消化 ——
+              判定列被拉得很高，而最右边的「用例/改判/回放」按钮被推出视口，
+              用户根本点不到。给一个下限 + 外层 overflow-x-auto，
+              横向滚动才真正生效；同时操作列做成 sticky，滚动时也一直可见。 */}
+          <table className="w-full min-w-[1080px] text-sm tp-table">
             <thead className="border-y border-[var(--line)] text-left text-xs text-ink-500">
               <tr>
                 <th>{t("Case")}</th>
-                <th>{t("Module")}</th>
-                <th>{t("Priority")}</th>
+                {/* ★ 表头与表体的响应式断点必须**逐列对齐**，否则窄屏上表头和数据错位
+                    （表头显示"优先级"而那一列的数据是"状态"），比看不到更糟。
+                    这里按重要性递减：窄屏保 Case + Status + Judge（这三列是读报告的最小集），
+                    其余按断点逐步放出。 */}
+                <th className="hidden md:table-cell">{t("Module")}</th>
+                <th className="hidden lg:table-cell">{t("Priority")}</th>
                 <th>{t("Status")}</th>
-                <th>{t("Attempts")}</th>
-                <th>{t("Latency")}</th>
-                <th title={t("LLM tokens consumed by this case (agent + judge). Hover for the cache-hit share — cached input is billed far cheaper.")}>
+                <th className="hidden lg:table-cell">{t("Attempts")}</th>
+                <th className="hidden sm:table-cell">{t("Latency")}</th>
+                <th
+                  className="hidden xl:table-cell"
+                  title={t("LLM tokens consumed by this case (agent + judge). Hover for the cache-hit share — cached input is billed far cheaper.")}
+                >
                   {t("Tokens")}
                 </th>
                 <th>{t("Judge")}</th>
-                <th />
+                {/* ★ 操作列固定在右侧（sticky right-0）。
+                    用户两次反馈"看不到"：第一次是列太多被推出屏幕，第二次是我按断点
+                    放开了列之后仍然点不到最右边的按钮 —— 因为无论怎么排，最右一列
+                    在窗口不够宽时都会滑出视口。而这一列是**唯一能操作这条结果的地方**
+                    （看用例/改判/回放），把它钉住比省一点宽度重要得多。 */}
+                <th className="tp-sticky-actions sticky right-0 z-20" />
               </tr>
             </thead>
             <tbody>
@@ -548,10 +568,10 @@ export function RunReport() {
                         <div className="mt-0.5 text-[11px] text-brand-700">👤 {r.account_label}</div>
                       )}
                     </td>
-                    <td className="max-w-[110px] truncate text-ink-500" title={c?.module ?? ""}>
+                    <td className="hidden max-w-[110px] truncate text-ink-500 md:table-cell" title={c?.module ?? ""}>
                       {c?.module ?? "—"}
                     </td>
-                    <td>
+                    <td className="hidden lg:table-cell">
                       {c ? (
                         <span
                           className={"inline-flex rounded px-1.5 py-0.5 text-[11px] font-semibold " + (PRIORITY_STYLE[c.priority] ?? "")}
@@ -615,13 +635,13 @@ export function RunReport() {
                         </span>
                       )}
                     </td>
-                    <td className="text-ink-700">{done ? (r!.flaky ? `×${r!.attempts}` : r!.attempts) : "—"}</td>
-                    <td className="text-ink-700">{done ? `${(r!.latency_ms / 1000).toFixed(1)}s` : "—"}</td>
+                    <td className="hidden text-ink-700 lg:table-cell">{done ? (r!.flaky ? `×${r!.attempts}` : r!.attempts) : "—"}</td>
+                    <td className="hidden text-ink-700 sm:table-cell">{done ? `${(r!.latency_ms / 1000).toFixed(1)}s` : "—"}</td>
                     {/* token 消耗（2026-10-09）。显示"—"而不是 0：把"没测到"画成"零消耗"
                         会让人低估真实成本，也会让"这条便宜"和"这条没测"混为一谈。
                         title 里给缓存命中率 —— 它是唯一能解释"为什么这条贵"的可操作数字。 */}
                     <td
-                      className="whitespace-nowrap tabular-nums text-ink-700"
+                      className="hidden whitespace-nowrap tabular-nums text-ink-700 xl:table-cell"
                       title={
                         r?.usage
                           ? t("{{total}} tokens in {{calls}} LLM calls · {{pct}}% of input served from cache", {
@@ -636,10 +656,49 @@ export function RunReport() {
                     >
                       {r?.usage ? fmtTokens(r.usage.total) : "—"}
                     </td>
-                    <td className="max-w-[160px] truncate text-ink-700" title={r?.judge_reason ?? r?.error ?? ""}>
-                      {done ? (r!.judge_reason ?? r!.error ?? "—") : x.status === "running" ? t("executing…") : "—"}
+                    {/* ★ 判定理由要能读全（2026-10-10 用户反馈"看不到所有界面"）。
+                        原来这一列被 truncate 到 160px，而判定理由是整张表里**最长的文本**
+                        （实测有 200+ 字的中文说明），于是只能靠 hover 的 title 看 ——
+                        而 tooltip 一移动鼠标就消失，长文本根本读不完。
+                        改成：允许换行到最多 4 行，并在 hover 时给出完整文本。
+                        行数上限是刻意的 —— 不设的话一条长理由能把整行撑到十几行，
+                        一屏就只能看两三条结果。 */}
+                    <td className="w-[300px] max-w-[300px] text-ink-700">
+                      {/* ★ 归因徽标（2026-10-10 用户反馈后加）。
+                          用户发来的截图里，P0 判 failed 看起来像产品缺陷，
+                          实际是 agent 没点「保存」、final_answer 只是一行工具回显。
+                          不把这个区分显出来，每个红条都要点进去读一遍才知道该不该提单 ——
+                          而"该不该提单"正是这张报告存在的意义。 */}
+                      {done && r?.attribution && (
+                        <span
+                          className={
+                            "mr-1 inline-flex shrink-0 items-center rounded border px-1 py-[1px] text-[10px] font-medium align-middle " +
+                            (ATTRIBUTION_IS_FILEABLE[r.attribution]
+                              ? "border-[var(--bad-fg)] text-[var(--bad-fg)]"
+                              : "border-[var(--line)] text-ink-500")
+                          }
+                          title={t("Who this failure belongs to: {{what}}", {
+                            what: label(ATTRIBUTION_LABELS, r.attribution, lang),
+                          })}
+                        >
+                          {label(ATTRIBUTION_LABELS, r.attribution, lang)}
+                        </span>
+                      )}
+                      {/* 理由正文：最多 4 行，超出用省略号；完整文本在 title 里。
+                          `whitespace-pre-wrap` 保留判定器自己写的换行 ——
+                          它有时用换行分点说明，压成一行会很难读。 */}
+                      <div
+                        className="tp-clamp-4 whitespace-pre-wrap break-words text-[12px]"
+                        title={r?.judge_reason ?? r?.error ?? ""}
+                      >
+                        {done
+                          ? (r!.judge_reason ?? r!.error ?? "—")
+                          : x.status === "running"
+                            ? t("executing…")
+                            : "—"}
+                      </div>
                     </td>
-                    <td className="text-right">
+                    <td className="tp-sticky-actions sticky right-0 z-10 text-right">
                       <div className="flex justify-end gap-1">
                         {/* 查看/编辑用例本身。刻意放在 done 判断**之外**：
                             用例写错了跟它跑没跑完无关，未跑的用例同样需要能改。 */}

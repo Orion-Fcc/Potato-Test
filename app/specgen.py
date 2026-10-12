@@ -401,7 +401,25 @@ async def _call_json(system: str, user: str, max_tokens: int = 8000) -> tuple[di
     )
     data = res.json(default=None)
     if not isinstance(data, dict):
-        raise ValueError(f"specgen: 模型未返回 JSON 对象（前 120 字：{(res.text or '')[:120]}）")
+        # ★ 报错要能区分两种完全不同的病（2026-10-12）：
+        #   * 输出被 max_tokens **截断** → 末尾没有收尾的 `}`，
+        #     处置是"让模型少写点 / 调大上限"；
+        #   * 模型压根没按 JSON 回 → 处置是改提示词。
+        # 原来只贴前 120 字，而截断的证据在**末尾**，于是这两种病看起来一模一样 ——
+        # 实测就是这样卡住的：JSON 看着完全正常，却报"未返回 JSON 对象"。
+        text = res.text or ""
+        truncated = bool(text) and not text.rstrip().endswith("}")
+        hint = "（输出被截断了：末尾没有收尾的 }）" if truncated else ""
+        head = text[:120].replace("\n", " ")
+        tail = text[-160:].replace("\n", " ")
+        # ★ 把原始输出挂在异常上（2026-10-12 加）。调用方有时能从这段**残缺的**文本里
+        # 抢救出有用的东西 —— 实测流程图就是这样：图画好了，只是 JSON 收尾没写完，
+        # 而"丢掉重试"要多花一次调用、还未必成功。异常只带摘要不够，得带上全文。
+        err = ValueError(
+            f"specgen: 模型未返回 JSON 对象{hint}（共 {len(text)} 字符；头：{head} … 尾：{tail}）"
+        )
+        err.raw_text = text  # type: ignore[attr-defined]
+        raise err
     return data, dict(res.usage or _llm.empty_usage())
 
 

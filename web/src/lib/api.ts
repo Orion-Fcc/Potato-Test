@@ -111,6 +111,17 @@ export interface AssistantTurn {
   content: string;
 }
 
+/** 粘进对话的一个文件（已由后端解析成文本）。 */
+export interface AssistantAttachment {
+  filename: string;
+  /** 解析出的字符数（可能小于原文字符数，见 truncated）。 */
+  chars: number;
+  text: string;
+  /** true = 内容太长，只带了开头部分（后端已注明）。 */
+  truncated?: boolean;
+  warnings?: string[];
+}
+
 export interface AssistantReply {
   reply: string;
   actions: { tool: string; args: Record<string, unknown>; ok: boolean }[];
@@ -702,13 +713,23 @@ async function req<T>(path: string, init?: ReqInit): Promise<T> {
   const timer = setTimeout(() => ctrl.abort(new DOMException("timeout", "TimeoutError")), timeoutMs);
 
   try {
+    // ★ FormData 不能带 content-type（2026-10-12 修）。
+    //
+    // 这里原来无条件设 `content-type: application/json`，于是任何走 FormData 的
+    // 上传都会变成"body 是 multipart、头却说是 JSON" —— 后端按 JSON 解析、
+    // 找不到字段，报一个和真实原因毫无关系的 422（实测症状：
+    // 附件 chip 上显示 `xx.md: Field required`）。
+    //
+    // 必须**完全不设**这个头，让浏览器自己带上 multipart 的 boundary ——
+    // 手写 `multipart/form-data` 会漏掉 boundary，同样解析不了。
+    const isForm = typeof FormData !== "undefined" && rest.body instanceof FormData;
     const res = await fetch(`/api${path}`, {
       // same-origin cookies are how the session is carried; without this an
       // authenticated deployment silently degrades to anonymous.
       credentials: "same-origin",
       ...rest,
       signal: ctrl.signal,
-      headers: { "content-type": "application/json", ...headers },
+      headers: isForm ? { ...headers } : { "content-type": "application/json", ...headers },
     });
     if (!res.ok) {
       throw new ApiError(res.status, safeMessage(res.status, await res.text()));
@@ -821,6 +842,233 @@ export interface SpecDraftResult {
   error?: string | null;
 }
 
+// ---- 项目文档（2026-10-12）------------------------------------------------
+/** 一份项目文档。`html` 是富文本，后端存前已净化。 */
+export interface ProjectDoc {
+  /** 0 = 还没保存过的内置占位（界面据此显示"AI 生成"按钮而不是"删除"）。 */
+  id: number;
+  /** overview（项目总览）/ analysis（需求分析）/ flow（流程图）/ custom */
+  kind: string;
+  title: string;
+  html: string;
+  /** AI 生成时依据的章节标题 —— 用户据此核对，而不是把 AI 的话当结论。 */
+  sources: string[];
+  /** "ai" = 生成后未改；"human" = 人改过；"" = 空 */
+  origin: string;
+  /** ★ 「只有我能改」（2026-10-12）。
+   *  false 时助手**不能写**这份文档（读不受影响 —— 它永远能读全部）。
+   *  服务端强制，界面上的开关只是提示。 */
+  ai_editable: boolean;
+  updated_at: string | null;
+}
+
+/** AI 生成的一节。 */
+export interface AnalyzeSection {
+  key: string;
+  title: string;
+  html: string;
+  sources: string[];
+}
+
+export interface AnalyzeDocsResult {
+  ok: boolean;
+  /** ok=false 时的原因（网关挂了、文档为空…）。必须显示给用户。 */
+  error?: string;
+  doc?: ProjectDoc;
+  sections?: AnalyzeSection[];
+  usage?: TokenUsage | null;
+  /** AI 实际看了多少个章节标题、多少字符的正文 —— 让用户知道"它看了多少"。 */
+  headings_used?: number;
+  doc_chars?: number;
+  /** true = 追加在原有内容后面（没覆盖用户改过的部分）。 */
+  appended?: boolean;
+}
+
+// ---- 项目概况面板（2026-10-12）--------------------------------------------
+/** 一条需求的覆盖情况。`uncovered=true`（没有任何用例引用）是最该被看见的一格。 */
+export interface RequirementCoverage {
+  req_id: string;
+  /** 需求原文（从知识库里摘出来的定义行）。空串 = 需规里找不到，本身是信息。 */
+  excerpt: string;
+  case_count: number;
+  cases: string[];
+  verified_total: number;
+  verified_pass: number;
+  verified_fail: number;
+  verified_rate: number | null;
+  auto_total: number;
+  auto_pass: number;
+  auto_fail: number;
+  auto_rate: number | null;
+  uncovered: boolean;
+}
+
+export interface ModuleCoverageRow {
+  module: string;
+  case_total: number;
+  /** 没有填需求 ID 的用例数 —— 追溯粒度粗不粗看这个。 */
+  no_refs: number;
+  with_refs: number;
+  verified_total: number;
+  verified_pass: number;
+  verified_fail: number;
+  verified_rate: number | null;
+  awaiting_review: number;
+  auto_pass: number;
+  auto_fail: number;
+}
+
+export interface ProjectInsights {
+  requirements: RequirementCoverage[];
+  requirement_summary: {
+    total: number;
+    covered: number;
+    uncovered: number;
+    cases_with_refs: number;
+    cases_total: number;
+    top_req: string;
+    top_req_cases: number;
+  };
+  modules: ModuleCoverageRow[];
+  rules: Array<{
+    req_id: string;
+    kind: string;
+    text: string;
+    heading: string;
+    cases: string[];
+    case_count: number;
+  }>;
+  apis: Array<{
+    method: string;
+    path: string;
+    hits: number;
+    writable: boolean;
+    origin: string;
+    last_seen: string;
+  }>;
+  credentials: Array<{
+    id: number;
+    role: string;
+    label: string;
+    is_active: boolean;
+    healthy: boolean;
+    last_error: string;
+    last_checked_at: string;
+    expires_at: string;
+  }>;
+  changes: Array<{
+    id: number;
+    case_key: string;
+    case_name: string;
+    field: string;
+    before: string;
+    after: string;
+    source: string;
+    created_at: string;
+  }>;
+  failures: {
+    by_attribution: Array<{ attribution: string; count: number }>;
+    suspects: Array<{
+      result_id: number;
+      case_key: string;
+      case_name: string;
+      attribution: string;
+      overridden_to: string;
+      reason: string;
+    }>;
+    suspect_total: number;
+  };
+}
+
+// ---- 用例优化提案（2026-10-12）--------------------------------------------
+/** 一条 AI 提案。`status` 为 pending 时才可采纳/驳回。 */
+export interface CaseProposal {
+  id: number;
+  /** add（补用例）/ update（改用例）/ remove（删用例） */
+  action: string;
+  /** 受影响的用例编号（add 时为 null） */
+  case_key: string | null;
+  case_id: number | null;
+  summary: string;
+  reason: string;
+  /** 依据：需规片段 / 与哪几条用例重复。**用户核对 AI 的唯一手段。** */
+  evidence: string[];
+  /** add 时是完整草稿；update 时只含要改的字段 */
+  payload: Record<string, unknown>;
+  /** 这条提案涉及的业务流程图（Mermaid 源码）。同模块的提案共享同一张。 */
+  mermaid: string;
+  /** 这条用例该用哪个账号跑（项目里真实存在的 credential.role；空=默认账号）。 */
+  role: string;
+  status: string;
+  applied_case_id: number | null;
+  created_at: string | null;
+  decided_at: string | null;
+}
+
+export interface CaseProposalList {
+  proposals: CaseProposal[];
+  counts: { pending: number; accepted: number; rejected: number };
+  pending_by_action: Record<string, number>;
+}
+
+export interface GenerateProposalsResult {
+  ok: boolean;
+  error?: string;
+  created: number;
+  modules_scanned?: number;
+  modules_failed?: number;
+  /** 点名失败的模块 —— 只说数量用户无法判断要不要补。 */
+  failed_modules?: string[];
+  usage?: TokenUsage | null;
+}
+
+export interface DecideProposalsResult {
+  ok: boolean;
+  applied: Array<Record<string, unknown>>;
+  /** 没落地的条目及原因 —— 必须显示，否则用户以为全成功了。 */
+  skipped: Array<{ id: number; why: string }>;
+}
+
+/** 一个模块的覆盖率。`verified_*` 只统计人工确认过的结果。 */
+export interface ModuleCoverage {
+  module: string;
+  verified_pass: number;
+  verified_fail: number;
+  verified_total: number;
+  verified_rate: number | null;
+  auto_pass: number;
+  auto_fail: number;
+  auto_total: number;
+  auto_rate: number | null;
+  awaiting_review: number;
+  product_defects: number;
+}
+
+export interface VerifiedCoverage {
+  modules: ModuleCoverage[];
+  summary: {
+    verified_total: number;
+    verified_pass: number;
+    verified_rate: number | null;
+    awaiting_review: number;
+    product_defects: number;
+  };
+}
+
+// ---- 需规文件格式（2026-10-12）--------------------------------------------
+/** 由后端按 `docparse` 的真实支持集合给出 —— 前端不写死，避免两边漂移。 */
+export interface KnowledgeFormats {
+  /** 纯文本类扩展名，如 `.md`、`.csv` */
+  text: string[];
+  /** 需要解析的 Office/PDF/HTML/RTF 扩展名 */
+  office: string[];
+  /** **读不了**的老二进制格式（.doc/.xls/.ppt）。明确列出来，用户才知道为什么失败。 */
+  legacy_unsupported: string[];
+  /** 直接喂给 `<input accept>` 的字符串 */
+  accept: string;
+  label: string;
+}
+
 // ---- 后端接口探索（2026-10-09）--------------------------------------------
 /** 从**页面实际流量**里学到的后端接口。写接口只能看，不能被用例调用。 */
 export interface ApiEndpoint {
@@ -863,6 +1111,87 @@ export const api = {
   listProjects: (o?: Opts) => req<Project[]>("/projects", o),
   /** 单个项目详情。形状与 listProjects 的每一项逐字段一致（后端共用同一个 helper）。 */
   getProject: (pid: number, o?: Opts) => req<Project>(`/projects/${pid}`, o),
+
+  /** 项目概况面板：需求覆盖矩阵 / 规则 / 接口 / 账号 / 变更 / 失败台账。
+   *  纯读库计算，不发 LLM 调用。 */
+  projectInsights: (pid: number, o?: Opts) => req<ProjectInsights>(`/projects/${pid}/insights`, o),
+
+  // ---- 用例优化提案（2026-10-12）----------------------------------------
+  /** 提案清单 + 统计。 */
+  listCaseProposals: (pid: number, status?: string, o?: Opts) =>
+    req<CaseProposalList>(
+      `/projects/${pid}/case-proposals${status ? `?status=${status}` : ""}`,
+      o,
+    ),
+  /** 让 AI 按项目文档审一遍用例库，产出提案（要跑模型，比较慢）。 */
+  generateCaseProposals: (pid: number, b: { replace_pending?: boolean } = {}) =>
+    req<GenerateProposalsResult>(`/projects/${pid}/case-proposals/generate`, {
+      method: "POST",
+      body: JSON.stringify(b),
+      timeoutMs: 600_000,
+    }),
+  /** 采纳/驳回若干条提案。**只有这个动作会改用例库。** */
+  decideCaseProposals: (pid: number, ids: number[], decision: "accept" | "reject") =>
+    req<DecideProposalsResult>(`/projects/${pid}/case-proposals/decide`, {
+      method: "POST",
+      body: JSON.stringify({ ids, decision }),
+      timeoutMs: 120_000,
+    }),
+  /** 人工确认过的通过率（按模块）。 */
+  verifiedCoverage: (pid: number, o?: Opts) =>
+    req<VerifiedCoverage>(`/projects/${pid}/verified-coverage`, o),
+
+  // ---- 项目文档：需求分析 / 总览 / 流程图（2026-10-12）------------------
+  /** 项目文档列表（含内置三种的占位）。 */
+  listDocs: (pid: number, o?: Opts) => req<{ docs: ProjectDoc[] }>(`/projects/${pid}/docs`, o),
+  /** 新建或更新一份文档。正文会被后端净化（去掉脚本等）。 */
+  saveDoc: (pid: number, b: { id?: number; kind: string; title: string; html: string; ai_editable?: boolean }) =>
+    req<ProjectDoc & { dropped_content: boolean }>(`/projects/${pid}/docs`, {
+      method: "PUT",
+      body: JSON.stringify(b),
+    }),
+  /** 让 AI 把整份需规读成项目概况并存成可编辑文档（要跑模型，比较慢）。 */
+  analyzeDocs: (pid: number, b: { kind?: string; replace?: boolean } = {}) =>
+    req<AnalyzeDocsResult>(`/projects/${pid}/docs/analyze`, {
+      method: "POST",
+      body: JSON.stringify(b),
+      timeoutMs: 300_000,
+    }),
+  deleteDoc: (pid: number, id: number) =>
+    req<{ deleted: number }>(`/projects/${pid}/docs/${id}`, { method: "DELETE" }),
+  /** 切换「只有我能改」（AI 不可写）。读不受影响 —— 助手永远能读全部。 */
+  setDocPermission: (pid: number, id: number, aiEditable: boolean) =>
+    req<ProjectDoc>(`/projects/${pid}/docs/${id}/permission`, {
+      method: "PATCH",
+      body: JSON.stringify({ ai_editable: aiEditable }),
+    }),
+  /** 把一个文件解析成**可查看可编辑的文档**（也同时可再入知识库）。
+   *
+   *  为什么要有它：上传原来只进知识库（AI 检索用的分块），
+   *  文档页里看不到 —— 用户反馈「上传的需归文档无法查看修改」就是这个。
+   */
+  docFromFile: async (
+    pid: number,
+    file: File,
+  ): Promise<{ ok: boolean; created: boolean; doc: ProjectDoc; chars: number; truncated: boolean; warnings: string[] }> => {
+    const fd = new FormData();
+    fd.append("file", file);
+    return req(`/projects/${pid}/docs/from-file`, {
+      method: "POST",
+      body: fd,
+      timeoutMs: 180_000,
+    });
+  },
+  /** 上传一张图片，返回可直接放进正文的 URL。 */
+  uploadDocImage: async (pid: number, file: File): Promise<{ url: string; bytes: number }> => {
+    const fd = new FormData();
+    fd.append("file", file);
+    return req<{ url: string; bytes: number }>(`/projects/${pid}/docs/image`, {
+      method: "POST",
+      body: fd,
+      timeoutMs: 120_000,
+    });
+  },
 
   // ---- 后端接口探索（2026-10-09）---------------------------------------
   /** 从页面流量里学到的后端接口。写接口会被标记 —— 它们只能看，不能被调用。 */
@@ -1038,14 +1367,29 @@ export const api = {
   getStats: (pid: number, o?: Opts) => req<ProjectStats>(`/projects/${pid}/stats`, o),
   getCaseResults: (cid: number, o?: Opts) => req<CaseResult[]>(`/testcases/${cid}/results`, o),
 
-  assistant: (pid: number, b: { message: string; history: AssistantTurn[] }, o?: Opts) =>
+  assistant: (pid: number, b: { message: string; history: AssistantTurn[]; attachments?: AssistantAttachment[] }, o?: Opts) =>
     req<AssistantReply>(`/projects/${pid}/assistant`, {
       method: "POST",
       body: JSON.stringify(b),
+      // 附件可能很长（一份需规几万字），对话这一路要给足时间
+      timeoutMs: 300_000,
       ...o,
     }),
+  /** 解析一个要粘进对话的文件 → 文本。对话那一路只传文本，不传文件字节。 */
+  parseAssistantAttachment: async (pid: number, file: File): Promise<AssistantAttachment> => {
+    const fd = new FormData();
+    fd.append("file", file);
+    return req<AssistantAttachment>(`/projects/${pid}/assistant/parse`, {
+      method: "POST",
+      body: fd,
+      timeoutMs: 180_000,
+    });
+  },
   getKnowledge: (pid: number, o?: Opts) =>
     req<{ text: string; chars: number; chunks: number }>(`/projects/${pid}/knowledge`, o),
+  /** 后端**实际支持**的需规文件格式。前端不写死这份清单 —— 会漂移。 */
+  knowledgeFormats: (pid: number, o?: Opts) =>
+    req<KnowledgeFormats>(`/projects/${pid}/knowledge/formats`, o),
   setKnowledge: (pid: number, text: string) =>
     req<{ chars: number; chunks: number }>(`/projects/${pid}/knowledge`, {
       method: "PUT",
@@ -1271,3 +1615,4 @@ export interface Member {
   name: string | null;
   role: "owner" | "editor" | "viewer";
 }
+

@@ -336,3 +336,63 @@ def test_empty_inputs_do_not_crash():
     """空输入不能让闸门崩 —— 崩了就等于所有用例判失败。"""
     g = check_gates("", [], [])
     assert not g.blocked
+
+
+# ---------------------------------------------------------------------------
+# 闸门必须能容忍"不是字符串"的 evidence（2026-10-12）
+# ---------------------------------------------------------------------------
+#
+# 真实形状：`steps` 是**用例 id 列表**（`[1, 2, 3]`），而 `verdict_evidence` 才是
+# 步骤叙述（`["第1步: 【click】..."]`）。两者很容易被混着传。
+# 原来的写法是 `if e`，所以传进来一个 int 就会在 `re.search` / `"\n".join` 里抛
+# `TypeError: expected string or bytes-like object, got 'int'`。
+#
+# 为什么这比"少拦一条"严重：这些是**判定闸门**，外层把异常收成 judge_error，
+# 于是整条用例没有结论 —— 一次类型错误能让一整轮判定全部失效。
+
+
+@pytest.mark.parametrize(
+    "bad_evidence",
+    [
+        [1, 2, 3],                      # steps 的 id 列表被误当 evidence
+        [None, "", "  "],               # 空值混入
+        [{"i": 1, "action": "done"}],   # 字典（JSON 形态的中间产物）
+        [12345],
+        ["正常叙述", 42, None],          # 混合：正常的那条还要能用
+    ],
+)
+def test_gates_tolerate_non_string_evidence(bad_evidence):
+    """★ 非字符串条目必须被丢弃，而不是抛异常。"""
+    from app.judge_claims import (
+        find_premature_done,
+        find_unverified_claims,
+        looks_like_echo_only,
+        override_gate,
+    )
+
+    # 都不该抛
+    find_premature_done(bad_evidence)
+    find_unverified_claims("结论里说共 3 条", bad_evidence)
+    looks_like_echo_only("")
+    override_gate("", bad_evidence, "passed", "理由")
+    check_gates("", bad_evidence, [])
+
+
+def test_a_mixed_list_keeps_the_usable_entries():
+    """混合列表里正常的那条不能被一起丢掉。
+
+    全丢和全崩都不对 —— 一个是静默失效，一个是炸掉整轮判定。
+    """
+    from app.judge_claims import find_premature_done
+
+    mixed = ["第1步: 【click】Clicked button \"查询\"", 42, None]
+    # 构造"最后一步是 done 且结果里还有动作"的形态 → 应当能识别出来
+    mixed_done = [
+        "第1步: 【click】Clicked button \"查询\"",
+        7,
+        "第2步: 【done】Clicked button \"保存\"",
+    ]
+    # 正常那条仍参与判断（这里只断言不抛、且能在应有的输入上给出结果）
+    assert find_premature_done(mixed) is None
+    got = find_premature_done(mixed_done)
+    assert got is not None, "混合列表里可用的字符串条目被一起丢掉了"

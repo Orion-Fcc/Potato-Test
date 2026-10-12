@@ -78,6 +78,148 @@ class Project(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
 
+class CaseProposal(Base):
+    """AI 对测试用例的优化提案（2026-10-12）—— **先审后改，绝不直接动用例库**。
+
+    ## 为什么是"提案"而不是"直接改"
+
+    用户的原话：「我希望 ai 能根据这个页面去优化测试用例和增加测试用例
+    同删除不必要的测试用例」。但他同时选了"先出提案，我逐条审阅后再入库"。
+
+    这个选择是对的，因为用例库是这个系统真正的资产：
+    一次静默的误删/误改会让"通过率"从有依据变成没依据，而报告上一个异常都不会有。
+    所以 AI 只能**写提案**，只有人点"采纳"才会落到 `test_case`。
+
+    ## 三种动作与各自的落地方式
+
+    * `add`    —— 生成新用例（用 `draft` 存整份草稿，采纳时才插入）。
+    * `update` —— 修改已有用例。`payload` 只放**要改的字段**；
+                  采纳时按字段合并，而不是整条覆盖 —— AI 只该改它看见的那几处。
+    * `remove` —— 删除。采纳时**不真删**，改成 `status='deprecated'`：
+                  删掉的用例编号会从报告里消失，而真删是不可逆的。
+
+    ## 为什么存 `evidence`
+
+    用户会问"它凭什么说这条多余"。答案必须在提案里看得到（哪一节需规、
+    关联的哪几条现存用例），否则这就是一段看起来很像真的建议 ——
+    和它要解决的问题一样不可信。
+    """
+
+    __tablename__ = "case_proposal"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(
+        ForeignKey("project.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    # add | update | remove
+    action: Mapped[str] = mapped_column(String(20), nullable=False)
+    # 受影响的项目内用例编号（add 时为 None）
+    case_key: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    # 现存用例的 id（add 时为 None）。不加外键约束：用例可能在审阅期间被别处删掉，
+    # 而提案不该因此消失或让删除失败 —— 那种情况下界面上显示"原用例已不存在"即可。
+    case_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    summary: Mapped[str] = mapped_column(String(400), nullable=False, default="")
+    reason: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    # 依据（需规章节标题 / 关联用例编号），逐条一条
+    evidence: Mapped[list] = mapped_column(JSON, default=list)
+    # add/update 的草稿字段；remove 时为空
+    payload: Mapped[dict] = mapped_column(JSON, default=dict)
+    # ★ 这条提案涉及的**流程图**（Mermaid 源码，2026-10-12 用户要求
+    # 「用例优化里面也希望可以加上相关流程图告诉我为啥要加这个用例」）。
+    #
+    # 存**按模块**生成的那一张，而不是每条提案各画一张：
+    #   * 同一模块里的一条用例关心的流程是同一张（"审批链怎么走"）；
+    #   * 每条都画一次等于把同一个调用付十几遍钱，而且图会各说各话、
+    #     用户没法把它们放在一起看。
+    # 所以它是模块级的图，复制到该模块的每条提案上，界面上挂在"依据与改动内容"里。
+    mermaid: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    # ★ 这条用例应当用哪个**账号/角色**跑（2026-10-12 用户要求「附上账号」）。
+    #
+    # 取值必须是项目里真实存在的 credential.role —— 编一个不存在的角色，
+    # 用例跑起来会因为"找不到账号"直接失败，而用户看不出是提案的错。
+    # 空串 = 没指定（沿用项目默认账号）。
+    role: Mapped[str] = mapped_column(String(120), nullable=False, default="")
+    # pending | accepted | rejected
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending", index=True)
+    # 采纳后落成的用例 id（add/update），便于回溯"这条提案变成了哪条用例"
+    applied_case_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    decided_by: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        Index("ix_case_proposal_project_status", "project_id", "status"),
+    )
+
+
+class ProjectDoc(Base):
+    """项目文档：需求分析 / 流程图 / 总览（2026-10-12）。
+
+    ## 为什么需要它
+
+    用户的原话：「我希望你加上一栏，里面放上需求分析或者该项目的总览……
+    里面要有该项目的需规和流程图……最好是和我上传的大需规一样，但是你那个要是
+    AI 分析并截取过的，因为我上传的大需规可能不止这一个模块」。
+
+    也就是说：知识库（`KnowledgeChunk`）里躺着**整份原件**（46 万字、586 个标题），
+    那是给检索用的；而人需要一个**读得懂的概览** —— 这个项目的模块有哪些、
+    流程怎么走、角色怎么分、关键规则是什么。
+
+    ## 为什么正文存 HTML 而不是 Markdown
+
+    用户明确要求「页面有很多格式可以编辑，包括字体、照片、字体颜色大小等等」，
+    所以用富文本编辑器（TipTap）。它最小的持久化格式就是 HTML。
+
+    存 HTML 的取舍要说清楚：
+      * 好处：编辑器直接吃、直接吐，格式零损失（颜色/字号/对齐/表格/图片都在标签里）；
+      * 代价：渲染时**必须**净化，否则用户粘贴进来的 `<script>` 会变成存储型 XSS。
+        见 `app/api.py::_sanitize_doc_html` —— 那是这条路上唯一的防线，
+        改动本模块时不要绕过它。
+    """
+
+    __tablename__ = "project_doc"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(
+        ForeignKey("project.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    # "overview"（项目总览）/ "analysis"（需求分析）/ "flow"（流程图）/ "custom"（自己加的）
+    kind: Mapped[str] = mapped_column(String(30), nullable=False, default="custom")
+    title: Mapped[str] = mapped_column(String(200), nullable=False, default="")
+    # 富文本正文（HTML）。**渲染前必须净化**，见类注释。
+    html: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    # AI 生成时记下它依据了哪些章节 —— 用户据此核对，而不是把 AI 的话当结论。
+    sources: Mapped[list] = mapped_column(JSON, default=list)
+    # "ai" = AI 生成后未经人工修改；"human" = 人编辑过；"" = 空文档
+    origin: Mapped[str] = mapped_column(String(20), nullable=False, default="")
+    # ★ 助手能不能改这份文档（2026-10-12 用户要求）。
+    #
+    # 用户原话：「ai 可以阅读那里面所有文档，但是有些文档 ai 无法修改，
+    # 我上传文档的时候可以加个选择，也就是只有我自己能修改」。
+    #
+    # 默认 True（可改）—— 项目文档的主要用法就是"助手起稿、人改"。
+    # 而上传的**参考文档**（客户给的说明书、别人写的需规）常常不该被 AI 动：
+    # 那是外部输入，改了就对不上原件了。
+    #
+    # ★ 存成**数据**而不是按 kind 推断。上一版我把「flow 不让 AI 写」硬编码在
+    # 代码里，那是把权限藏进了实现：用户想放开流程图时改不了，
+    # 每加一种文档也要回去改一处判断。现在由这一列说了算，用户自己勾 ——
+    # 读的权限不受影响（助手永远能读全部）。
+    ai_editable: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default="1"
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+    # 查询索引（**不是唯一约束**）。"一个项目一种 kind 只有一份"由 API 层保证
+    # （`upsert_doc` 按 (project_id, kind) 找现有行再更新），不在这里做唯一约束 ——
+    # 因为 "custom" 允许用户加任意多篇（靠标题区分），
+    # 那种情况下真正该唯一的是 (project_id, kind, title)，多一个漂移点不值得。
+    __table_args__ = (
+        Index("ix_project_doc_kind", "project_id", "kind"),
+    )
+
+
 class Environment(Base):
     """A target environment for a project (dev/test/prod): its own base_url and accounts.
     A run picks an environment; base_url + (env,role)->account resolve from it."""

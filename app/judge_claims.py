@@ -114,8 +114,12 @@ def find_unverified_claims(
 
     返回空列表 = 结论里的数字都有出处（正常情况）。
     非空 = 判定器应当知道这些数字不是从页面上读来的。
+
+    ★ 同样只收字符串条目（2026-10-12）：`"\n".join(...)` 碰到 int 会抛 TypeError，
+    而这是判定闸门的一环 —— 挂掉的后果是整条用例没有结论，比少拦一条严重。
+    见 find_premature_done 的同类说明。
     """
-    ev_text = "\n".join(e for e in (evidence or []) if e)
+    ev_text = "\n".join(e for e in (evidence or []) if isinstance(e, str) and e)
     ev_counts = _counts_in(ev_text)
     if not ev_text:
         # 没有任何步骤记录 → 结论里所有计数都无从核对
@@ -203,8 +207,17 @@ def find_premature_done(evidence: list[str] | None) -> PrematureDone | None:
 
     evidence 每条形如 `第N步: 【action】result (意图: thought)`
     （见 executor 里 narrative_actions 的拼法），也兼容 JSON 形态。
+
+    ★ 非字符串条目直接丢弃（2026-10-12）。原来只判 `if e`，所以传进来一个 int
+    就会在 `re.search` 里抛 `TypeError: expected string or bytes-like object, got 'int'`
+    —— 而这个函数是**确定性判定闸门**的一环，闸门挂掉的后果是整条用例判不出来
+    （外层会收成 judge_error），比"少拦一条"严重得多。
+
+    什么时候可能不是字符串：调用方从库里反序列化时字段类型漂移、
+    或者把 `steps`（形如 `[1, 2, 3]` 的 id 列表）误当 evidence 传进来。
+    `evidence` 的签名写的是 `list[str]`，但运行期没有东西保证它。
     """
-    entries = [e for e in (evidence or []) if e]
+    entries = [str(e) for e in (evidence or []) if isinstance(e, str) and e.strip()]
     if not entries:
         return None
     # 最后一条是决定性的：结论是在那一步宣布的

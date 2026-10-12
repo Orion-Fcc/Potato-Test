@@ -21,6 +21,10 @@ const IssuesPage = lazy(() => import("./pages/IssuesPage").then((m) => ({ defaul
 const LoginPage = lazy(() => import("./pages/LoginPage").then((m) => ({ default: m.LoginPage })));
 const MembersPage = lazy(() => import("./pages/MembersPage").then((m) => ({ default: m.MembersPage })));
 const OverviewPage = lazy(() => import("./pages/OverviewPage").then((m) => ({ default: m.OverviewPage })));
+const DocsPage = lazy(() => import("./pages/DocsPage").then((m) => ({ default: m.DocsPage })));
+const ProposalsPage = lazy(() =>
+  import("./pages/ProposalsPage").then((m) => ({ default: m.ProposalsPage })),
+);
 const Projects = lazy(() => import("./pages/Projects").then((m) => ({ default: m.Projects })));
 const ResetPasswordPage = lazy(() => import("./pages/ResetPasswordPage").then((m) => ({ default: m.ResetPasswordPage })));
 const RunReport = lazy(() => import("./pages/RunReport").then((m) => ({ default: m.RunReport })));
@@ -87,6 +91,8 @@ const router = createBrowserRouter([
       { path: "/admin/settings", element: <RequireAdmin>{S(<AdminSettingsPage />)}</RequireAdmin> },
       { path: "/projects/:pid", element: <Navigate to="overview" replace /> },
       { path: "/projects/:pid/overview", element: S(<OverviewPage />) },
+      { path: "/projects/:pid/docs", element: S(<DocsPage />) },
+      { path: "/projects/:pid/proposals", element: S(<ProposalsPage />) },
       { path: "/projects/:pid/assistant", element: S(<AssistantPage />) },
       { path: "/projects/:pid/cases", element: S(<CasesPage />) },
       { path: "/projects/:pid/suites", element: S(<SuitesPage />) },

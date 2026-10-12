@@ -1108,6 +1108,40 @@ def browser_state_info(project_id: int) -> dict:
     }
 
 
+def effective_llm_timeout(configured_s: int, step_timeout_s: int, s=None) -> int:
+    """单次模型调用的生效上限，**保证小于整步上限**。
+
+    ## 为什么必须有这个夹取（2026-10-10）
+
+    `.env` 里两个值分开配（`LLM_TIMEOUT_S` / `STEP_TIMEOUT_S`），而它们之间有一条
+    **必须成立的不变量**：单次调用上限要小于整步上限。破了它的代价不是"慢一点"：
+
+        步在 45s 被砍掉 → 那次调用还在网关那头跑到 90s
+        → 这次调用白烧、并发位（上限 = 1）被占住
+        → 整条队列停在那儿等一个已经作废的响应
+
+    实测出现过这个组合（`llm=35` 与 `step=45` 只差 10s，而每步耗时 p90 已经是 45.5s）。
+    两个值在 `.env` 里相邻，但**改一个忘另一个**太容易 —— 所以在这里兜住，
+    而不是只在注释里写"必须一起改"。注释拦不住人，代码可以。
+
+    夹取而不是报错：一个配错的超时值不该让整轮运行起不来。
+    留 20s 给 DOM 采集与动作执行（实测这两项通常 <3s，20s 是很宽的余量）。
+    """
+    s = s or get_settings()
+    llm = max(1, int(configured_s or 0))
+    step = max(1, int(step_timeout_s or 0))
+    headroom = 20
+    if llm >= step - headroom:
+        capped = max(1, step - headroom)
+        log.warning(
+            "executor: LLM_TIMEOUT_S=%ds 相对 STEP_TIMEOUT_S=%ds 太接近（需至少 %ds 余量）—— "
+            "已夹到 %ds。否则一次慢调用会活过整步：步被砍掉而调用还在跑，白烧并占住并发位。",
+            llm, step, headroom, capped,
+        )
+        return capped
+    return llm
+
+
 def effective_case_timeout(configured_s: int, max_steps: int, s=None) -> int:
     """单条用例的墙钟安全网 —— **只拦卡死，不当预算**。
 
@@ -1191,7 +1225,7 @@ def _usage_payload(summary) -> dict:
     }
 
 
-def _timing_payload(stage: dict, t0: float, total: float, steps: int) -> dict:
+def _timing_payload(stage: dict, t0: float, total: float, steps: int, phase: dict | None = None) -> dict:
     """把执行器的阶段时间戳折成落库用的一份耗时分解（机器键，单位 ms）。
 
     为什么抽成函数：这段算法以前只活在一行 WARNING 日志里，改它只能靠"跑一条真用例
@@ -1222,7 +1256,7 @@ def _timing_payload(stage: dict, t0: float, total: float, steps: int) -> dict:
         "judge": total - (vi - t0),
     }
     steps_n = max(0, int(steps or 0))
-    return {
+    out = {
         "browser_up_ms": int(seg["browser_up"] * 1000),
         "agent_ms": int(seg["agent"] * 1000),
         "wrap_up_ms": int(seg["wrap_up"] * 1000),
@@ -1232,6 +1266,22 @@ def _timing_payload(stage: dict, t0: float, total: float, steps: int) -> dict:
         "steps": steps_n,
         "per_step_ms": int(seg["agent"] * 1000 / steps_n) if steps_n else 0,
     }
+    # ★ 回调内部分段（2026-10-10）。只回答一个问题：
+    # 每步那 ~13 秒（模型调用之外）到底花在哪。
+    #
+    # 注意归属：这两项是在第 N 步结束后的回调里做的，所以被记进**第 N+1 步**的
+    # step_elapsed。单看某一步慢会误判成"模型慢"，有这组数字才能分辨。
+    # `callback_ms` 是回调自身总耗时（含上面两项 + 解析模型输出 + 上报）；
+    # 它本身就是 agent_ms 的一部分，不额外叠加到 total 上 —— 这一段是**拆分**，
+    # 不是**新增**，所以五段之和仍然等于 total_ms。
+    if phase:
+        out["prune_ms"] = int(phase.get("prune_ms") or 0)
+        out["shot_ms"] = int(phase.get("shot_ms") or 0)
+        out["callback_ms"] = int(phase.get("cb_ms") or 0)
+        # 恒存在（0 步时记 0）：键在有的行有、有的行没有，读报告的人得写两套分支，
+        # 而"0 步"本来就该是 0 而不是"缺字段"。
+        out["callback_per_step_ms"] = int((phase.get("cb_ms") or 0) / steps_n) if steps_n else 0
+    return out
 
 
 @dataclass(frozen=True)
@@ -2301,13 +2351,33 @@ async def execute_case(spec: CaseSpec, on_step=None, should_abort=None) -> Resul
                     log.debug("executor: 第 %s 步截图失败（不影响用例）：%s", step_no, exc)
                     return None
 
+            # ★ 分段计时累加器（2026-10-10）。一个整数列表当可变容器用（闭包内改不了外层标量）。
+            #
+            # ## 为什么需要它
+            #
+            # 实测每步 17.8 秒，而**同样大小**的请求直测网关只要 4.8 秒
+            # （12,719 prompt token + 253 输出，约 2,660 tok/s）。
+            # 也就是每步约 13 秒花在**模型调用之外** —— 但原有埋点里
+            # `step_elapsed` 是"两次回调之间的墙钟"，把模型、DOM 序列化、动作执行、
+            # 页面就绪等待、截图全揉成一个数，**分不出该往哪砍**。
+            #
+            # ## 计时归属（重要，容易看错）
+            #
+            # `step_elapsed[N+1]` = 第 N 步回调**自身**的耗时 + 第 N+1 步的执行耗时。
+            # 因为回调是在第 N 步结束后才跑的。所以回调里做的两件事
+            # （精灵裁剪 + 截图）会被记到**下一步**头上。
+            # 把它们单独累加出来，才能回答"某一步 121 秒里有多少是上一步留下的账"。
+            _phase = {"prune_ms": 0.0, "shot_ms": 0.0, "cb_ms": 0.0, "steps": 0}
+
             async def _step_cb(browser_state, model_output, step_no):
+                _cb_t0 = time.monotonic()
                 # This step's true cost = the gap since the previous callback (step 1's
                 # value therefore also includes browser start + any pre-step setup, which
                 # is exactly the fixed overhead worth seeing).
                 _now = time.monotonic()
                 step_elapsed = round(_now - _step_clock[0], 1)
                 _step_clock[0] = _now
+                _phase["steps"] += 1
                 # stream each step live: model thought + action + current screenshot.
                 # browser-use keeps screenshots in-memory (not on disk), so grab one via
                 # CDP here rather than relying on browser_state.screenshot / screenshot_paths.
@@ -2320,7 +2390,9 @@ async def execute_case(spec: CaseSpec, on_step=None, should_abort=None) -> Resul
                 # tears down the CDP session that carried the pruner, so a one-shot install
                 # silently expires. This is where it matters most — the next thing that
                 # happens is the DOM serialisation this pruner exists to make cheap.
+                _prune_t0 = time.monotonic()
                 await _ensure_sprite_pruner(browser)
+                _phase["prune_ms"] += (time.monotonic() - _prune_t0) * 1000
                 thought = ""
                 actions: list[str] = []
                 details: list[str] = []
@@ -2343,7 +2415,9 @@ async def execute_case(spec: CaseSpec, on_step=None, should_abort=None) -> Resul
                     # bookkeeping: the step must still appear in the timeline without a shot.
                     # 传入 browser_state：优先复用 browser-use 已截好的那张，避免同一步
                     # 在 CDP 通道上出现两次截图（见 _grab_shot 的注释）。
+                    _shot_t0 = time.monotonic()
                     shot_url = await _grab_shot(step_no, browser_state)
+                    _phase["shot_ms"] += (time.monotonic() - _shot_t0) * 1000
                 live_steps.append(
                     {
                         "i": step_no,
@@ -2372,6 +2446,9 @@ async def execute_case(spec: CaseSpec, on_step=None, should_abort=None) -> Resul
                         safe(lambda: agent.stop())
                 except Exception as exc:  # noqa: BLE001
                     log.debug("executor: 第 %s 步回调上报失败：%s", step_no, exc)
+                # 收尾：这一步的回调自身花了多久。它是**下一步** step_elapsed 的一部分，
+                # 所以必须单独记账，否则"某一步特别慢"永远说不清是模型慢还是回调重。
+                _phase["cb_ms"] += (time.monotonic() - _cb_t0) * 1000
 
             # 防"死磕"的硬兜底。
             #
@@ -2451,7 +2528,10 @@ async def execute_case(spec: CaseSpec, on_step=None, should_abort=None) -> Resul
                 # 结论却不覆盖 agent 自述，而我们有 app/judge.py —— 纯重复，默认关。
                 use_judge=s.agent_use_judge,
                 # 单次 LLM 调用的墙钟上限；browser-use 默认 None（不限制）。
-                llm_timeout=s.llm_timeout_s,
+                # ★ 经 effective_llm_timeout 夹取，保证它 **小于** step_timeout ——
+                # 否则一次慢调用会活过整步：步被砍掉而调用还在网关那头跑，
+                # 白烧一次调用并占住并发位（上限 = 1，等于整条队列停住）。
+                llm_timeout=effective_llm_timeout(s.llm_timeout_s, s.step_timeout_s, s),
                 # 输出侧 token（质量换速度，默认保守，见 config.py 注释）。
                 use_thinking=s.agent_use_thinking,
                 flash_mode=s.agent_flash_mode,
@@ -2830,7 +2910,7 @@ async def execute_case(spec: CaseSpec, on_step=None, should_abort=None) -> Resul
     #   判定/描述  = 之后到函数返回（judge 每个用例一次；失败用例再加一次描述）
     try:
         total = time.monotonic() - t0
-        payload = _timing_payload(_stage, t0, total, len(res.diagnostics or []))
+        payload = _timing_payload(_stage, t0, total, len(res.diagnostics or []), _phase)
         # token 账本并进同一列：两者一起看才有意义（"这一步很慢" vs "这一步很贵"
         # 是两种不同的病，处置方式也不同）。timing 是 JSON 列，加键不用迁移。
         # by_role 是逐角色拆分（2026-10-12）：agent / judge / judge_escalate 各自一份，
@@ -2854,10 +2934,19 @@ async def execute_case(spec: CaseSpec, on_step=None, should_abort=None) -> Resul
         }
         parts = " | ".join(f"{k} {v:.1f}s" for k, v in seg.items())
         fixed = seg["启动浏览器"] + seg["收尾"] + seg["等视频"]
+        # 回调分段：回答"每步那 13 秒（模型之外）花在哪"。
+        # 实测每步 17.8s，而同样大小的请求直测网关只要 4.8s —— 差距就在这几项里。
+        _cb = payload.get("callback_ms") or 0
+        _pr = payload.get("prune_ms") or 0
+        _sh = payload.get("shot_ms") or 0
+        _steps_n = max(1, payload.get("steps") or 1)
         log.warning(
-            "executor: case-timing[%s] 总 %.1fs | %s | 步数 %d | 固定开销(启动+收尾+等视频) %.1fs",
+            "executor: case-timing[%s] 总 %.1fs | %s | 步数 %d | 固定开销(启动+收尾+等视频) %.1fs"
+            " | 回调合计 %.1fs (精灵裁剪 %.1fs / 截图 %.1fs / 其它 %.1fs) = 每步 %.1fs",
             (spec.name or f"case{spec.case_id}")[:24], total, parts,
             len(res.diagnostics or []), fixed,
+            _cb / 1000, _pr / 1000, _sh / 1000,
+            max(0.0, (_cb - _pr - _sh) / 1000), _cb / 1000 / _steps_n,
         )
     except Exception as exc:  # noqa: BLE001 — 埋点绝不能影响用例结果
         log.debug("executor: 耗时分解输出失败：%s", exc)

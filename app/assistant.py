@@ -144,6 +144,15 @@ def _system_prompt(catalog: str, project_name: str = "Potato Test", pid: int = 0
         "5) 通用工具 `potato-test_api`：可调用下面列出的任意平台接口——"
         "用例/套件/运行/缺陷/项目/成员/凭据/角色/环境/系统设置 的增删改查都能做；\n"
         "6) 项目『需规/资料』：用 `search_knowledge(query)` 检索需求规格，再据此作答或写文档；\n"
+        "6b) ★**项目文档**：read_project_docs 读「项目总览 / 需求分析 / 流程图」——"
+        "那是从整份需规提炼出来的骨架（有哪些功能模块、流程怎么走、角色怎么分、"
+        "关键规则是什么）。用户问「这个项目有哪些功能」「XX 模块干什么」"
+        "「照总览给我补用例」这类**整体性**问题时先读它；"
+        "search_knowledge 是关键词检索，搜回来的是零散片段，回答不了整体问题。\n"
+        "6c) ★**往项目文档里写**：write_project_doc 能把内容写进「项目总览 / 需求分析 / "
+        "流程图」，写完用户在「项目文档」页能直接看到并接着编辑。"
+        "注意和 generate_document 的分工：后者产出**可下载的报告文件**，"
+        "前者写进**项目说明书本身**。用户说「写进总览 / 加到项目文档里」时用后者。\n"
         "7) **文件工具**：list_files（看目录/确认路径）/ import_file_to_knowledge"
         "（把本机 md/txt/json/csv/docx/pdf/xlsx/html/rtf 导入知识库，之后可检索）/ "
         "import_cases_from_file（把 Excel 用例表导入本项目）；\n"
@@ -165,7 +174,9 @@ def _system_prompt(catalog: str, project_name: str = "Potato Test", pid: int = 0
         "绝不要靠数示例来判断数量，也不要为凑一个数字反复翻页——"
         "先用聚合字段，再需要明细时一次性用大 limit 或收窄筛选条件取回来。\n"
         "2) 涉及业务规则、字段口径、页面要求时，先 search_knowledge 查需规；"
-        "查不到就说「资料里没写」，不要臆造。\n"
+        "查不到就说「资料里没写」，不要臆造。"
+        "**整体性**的问题（项目有哪些功能、模块怎么划分、流程长什么样）先读项目文档"
+        "（read_project_docs），它本来就是从需规提炼的骨架。\n"
         "3) potato-test_api 的 path 以 /api 开头（例：POST /api/projects/2/runs），body 传 JSON。\n"
         "4) 任何写操作执行前先说明；破坏性操作（DELETE、取消运行、覆盖设置等）须用户明确同意。\n"
         # 2026-10-07：用户抱怨「我让AI 加用例加不了」。查下来不是模型笨，是工具表里
@@ -675,9 +686,69 @@ def _tools() -> list[dict]:
         {
             "type": "function",
             "function": {
-                "name": "list_documents",
-                "description": "列出本项目已由助手生成的文档（标题/时间/下载地址）。",
-                "parameters": {"type": "object", "properties": {}, "required": []},
+                "name": "read_project_docs",
+                "description": (
+                    "读取本项目的**项目文档**（项目总览 / 需求分析 / 流程图）——"
+                    "那是从整份需规提炼出来的骨架：有哪些功能模块、流程怎么走、"
+                    "角色怎么分、关键业务规则是什么。"
+                    "\n\n★ 什么时候用它：用户问「这个项目有哪些功能」「XX 模块是干什么的」"
+                    "「照总览给我补用例」这类**整体性**问题时，先读它。"
+                    "它比 search_knowledge 更合适 —— 后者是关键词检索需规原文，"
+                    "搜回来的是零散片段，回答不了「整体有哪些功能」。"
+                    "\n流程图会以 [流程图源码] 的形式给出 Mermaid 文本。"
+                    "\n不带 kind 时只返回**索引**（有哪些文档、各多少字、有没有图），"
+                    "让你先看清楚再决定读哪一份。"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "kind": {
+                            "type": "string",
+                            "description": "overview=项目总览 / analysis=需求分析 / flow=流程图；省略则只列索引。",
+                        },
+                        "max_chars": {
+                            "type": "integer",
+                            "description": "单份文档最多返回多少字符，默认 60000。超出会被截断并说明。",
+                        },
+                    },
+                    "required": [],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "write_project_doc",
+                "description": (
+                    "往**项目文档**里写内容（项目总览 / 需求分析 / 流程图 / 自建文档）——"
+                    "写进去的东西用户在「项目文档」页能直接看到并继续编辑。"
+                    "\n\n★ 它和 generate_document 的区别（别用错）："
+                    "\ngenerate_document 产出一份**可下载的 Markdown 文件**（报告、计划、矩阵）；"
+                    "write_project_doc 写进**项目说明书本身**（用户要「助手自己新建文件到项目总览里面」）。"
+                    "\n\n正文用 Markdown 写，系统会转成富文本。"
+                    "mode=\"append\"（默认）追加在后面，\"replace\" 覆盖整份文档。"
+                    "**覆盖前必须先读一遍**（read_project_docs）并向用户确认 ——"
+                    "那会丢掉人已经改过的内容。"
+                    "\n\n★ 有些文档被用户设为**只有他本人能修改**，你写不进去 ——"
+                    "那时会返回 blocked_by。要如实告诉用户「这份文档你锁了」，"
+                    "并把内容写在回复里让他自己贴，不要反复重试。"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "kind": {
+                            "type": "string",
+                            "description": "overview=项目总览 / analysis=需求分析 / flow=流程图 / custom=自建。",
+                        },
+                        "title": {"type": "string", "description": "文档标题（custom 时必填，其余可省）。"},
+                        "markdown": {"type": "string", "description": "正文，标准 Markdown。"},
+                        "mode": {
+                            "type": "string",
+                            "description": "append（默认，追加）/ replace（覆盖整份文档）。",
+                        },
+                    },
+                    "required": ["kind", "markdown"],
+                },
             },
         },
         {
@@ -1414,6 +1485,10 @@ async def _run_tool(name: str, args: dict, pid: int) -> dict:
         )
     if name == "list_documents":
         return await _list_documents(pid)
+    if name == "read_project_docs":
+        return await _read_project_docs(pid, args)
+    if name == "write_project_doc":
+        return await _write_project_doc(pid, args)
     if name == "list_tools":
         return _describe_tools(args.get("query"))
     if name == "list_files":
@@ -2079,6 +2154,165 @@ async def _save_document(pid: int, title: str, markdown: str, doc_type: str = ""
     }
 
 
+async def _read_project_docs(pid: int, args: dict) -> dict:
+    """读项目文档（2026-10-12）。
+
+    用户要「助手有阅读并分析项目总览那里所有功能的能力」。项目文档是从整份需规
+    提炼出来的骨架，读它比关键词检索原文更能回答"这个项目整体有哪些功能"。
+
+    不带 kind 时只返回索引：让模型先看清有哪些文档、各多少字，再决定读哪一份 ——
+    六份全塞给它既费 token 又容易让它抓不住重点。
+    """
+    from sqlalchemy import select
+
+    from app.db import db_session
+    from app.doc_tools import clamp, html_to_readable, summarize_doc_row
+    from app.models import ProjectDoc
+
+    kind = str(args.get("kind") or "").strip()
+    cap = int(args.get("max_chars") or 60000)
+    cap = max(2000, min(cap, 200000))
+
+    async with db_session() as s:
+        rows = (
+            (
+                await s.execute(
+                    select(ProjectDoc)
+                    .where(ProjectDoc.project_id == pid)
+                    .order_by(ProjectDoc.kind, ProjectDoc.id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    if not rows:
+        return {
+            "count": 0,
+            "docs": [],
+            "note": (
+                "这个项目还没有项目文档。可以让用户到「项目文档」页点「AI 分析与生成」，"
+                "或者你先读需规（search_knowledge）再帮他起草一份（write_project_doc）。"
+            ),
+        }
+
+    index = [summarize_doc_row(r.kind, r.title, r.html) for r in rows]
+    if not kind:
+        return {
+            "count": len(index),
+            "docs": index,
+            "note": "带上 kind 再调一次就能读到某一份的正文。",
+        }
+
+    want = next((r for r in rows if r.kind == kind), None)
+    if want is None:
+        return {
+            "error": f"没有 kind={kind!r} 的文档。",
+            "available": [i["kind"] for i in index],
+        }
+    text, cut = clamp(html_to_readable(want.html or ""), cap)
+    out = {
+        "kind": want.kind,
+        "title": want.title or want.kind,
+        "readable": text,
+        "chars": len(want.html or ""),
+        "truncated": cut,
+    }
+    if cut:
+        # 截断必须说明：不说明的话模型会以为读全了，然后对没读到的部分照样下结论。
+        out["note"] = f"正文过长，只返回了前 {cap} 字符（完整 {len(want.html or '')} 字符）。"
+    if not text.strip():
+        out["note"] = "这份文档是空的。"
+    return out
+
+
+async def _write_project_doc(pid: int, args: dict) -> dict:
+    """往项目文档里写（2026-10-12）。
+
+    用户要「助手自己新建文件到项目总览里面」。
+
+    写进的就是 `ProjectDoc` —— **和人在「项目文档」页里编辑的是同一张表**，
+    所以助手写的东西用户能直接接着改。这正是我们要的分工：助手起稿，人定稿。
+    """
+    from sqlalchemy import select
+
+    from app.db import db_session
+    from app.doc_sanitize import sanitize
+    from app.doc_tools import KINDS, default_title
+    from app.md_html import markdown_to_html
+    from app.models import ProjectDoc, _utcnow
+
+    kind = str(args.get("kind") or "").strip()
+    if kind not in KINDS:
+        return {"error": f"kind 必须是 {KINDS} 之一", "got": kind}
+    md = str(args.get("markdown") or "").strip()
+    if not md:
+        return {"error": "markdown 为空，没有内容可写。"}
+    mode = str(args.get("mode") or "append").strip().lower()
+    if mode not in ("append", "replace"):
+        return {"error": "mode 只能是 append 或 replace"}
+
+    html = sanitize(markdown_to_html(md))
+    if not html.strip():
+        return {"error": "转换后的正文为空（可能内容全是转换不了的东西）。"}
+
+    title = str(args.get("title") or "").strip() or default_title(kind)
+    async with db_session() as s:
+        row = (
+            await s.execute(
+                select(ProjectDoc).where(
+                    ProjectDoc.project_id == pid, ProjectDoc.kind == kind
+                )
+            )
+        ).scalars().first()
+        # ★ 门在这里（2026-10-12 用户要求「有些文档 ai 无法修改，
+        # 也就是只有我自己能修改」）。
+        #
+        # 必须由服务端拦：界面上那个勾选框只是提示，而助手是**通过工具**写文档的，
+        # 它根本不经过界面。只在界面上拦等于没拦。
+        #
+        # 读不受影响 —— read_project_docs 不看这一列，助手永远能读全部。
+        if row is not None and not bool(getattr(row, "ai_editable", True)):
+            return {
+                "error": (
+                    f"「{row.title or default_title(kind)}」被设为**只有用户本人能修改**，"
+                    "你不能写它。请把内容写在回复里让用户自己贴，"
+                    "或者先请用户到「项目文档」页放开这个限制。"
+                ),
+                "blocked_by": "ai_editable=false",
+                "kind": kind,
+            }
+        before = len(row.html or "") if row else 0
+        if row is None:
+            row = ProjectDoc(project_id=pid, kind=kind, title=title)
+            s.add(row)
+        if mode == "replace":
+            row.html = html
+        else:
+            prev = (row.html or "").strip()
+            row.html = f"{prev}\n<hr>\n{html}" if prev else html
+        row.title = row.title or title
+        # 助手写的东西标成 human 还是 ai？标 ai 更准确 —— 它还没被人看过。
+        # 用户在页面上看到 AI 标记，就知道这份内容还没经过人确认。
+        row.origin = "ai"
+        row.updated_at = _utcnow()
+        await s.flush()
+        after = len(row.html or "")
+
+    return {
+        "ok": True,
+        "kind": kind,
+        "title": title,
+        "mode": mode,
+        "before_chars": before,
+        "after_chars": after,
+        "page": f"/projects/{pid}/docs",
+        "note": (
+            "已写入项目文档，用户在「项目文档」页能看到并继续编辑。"
+            "告诉用户写进了哪一份、是追加还是覆盖。"
+        ),
+    }
+
+
 async def _list_documents(pid: int) -> dict:
     rows = await _load_doc_index(pid)
     return {
@@ -2316,7 +2550,41 @@ def _guard_identity(message: str, reply: str, project_name: str = "Potato Test")
     return _scrub_named_leak(reply, label if keep_label else "")
 
 
-async def assistant_turn(pid: int, message: str, history: list[dict] | None = None) -> dict:
+def _compose_user_message(message: str, attachments: list[dict] | None) -> str:
+    """把这一轮的用户话与附件正文拼成一条消息。**抽成纯函数是为了能单测**。
+
+    附件必须真的进到消息里 —— 只把它存在请求体里、没并进消息，是这类功能最常见的
+    "看起来接好了"的坏法：界面上附件 chip 在，模型却完全不知道有这个东西。
+    拼装逻辑放在这里，测试就能直接断言"附件内容在消息里"，而不必去 mock HTTP 客户端。
+
+    每个附件都带文件名与截断说明：
+      * 文件名 —— 模型引用时要说得清是哪一份（"《需规 v3.1》里写……"）；
+      * 截断说明 —— 不说明的话它会以为读全了，然后对没读到的部分照样下结论。
+    """
+    atts = [
+        a
+        for a in (attachments or [])
+        if isinstance(a, dict) and str(a.get("text") or "").strip()
+    ]
+    if not atts:
+        return message
+    parts = [message, "", f"（用户附上了 {len(atts)} 个文件，内容如下）"]
+    for a in atts[:5]:  # 上限 5 个：再多也会把上下文挤爆
+        fn = str(a.get("filename") or "附件")
+        txt = str(a.get("text") or "")
+        cut = "（内容过长，只附了开头部分）" if a.get("truncated") else ""
+        parts.append(f"\n===== 文件：{fn}{cut} =====\n{txt}")
+    if len(atts) > 5:
+        parts.append(f"\n（另有 {len(atts) - 5} 个附件未附上，需要时请用户分开问）")
+    return "\n".join(parts)
+
+
+async def assistant_turn(
+    pid: int,
+    message: str,
+    history: list[dict] | None = None,
+    attachments: list[dict] | None = None,
+) -> dict:
     """One assistant turn: LLM + tool loop. Returns {"reply", "actions"}."""
     # 助手对话走「assistant」用途模型：工具循环的往返次数多、质量要求低于判定，
     # 是第二个值得单独配便宜模型的用途（第一个是 agent 每步执行）。
@@ -2336,7 +2604,9 @@ async def assistant_turn(pid: int, message: str, history: list[dict] | None = No
         content = h.get("content")
         if role in ("user", "assistant") and isinstance(content, str) and content.strip():
             messages.append({"role": role, "content": content})
-    messages.append({"role": "user", "content": message})
+    # ★ 附件正文并进这条用户消息（2026-10-12）。见 `_compose_user_message`：
+    # 拼装逻辑抽成纯函数，测试能直接断言"附件内容在消息里"。
+    messages.append({"role": "user", "content": _compose_user_message(message, attachments)})
 
     actions: list[dict] = []
     use_tools = True

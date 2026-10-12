@@ -759,7 +759,7 @@ export function AdminSettingsPage() {
             <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
               <div className="text-[13px] font-medium text-ink-900">
                 {t("Give some steps a better model")}
-                <Hint text={t("Add one expensive, smart model and tick exactly which steps may use it. Off means every step falls back to the pool's set 1 — no extra spend at all.")} />
+                <Hint text={t("Pick one expensive, smart model from the pool below and tick exactly which steps may use it. Off means every step falls back to the pool's set 1 — no extra spend at all.")} />
               </div>
               <div className="text-[11px] text-ink-500">
                 {llm?.premium?.usable

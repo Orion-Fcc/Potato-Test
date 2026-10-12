@@ -170,6 +170,117 @@ def test_empty_evidence_is_unknown():
     assert classify("", action_text="", final_answer="") == "unknown"
 
 
+# ── agent 根本没给出结论（2026-10-10 用户实测反馈后新增）──────────────────
+#
+# 用户发来的那张 P0 截图：`新增: 名称留空 → 保存` 判 failed，但它的 final_answer
+# 是 **`Clicked button "新增规则"`** —— 一行原样的工具回显。agent 既没做成这件事、
+# 也没说出任何观察结论，却在报告里和"被测系统真的有缺陷"长得一模一样。
+# 用户的原话：「我不希望 agent 出现以下错误。」
+
+
+def test_a_tool_echo_final_answer_is_attributed_to_the_agent():
+    """★ 工具回显 ≠ 观察结论。这种失败是 agent 的，不是产品的。
+
+    之前这条落在 unknown，报告上只写"待人工确认"，用户拿到的 P0 红条
+    看起来全是产品缺陷，而实际每一条都是 agent 自己没做完 ——
+    这正是用户反馈"不希望 agent 出现这种错误"的那一类。
+    """
+    v = classify(
+        evidence_text="最终截图仅显示空的弹窗，无任何校验信息",
+        action_text='["navigate", "click", "click", "click"]',
+        final_answer='Clicked button "新增规则"',
+    )
+    assert v == "agent", f"工具回显应当归因给 agent，实际 {v}"
+
+
+def test_tool_echo_detection_does_not_fire_on_a_real_conclusion():
+    """反向守卫：真正的观察结论不能被误判成工具回显。
+
+    这条如果做错，会把**真实的系统缺陷**全部归因成"agent 没做完"，
+    于是缺陷被隐藏 —— 比误报更糟。
+    """
+    from app.failure_attrib import final_answer_is_tool_echo as echo
+
+    for real in (
+        "列表显示 3 条记录，与预期一致",
+        "弹窗提示「规则名称不能为空」并高亮该字段",
+        "页面跳转到详情页，标题显示「资源审批配置」",
+        "",
+    ):
+        assert echo(real) is False, f"真实结论被误判成工具回显：{real!r}"
+
+
+def test_tool_echo_detection_accepts_the_shapes_seen_in_the_real_db():
+    from app.failure_attrib import final_answer_is_tool_echo as echo
+
+    for s in (
+        'Clicked button "新增规则"',
+        'Clicked button "查询"',
+        'Typed "测试" into the search box',
+        "点击了「保存规则」",
+        "选择了「培训资源」",
+    ):
+        assert echo(s) is True, f"工具回显没被认出来：{s!r}"
+
+
+def test_a_long_paragraph_is_never_a_tool_echo():
+    """回显永远是一行短句。长段落即使以 Clicked 开头也是结论，不该被判成回显。"""
+    from app.failure_attrib import final_answer_is_tool_echo as echo
+
+    long_one = "Clicked button X, then observed " + "很长的观察描述，" * 20
+    assert echo(long_one) is False
+
+
+def test_the_judges_no_conclusion_wording_also_attributes_to_the_agent():
+    """判定器说「agent 未给出结论」时，归因必须也是 agent。
+
+    这是同一种情况的另一面：判定器拒收截图当证据，指的是 **agent 停了**。
+    不认这句话的话它会落到 unknown，报告上给不出可执行的下一步。
+    """
+    v = classify(
+        "【agent 未给出结论】final_answer 只是工具回显，agent 根本没有给出观察结论。"
+        "判 passed 属于无依据的通过。",
+        final_answer="",
+    )
+    assert v == "agent", f"判定器明说 agent 未给结论，却归因成 {v}"
+
+
+def test_no_conclusion_wording_beats_a_system_message_lookalike():
+    """★ 优先级：这条必须压过 _SYSTEM_MESSAGE。
+
+    「弹窗是空的」这类截图证据会命中 不能为空/必填 等系统措辞，
+    于是被判成 system（被测系统的锅）—— 方向正好反了。
+    """
+    v = classify(
+        "截图显示弹窗里「规则名称」为空，agent 未给出结论，没有完成核对",
+        final_answer='Clicked button "新增规则"',
+    )
+    assert v == "agent", f"被系统措辞盖掉了，归因成 {v}"
+
+
+def test_the_real_world_shapes_from_the_db_are_all_agent():
+    """真库实测的 21 条历史结果：final_answer 全是工具回显。
+
+    这些原来是 `unknown`（报告上只写"待人工确认"），重判后都应当是 agent。
+    用真库里的原样字符串做参数化 —— 编造的样例覆盖不到真实形状
+    （带 aria-label、带 role=menuitem、带 id=el-id-… 这些）。
+    """
+
+    shapes = [
+        'Clicked button aria-label=展开更多',
+        'Clicked div "学员日常管理流程"',
+        'Clicked li role=menuitem "学员日常管理流程"',
+        'Clicked li role=menuitem "首页"',
+        'Clicked button "确定"',
+        'Clicked li role=menuitem "退出系统"',
+        'Clicked span "文件管理" aria-label=文件管理',
+        'Clicked div role=button "新增培训规则" id=el-id-5234-7',
+    ]
+    for s in shapes:
+        v = classify("最终截图仅显示空的弹窗，无任何校验信息", final_answer=s)
+        assert v == "agent", f"{s!r} 应归因给 agent，实际 {v}"
+
+
 # ── 优先级：强的信号不能被弱的覆盖 ─────────────────────────────────────
 
 

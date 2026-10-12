@@ -90,8 +90,73 @@ _AGENT_SKIPPED = re.compile(
     re.IGNORECASE,
 )
 
-# A write that reports success but never reaches a settled state.
+
+# ---------------------------------------------------------------------------
+# "agent 根本没给出结论" —— 2026-10-10 用户实测反馈后新增
+# ---------------------------------------------------------------------------
 #
+# 用户发来的截图里有一条 P0：`新增: 名称留空 → 保存` 判 failed，理由是
+#
+#   「智能体只打开了『新增审批规则』弹窗并两次点击『新增规则』（中间点了一次取消），
+#     始终没有点击『保存规则』，因此从未触发或观察到『规则名称』留空时的前端拦截
+#     与高亮提示，最终截图仅显示空的弹窗，无任何校验信息。」
+#
+# 而它的 `final_answer` 是：**`Clicked button "新增规则"`** —— 一行原样的工具回显。
+# 也就是说 agent 既没有做成这件事，也没有说出任何观察结论，
+# 却在报告里和"被测系统真的有缺陷"看起来一模一样。用户的原话是：
+#   「我不希望 agent 出现以下错误。」
+#
+# 这类结果必须单独归因。判据是**决定性**的、不看模型措辞：
+#   `final_answer` 是"工具回显"而不是"观察结论"。
+#
+# 为什么这条要排在 _SYSTEM_MESSAGE 之前：这个形态下 ev（截图证据）往往是
+# "弹窗是空的"这类文本，可能命中 不能为空/必填 等系统措辞，
+# 于是被判成 system（被测系统的锅）—— 方向正好反了。
+_TOOL_ECHO = re.compile(
+    r"^\s*(?:"
+    r"Clicked|Typed|Pressed|Selected|Navigated|Scrolled|Hovered|Uploaded|"
+    r"点击了?|输入了?|选择了?|按下了?|导航到|滚动到|上传了?"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def final_answer_is_tool_echo(final_answer: str) -> bool:
+    """`final_answer` 是不是一行"工具回显"而不是观察结论。
+
+    实测样例（都来自真库）::
+
+        Clicked button "新增规则"
+        Clicked button "查询"
+        Typed "测试" into the search box
+
+    为什么只认开头那个动词：工具回显的形状非常固定 —— 动词过去式开头 + 目标。
+    而真正的结论会先说页面状态（"列表显示…"、"提示『名称不能为空』"）。
+    这个判据是**决定性的**，不含任何模型措辞判断，所以不会随模型波动。
+    """
+    s = (final_answer or "").strip()
+    if not s:
+        return False
+    # 多行的话只看第一行：工具回显永远是一行，而结论可能带换行。
+    first = s.splitlines()[0].strip()
+    # 太长的肯定不是单行回显（回显很少超过 80 字符）。
+    if len(first) > 120:
+        return False
+    return bool(_TOOL_ECHO.match(first))
+
+
+# 判定器明确说出"agent 没有给出结论/没有完成核对"。这是判定器拒收截图当证据时的措辞，
+# 指的是 **agent 停了**，不是产品有问题。
+_AGENT_NO_CONCLUSION = re.compile(
+    r"(agent\s*(?:未|没有|并未)\s*(?:给出|提供)?\s*(?:结论|观察|核对)|"
+    r"没有完成核对|未完成核对|没有给出观察结论|"
+    r"最终回答(?:只是|仅为)工具回显|"
+    r"agent\s*incomplete)",
+    re.IGNORECASE,
+)
+
+
+# A write that reports success but never reaches a settled state.
 # This is the shape of the measured false defect: the import dialog said
 # 「导入成功 共 2 条」, the agent stopped there, and the list then showed nothing —
 # so it filed "data was not saved". What was actually missing is the other half of
@@ -199,9 +264,32 @@ def classify(
     if _AUTOMATION_ERROR.search(hay):
         return "agent"
 
+    # 1b. ★ agent 根本没给出结论（2026-10-10 用户实测反馈后新增）。
+    #
+    # `final_answer` 只是一行工具回显（`Clicked button "新增规则"`），
+    # 说明 agent 既没做成这件事、也没说出任何观察结论。
+    # 这种结果在报告里必须和"被测系统真的有缺陷"分开 ——
+    # 否则用户拿到的 P0 红条全部是 agent 自己没做完，产品被冤枉。
+    #
+    # 位置说明：放在 _SYSTEM_MESSAGE 之前，因为这个形态下截图证据常写着
+    # "弹窗是空的"，会命中 不能为空/必填 等系统措辞，被判成 system（方向正好反了）。
+    # 放在 _AGENT_SKIPPED 之后：如果文本明确说了"没有点击保存"，
+    # 那说明用例/流程定义有问题，归 setup 更准确。
+    if final_answer_is_tool_echo(fin):
+        return "agent"
+
     # 2. we said we skipped something
     if _AGENT_SKIPPED.search(hay):
         return "setup"
+
+    # 2c. the same "no conclusion" shape, seen from the judge's side.
+    #
+    # The judge writes 「agent 未给出结论」/「说明 agent 没有完成核对」 when it refuses to
+    # accept a screenshot as evidence. That wording means the *agent* stopped, not the
+    # product — and without this the case falls through to `unknown`, which tells the
+    # operator nothing actionable.
+    if _AGENT_NO_CONCLUSION.search(ev):
+        return "agent"
 
     # 2b. a write that reported success but never settled.
     #     Checked BEFORE _SYSTEM_MESSAGE: when a dialog says 「导入成功」 the literal

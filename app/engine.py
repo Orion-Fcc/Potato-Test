@@ -1290,6 +1290,63 @@ async def reconcile_stale_runs(now: datetime | None = None) -> list[int]:
             finalized.append(rid)
         except Exception:
             log.exception("could not finish stale run %s", rid)
+    # ★ 收尾：把「父运行已经终态、自己却还挂着 running」的结果行也收敛掉
+    #   （2026-10-12 补的一个真实漏洞）。
+    #
+    # 上面那一轮只查 `finished_at IS NULL` 的运行 —— 它的语义是"终结还没结束的运行"。
+    # 但有一种行它永远够不着：**父运行已经是终态**（failed/completed），
+    # 却因为崩溃/取消而留下一条 running 的结果。
+    # 实测：run 20 状态 `failed`（终态），而 run_result 228 从 2026-10-11 09:09
+    # 起一直挂着 running —— 查不到、也修不掉，报告页上就是一条永远"运行中"的行。
+    #
+    # 判据必须"绝不误伤在跑的行"：只处理**父运行已终态**的，所以不会碰到活跃运行。
+    #
+    # ★ 它**不并进返回值**：那个 list 的契约是"被终结的 run id"（调用方拿它做日志/计数），
+    # 混进 result 的 id 会让两个数字都对不上。孤儿行只记日志。
+    try:
+        from sqlalchemy import select as _select
+
+        from app.db import db_session as _db_session
+        from app.models import Run as _Run
+        from app.models import RunResult as _RunResult
+
+        async with _db_session() as s:
+            terminal = (
+                (
+                    await s.execute(
+                        _select(_Run.id).where(
+                            _Run.status.in_(("completed", "failed", "cancelled"))
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            if terminal:
+                orphans = (
+                    (
+                        await s.execute(
+                            _select(_RunResult).where(
+                                _RunResult.status == "running",
+                                _RunResult.run_id.in_(list(terminal)),
+                            )
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+                for r in orphans:
+                    r.status = "error"
+                    r.error = "所属运行已结束，但这条结果没有落定（执行进程中断）"
+                if orphans:
+                    log.warning(
+                        "reconcile: 修正了 %d 条「父运行已结束却仍为 running」的结果行：%s",
+                        len(orphans),
+                        [r.id for r in orphans][:20],
+                    )
+    except Exception:
+        # 收尾逻辑绝不能反过来搞死主流程（这正是它要修的那类问题）
+        log.exception("could not sweep orphaned running results")
     return finalized
 
 

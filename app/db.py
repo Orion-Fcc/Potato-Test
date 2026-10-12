@@ -88,6 +88,16 @@ _ADDITIVE_COLUMNS: tuple[tuple[str, str, str], ...] = (
     # 状态枚举之外必须有原因，否则一个月后没人知道它为什么被挡住。
     # 默认空串而不是 NULL：调用方不必区分"没填"和"NULL"两种情况。
     ("test_case", "blocked_reason", "TEXT NOT NULL DEFAULT ''"),
+    # 2026-10-12 用例优化提案要带"为什么"的两样证据：相关流程图与账号。
+    # 用户要求「加上相关流程图告诉我为啥要加这个用例或者修改」以及「附上账号」。
+    # 都用 NOT NULL DEFAULT ''：老提案（这两列之前就存在）不必回填，
+    # 空串在界面上显示成"没有图/未指定账号"，比 NULL 少一种分支。
+    ("case_proposal", "mermaid", "TEXT NOT NULL DEFAULT ''"),
+    ("case_proposal", "role", "VARCHAR(120) NOT NULL DEFAULT ''"),
+    # 2026-10-12「只有我能改」的文档（见 models.ProjectDoc.ai_editable）。
+    # ★ 默认 1：老文档（这一列之前就存在）行为不变 —— 它们本来就是 AI 可改的。
+    # 若默认 0，升级之后助手会突然"什么都改不了"，而用户没做任何操作。
+    ("project_doc", "ai_editable", "BOOLEAN NOT NULL DEFAULT 1"),
     # 2026-10-07 需规漂移信号（见 app/spec_drift.py）。落在 run 上而不是 run_result 上，
     # 因为它**不是**某条用例的属性，而是一次执行的结论：这批用例 collectively 断言了
     # 互相矛盾的行为。挂到用例上会让「哪条用例漂移了」看起来像能逐条修，而实际要么是

@@ -43,6 +43,18 @@ _MAX_HEADINGS = 240
 # 每个"重点章节"最多取多少正文（用于角色/规则这类需要细节的部分）。
 _SECTION_CHARS = 3000
 
+# 每节用一组"检索词"去知识库取最相关的**原文片段**（2026-10-13，用户要求
+# 「确保 AI 是依据需规来改文档」）。只喂标题等于只给骨架，正文才给事实 ——
+# 检索片段让模型手里有原文，显著压低"照着标题名编内容"的幻觉。
+_SECTION_QUERY = {
+    "overview": "系统 背景 目标 范围 总体 概述 说明",
+    "modules": "模块 功能 菜单 清单 组成",
+    "flow": "流程 申请 提交 审批 状态 流转 驳回",
+    "roles": "角色 权限 用户 账号 岗位",
+    "rules": "规则 校验 约束 限制 必填 条件",
+    "glossary": "名词 术语 定义 简称",
+}
+
 
 @dataclass
 class OverviewSection:
@@ -58,6 +70,10 @@ class OverviewSection:
     mermaid: str = ""
     # 画不出来时的原因（界面上要如实说明，而不是留一片空白）
     mermaid_error: str = ""
+    # 本节的**依据原文**（从知识库检索到的片段，2026-10-13）。
+    # 不进 as_dict()：它是生成过程的输入，接口不需要回传（回传会撑大响应）。
+    # 用途：`sections_to_html` 拿它做「逐句溯源」。
+    recalled: str = field(default="", repr=False)
 
     def as_dict(self) -> dict:
         return {
@@ -202,7 +218,8 @@ def build_section_prompt(
     ]
     if extra.strip():
         parts.append(
-            f"## 部分章节正文（写 roles/rules 时优先依据这些）\n{extra.strip()[:_SECTION_CHARS]}\n"
+            "## 需规原文片段（**只依据这些原文写**；这是从项目需规里检索出的相关段落）\n"
+            f"{extra.strip()[:_SECTION_CHARS]}\n"
         )
     if key == "flow":
         # 流程这一节要的是 Mermaid 源码，不是 HTML —— 输出格式完全不同
@@ -626,11 +643,71 @@ def sections_to_html(sections: list[OverviewSection], *, with_sources: bool = Tr
                 + "</ul><p><em>这些名称都在下面这段正文里逐字出现过。"
                 "没有列出的部分属于 AI 的综合描述，请你自行核对。</em></p></blockquote>"
             )
+        if with_sources:
+            prov = _provenance_block(s)
+            if prov:
+                parts.append(prov)
     return "\n".join(parts)
 
 
 def _esc(s: str) -> str:
     return (s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+# ---- 逐句溯源（2026-10-13）-------------------------------------------------
+#
+# 用户要求「确保 AI 依据需规改文档、且可验证」。做法：把本节正文拆成句子，
+# 逐句和**喂给模型的原文片段**比字符二元组(bigram)重合度 —— 重合度高 = 这句话的
+# 措辞能在原文里找到 → 有据；低 = 属于 AI 的概括 / 推断，请人工核对。
+#
+# ★ 这是**启发式**，不是逐句证明：模型会改写措辞，改写幅度大就会被判"无据"
+#   （偏保守，宁多报勿漏报）。所以文案如实写"按措辞重合度判断"，绝不写"已证实"。
+_MIN_SENT_CHARS = 12
+_GROUND_RATIO = 0.5
+
+
+def _sentences(html: str) -> list[str]:
+    text = re.sub(r"<[^>]+>", " ", html or "")
+    for a, b in (("&nbsp;", " "), ("&amp;", "&"), ("&lt;", "<"), ("&gt;", ">")):
+        text = text.replace(a, b)
+    return [
+        c.strip()
+        for c in re.split(r"[。！？!?\n；;]+", text)
+        if len(c.strip()) >= _MIN_SENT_CHARS
+    ]
+
+
+def _bigrams(s: str) -> set[str]:
+    t = re.sub(r"\s+", "", s or "")
+    return {t[i : i + 2] for i in range(len(t) - 1)}
+
+
+def _provenance_block(s: "OverviewSection") -> str:
+    """给一节附上「逐句溯源」：多少句在原文里找得到依据、哪些找不到。"""
+    sents = _sentences(s.html)
+    src = _bigrams(s.recalled)
+    if not sents or not src:
+        return ""
+    supported = 0
+    weak: list[str] = []
+    for sent in sents:
+        g = _bigrams(sent)
+        if not g:
+            continue
+        if sum(1 for x in g if x in src) / len(g) >= _GROUND_RATIO:
+            supported += 1
+        else:
+            weak.append(sent)
+    out = [
+        f"<p><strong>溯源（{supported}/{len(sents)} 句在需规原文里找得到依据）</strong></p>",
+        "<p><em>按措辞重合度的启发式判断，不是逐句证明 —— 改写幅度大就会被判为无据，请以原文为准。</em></p>",
+    ]
+    if weak:
+        items = "".join(f"<li>{_esc(x[:120])}</li>" for x in weak[:8])
+        out.append(
+            f"<p>以下 {len(weak)} 句未在原文里找到对应措辞（AI 的概括或推断，请核对）：</p><ul>{items}</ul>"
+        )
+    return "<blockquote>" + "".join(out) + "</blockquote>"
 
 
 # 出处匹配的判据（见 match_sources 的注释）。
@@ -813,6 +890,38 @@ async def sources_for(
     return match_sources(html, headings)
 
 
+async def _recall_text(
+    project_id: int, key: str, *, limit: int = 6, cap: int = _SECTION_CHARS
+) -> str:
+    """从知识库检索与本节相关的**原文片段**，拼成给模型的"依据原文"（2026-10-13）。
+
+    为什么按节检索而不是一次性取固定章节：六节关心的是文档的不同侧面
+    （流程看状态流转、角色看权限、规则看校验），按主题检索才取得到贴题的原文。
+    检索失败只是"少给原文"，**绝不该让生成失败** —— 所以整体 try 住。
+    """
+    from app import knowledge
+
+    q = _SECTION_QUERY.get(key, "")
+    if not q:
+        return ""
+    try:
+        res = await knowledge.search(project_id, q, limit=limit)
+    except Exception as exc:  # noqa: BLE001
+        log.debug("spec_overview: 检索『%s』原文失败：%s", key, exc)
+        return ""
+    parts: list[str] = []
+    used = 0
+    for h in res.get("hits") or []:
+        head = str(h.get("heading") or "").strip()
+        body = str(h.get("text") or "").strip()
+        block = f"### {head}\n{body}" if head else body
+        if used + len(block) > cap:
+            break
+        parts.append(block)
+        used += len(block)
+    return "\n\n".join(parts)
+
+
 async def analyze(project_id: int) -> OverviewResult:
     """读项目知识库 → 产出一份项目概况。**绝不抛异常。**
 
@@ -836,22 +945,8 @@ async def analyze(project_id: int) -> OverviewResult:
             error="这个项目的『需规/资料』还是空的，没有可分析的文档。先上传需规再生成。"
         )
 
-    # 取几段"最可能有角色/规则"的正文：标题里带这些词的优先。
-    extra = ""
-    try:
-        wanted = [
-            h
-            for h in headings
-            if any(k in h for k in ("角色", "权限", "规则", "校验", "约束", "流程", "审批"))
-        ][:6]
-        chunks = []
-        for h in wanted:
-            t = await specgen.section_text(project_id, [h], cap=800)
-            if t:
-                chunks.append(t)
-        extra = "\n\n".join(chunks)
-    except Exception as exc:  # noqa: BLE001 — 这只是增强，拿不到不该让生成失败
-        log.debug("spec_overview: 取重点章节失败：%s", exc)
+    # 每节的"依据原文"在 `one()` 里按主题单独检索（见 `_recall_text`）——
+    # 比"一次性取 6 段固定章节"更贴题：流程图取流程相关片段、角色取权限相关片段。
 
     usage = {"prompt": 0, "completion": 0, "cached": 0, "total": 0, "calls": 0}
     failures: list[str] = []
@@ -868,7 +963,9 @@ async def analyze(project_id: int) -> OverviewResult:
     gate = asyncio.Semaphore(1)
 
     async def one(key: str) -> OverviewSection:
-        user = build_section_prompt(key, headings, intro, extra)
+        # ★ 先按本节主题检索**原文片段**，再让它写（2026-10-13）。
+        recalled = await _recall_text(project_id, key)
+        user = build_section_prompt(key, headings, intro, recalled)
         title = dict((k, t) for k, t, _d in _SECTION_SPECS).get(key, key)
         # ★ 判断"这一节有没有产出"要按节看字段（2026-10-12 实测踩到）：
         # `flow` 这一节的内容在 `mermaid` 里，不在 `html` 里。原来统一判 `sec.html`，
@@ -922,6 +1019,8 @@ async def analyze(project_id: int) -> OverviewResult:
         # 流程图没有正文可摘，所以跳过（流程图的出处就是它自己那张图）。
         if sec.html:
             sec.sources = await sources_for(key, sec.html, headings, gate, usage)
+        # 记下本节依据的原文，供 sections_to_html 做「逐句溯源」
+        sec.recalled = recalled
         return sec
 
     # 并发发出去。六节彼此独立、都要跑模型 —— 串行会让用户等六倍。

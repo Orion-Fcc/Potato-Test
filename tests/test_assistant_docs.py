@@ -369,3 +369,36 @@ def test_empty_attachments_leave_the_message_alone():
     assert _compose_user_message("只有话", None) == "只有话"
     # 解析失败的附件（text 为空）不该在消息里留一个空壳标题
     assert _compose_user_message("只有话", [{"filename": "空的.md", "text": ""}]) == "只有话"
+
+
+# ---------------------------------------------------------------------------
+# C：写文档前强制检索需规 + 审计（2026-10-13）
+# ---------------------------------------------------------------------------
+def test_writing_doc_requires_a_prior_knowledge_search(client):
+    """★ 有需规时，助手写项目文档前**必须**先 search_knowledge，否则拒绝。
+
+    用户要求「确保 AI 依据需规来改文档」—— 凭印象写出来的文档读着很顺、却没依据。
+    """
+    import asyncio
+
+    from app.assistant import _run_tool, _write_project_doc
+
+    pid = client.post("/api/projects", json={"name": "assist-ground"}).json()["id"]
+    # 知识库非空（= 项目有需规）
+    client.put(
+        f"/api/projects/{pid}/knowledge", json={"text": "# 规则\n\n同一范围不能配两条。"}
+    )
+
+    # 没检索过 → 拒绝
+    blocked = asyncio.run(_write_project_doc(pid, {"kind": "overview", "markdown": "凭印象写"}, {}))
+    assert blocked.get("blocked_by") == "no_prior_search_knowledge", blocked
+
+    # 先检索（走真实工具分发，ctx 会被置位）→ 再写 → 通过，并回一条审计依据
+    ctx: dict = {}
+    asyncio.run(_run_tool("search_knowledge", {"query": "规则"}, pid, ctx))
+    assert ctx.get("searched") is True
+    ok = asyncio.run(
+        _write_project_doc(pid, {"kind": "overview", "markdown": "## 有据\n\n依据需规写的。"}, ctx)
+    )
+    assert ok.get("ok") is True, ok
+    assert isinstance(ok.get("based_on"), list)

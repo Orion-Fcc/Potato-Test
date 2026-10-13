@@ -845,6 +845,45 @@ def test_replace_flag_overwrites(client, monkeypatch):
     assert "旧内容" not in html
 
 
+# ---------------------------------------------------------------------------
+# A/B：检索式 grounding + 逐句溯源（2026-10-13，用户「确保 AI 依据需规」）
+# ---------------------------------------------------------------------------
+def test_recalled_source_is_fed_into_the_prompt():
+    """A：每节的提示词要带**检索到的原文片段**，而不只是标题清单。"""
+    from app.spec_overview import build_section_prompt
+
+    p = build_section_prompt(
+        "rules", ["甲", "乙"], "这是需规开头", "### 甲-规则\n同一范围不能配两条。"
+    )
+    assert "同一范围不能配两条" in p, "检索到的原文没进提示词"
+    assert "只依据这些原文写" in p
+
+
+def test_provenance_flags_sentences_with_no_source():
+    """B：逐句溯源 —— 有据的句子 vs 找不到依据的句子都要能被标出来。"""
+    from app.spec_overview import OverviewSection, sections_to_html
+
+    sec = OverviewSection("rules", "规则", "")
+    sec.recalled = "同一个资源范围不能重复配置审批人。"
+    sec.html = (
+        "<p>同一个资源范围不能重复配置审批人，所以提交时要校验。</p>"
+        "<p>系统通常还会自动发短信通知相关角色，属于凭空推断的一句。</p>"
+    )
+    html = sections_to_html([sec])
+    assert "溯源" in html
+    assert "在需规原文里找得到依据" in html
+    assert "凭空推断" in html, "找不到依据的句子没被标出来"
+
+
+def test_recalled_is_not_leaked_into_the_api_dict():
+    """recalled 是生成过程的输入，不该进 as_dict()（会把接口响应撑大）。"""
+    from app.spec_overview import OverviewSection
+
+    sec = OverviewSection("x", "t", "<p>a</p>", [])
+    sec.recalled = "一大堆原文"
+    assert "recalled" not in sec.as_dict()
+
+
 def test_image_upload_rejects_non_images(client):
     """上传端点会把文件存到公开可读路径，所以"任意文件"等于开了个静态托管。"""
     c = client

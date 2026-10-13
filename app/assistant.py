@@ -1227,8 +1227,14 @@ async def _case_scope_error(case_id: Any, pid: int, verb: str) -> dict | None:
     return None
 
 
-async def _run_tool(name: str, args: dict, pid: int) -> dict:
-    """Execute one tool call against Potato Test's own REST API."""
+async def _run_tool(name: str, args: dict, pid: int, ctx: dict | None = None) -> dict:
+    """Execute one tool call against Potato Test's own REST API.
+
+    `ctx` 是**本轮**的共享状态（2026-10-13）：记"这一轮检索过需规没有"，
+    供 `write_project_doc` 强制"先查再写"。工具是顺序执行的，所以同一轮里
+    前一个工具写进去的值，后一个工具读得到。
+    """
+    ctx = ctx if ctx is not None else {}
     if name == "potato-test_api":
         method = str(args.get("method", "GET")).upper()
         path = str(args.get("path", "")).strip()
@@ -1414,6 +1420,8 @@ async def _run_tool(name: str, args: dict, pid: int) -> dict:
     if name == "search_knowledge":
         query = str(args.get("query", ""))
         res = await _knowledge_search(pid, query)
+        if res.get("hits"):
+            ctx["searched"] = True  # 本轮检索过需规 → 允许写文档
         if not res.get("total_blocks"):
             return {
                 "error": "该项目还没上传『需规/资料』。请在助手页右侧的『需规 / 资料』里粘贴或上传，再让我检索。",
@@ -1526,7 +1534,7 @@ async def _run_tool(name: str, args: dict, pid: int) -> dict:
     if name == "read_project_docs":
         return await _read_project_docs(pid, args)
     if name == "write_project_doc":
-        return await _write_project_doc(pid, args)
+        return await _write_project_doc(pid, args, ctx)
     if name == "list_tools":
         return _describe_tools(args.get("query"))
     if name == "list_files":
@@ -2263,22 +2271,28 @@ async def _read_project_docs(pid: int, args: dict) -> dict:
     return out
 
 
-async def _write_project_doc(pid: int, args: dict) -> dict:
+async def _write_project_doc(pid: int, args: dict, ctx: dict | None = None) -> dict:
     """往项目文档里写（2026-10-12）。
 
     用户要「助手自己新建文件到项目总览里面」。
 
     写进的就是 `ProjectDoc` —— **和人在「项目文档」页里编辑的是同一张表**，
     所以助手写的东西用户能直接接着改。这正是我们要的分工：助手起稿，人定稿。
+
+    ★ 2026-10-13：写之前强制"先检索需规"（用户要求「确保 AI 依据需规来改文档」）。
+    本项目**有**需规/资料、而本轮又没调用过 `search_knowledge` 时，直接拒绝并
+    告诉它先检索 —— 否则模型会凭印象写，写完读起来很顺、却没有任何依据。
     """
     from sqlalchemy import select
 
+    from app import knowledge as kb
     from app.db import db_session
     from app.doc_sanitize import sanitize
     from app.doc_tools import KINDS, default_title
     from app.md_html import markdown_to_html
     from app.models import ProjectDoc, _utcnow
 
+    ctx = ctx or {}
     kind = str(args.get("kind") or "").strip()
     if kind not in KINDS:
         return {"error": f"kind 必须是 {KINDS} 之一", "got": kind}
@@ -2288,6 +2302,18 @@ async def _write_project_doc(pid: int, args: dict) -> dict:
     mode = str(args.get("mode") or "append").strip().lower()
     if mode not in ("append", "replace"):
         return {"error": "mode 只能是 append 或 replace"}
+
+    # ★ 强制"先查需规再写"（只在本项目确实有需规/资料时才强制 —— 没资料时强制没意义）。
+    async with db_session() as s:
+        has_kb = bool((await kb.stats(s, pid)).get("chunks"))
+    if has_kb and not ctx.get("searched"):
+        return {
+            "error": (
+                "写项目文档前必须先用 `search_knowledge` 检索本项目的『需规/资料』，"
+                "确认要写的内容在需规里有依据。请先用相关关键词检索，再重新调用 write_project_doc。"
+            ),
+            "blocked_by": "no_prior_search_knowledge",
+        }
 
     html = sanitize(markdown_to_html(md))
     if not html.strip():
@@ -2336,6 +2362,9 @@ async def _write_project_doc(pid: int, args: dict) -> dict:
         await s.flush()
         after = len(row.html or "")
 
+    # 审计 + 依据：记下"什么时间、写哪份、依据了哪些原文片段"（2026-10-13）。
+    based_on = await _record_doc_write_audit(pid, kind, title, md, mode)
+
     return {
         "ok": True,
         "kind": kind,
@@ -2343,12 +2372,60 @@ async def _write_project_doc(pid: int, args: dict) -> dict:
         "mode": mode,
         "before_chars": before,
         "after_chars": after,
+        "based_on": based_on[:10],
         "page": f"/projects/{pid}/docs",
         "note": (
             "已写入项目文档，用户在「项目文档」页能看到并继续编辑。"
-            "告诉用户写进了哪一份、是追加还是覆盖。"
+            + (f"本次依据了需规里的：{'、'.join(based_on[:5])}。" if based_on else "")
+            + "告诉用户写进了哪一份、是追加还是覆盖。"
         ),
     }
+
+
+async def _record_doc_write_audit(
+    pid: int, kind: str, title: str, md: str, mode: str
+) -> list[str]:
+    """记一条"助手写项目文档"的审计，返回依据的原文片段标题（2026-10-13）。
+
+    "确保依据需规"的**事后凭证**：以后能查"这份文档是哪一次、依据哪些片段写的"。
+    落盘失败只是少一条审计，绝不该让写入失败。"""
+    import json as _json
+
+    from app import knowledge
+    from app.db import db_session
+    from app.models import _utcnow
+    from app.settings_store import get_setting, set_setting
+
+    try:
+        res = await knowledge.search(pid, f"{title} {md[:200]}", limit=6)
+        heads = [str(h.get("heading") or "").strip() for h in (res.get("hits") or [])]
+    except Exception as exc:  # noqa: BLE001
+        log.debug("assistant: 写文档审计检索失败：%s", exc)
+        heads = []
+    heads = [h for h in heads if h]
+    entry = {
+        "at": _utcnow().isoformat(),
+        "kind": kind,
+        "title": title,
+        "mode": mode,
+        "chars": len(md),
+        "based_on": heads[:10],
+    }
+    key = f"doc_write_audit_{pid}"
+    try:
+        async with db_session() as s:
+            raw = await get_setting(s, key)
+            try:
+                rows = _json.loads(raw) if raw else []
+            except Exception:  # noqa: BLE001
+                rows = []
+            if not isinstance(rows, list):
+                rows = []
+            rows.append(entry)
+            await set_setting(s, key, _json.dumps(rows[-50:], ensure_ascii=False), secret=False)
+    except Exception as exc:  # noqa: BLE001
+        log.debug("assistant: 写文档审计落盘失败：%s", exc)
+    return heads
 
 
 async def _list_documents(pid: int) -> dict:
@@ -2650,6 +2727,8 @@ async def assistant_turn(
     use_tools = True
     reply = ""
     calls_made = 0
+    # 本轮共享状态：write_project_doc 靠它判断"这一轮检索过需规没有"（2026-10-13）。
+    turn_ctx: dict = {}
 
     # 工具循环用的工具 schema 是 OpenAI 形状（function/tool_calls）。换成非 OpenAI 协议的
     # 厂商（Claude / Gemini）时，这条路径整条不可用 —— 那就**明确降级**成一次性回答，
@@ -2731,7 +2810,7 @@ async def assistant_turn(
             except Exception:
                 args = {}
             calls_made += 1
-            result = await _run_tool(tc.function.name, args, pid)
+            result = await _run_tool(tc.function.name, args, pid, turn_ctx)
             actions.append({"tool": tc.function.name, "args": args, "ok": "error" not in result})
             messages.append({"role": "tool", "tool_call_id": tc.id, "content": _dump(result)})
             # ★ ask_user 要**中断本轮**（2026-10-09）。

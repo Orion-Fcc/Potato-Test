@@ -351,8 +351,6 @@ export function DocsPage() {
       <SpecSourcePanel
         pid={pid}
         formats={formats}
-        sources={docs.filter((d) => d.kind === "spec_source")}
-        onSelect={setActive}
         onUploaded={() => {
           /* 知识库更新不影响文档列表 */
         }}

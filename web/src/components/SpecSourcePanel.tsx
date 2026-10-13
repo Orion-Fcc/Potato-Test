@@ -3,10 +3,8 @@ import {
   BookOpen,
   ChevronDown,
   ChevronRight,
-  FileText,
   FileUp,
   Loader2,
-  Lock,
   Upload,
 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -35,8 +33,6 @@ export function SpecSourcePanel({
   onUploaded,
   formats: formatsProp,
   onDocCreated,
-  sources,
-  onSelect,
 }: {
   pid: number;
   onUploaded?: () => void;
@@ -46,11 +42,6 @@ export function SpecSourcePanel({
   formats?: KnowledgeFormats | null;
   /** 上传同时生成了一份文档 → 通知父组件刷新列表并切过去。 */
   onDocCreated?: (doc: ProjectDoc) => void;
-  /** 已上传的资料原文（`spec_source` 文档）。父组件传入用于在下方列出"传了哪些" ——
-   *  必须由父组件给，不能这里再拉一次：父组件刚刷新过列表，两处各拉会不一致。 */
-  sources?: ProjectDoc[];
-  /** 点清单里的某个文件 → 切到它（由父组件 setActive）。 */
-  onSelect?: (doc: ProjectDoc) => void;
 }) {
   const { t } = useTranslation();
   const fail = useErrorToast();
@@ -196,28 +187,6 @@ export function SpecSourcePanel({
           </Button>
         </div>
       </div>
-
-      {/* 已上传的资料原文清单（2026-10-13，用户问「下面为啥没有我上传的需归」）。
-          上传框以前只显示汇总（字符数·段数）、不列文件名 —— 用户看不到自己传了什么，
-          而上传原件又被并进左侧文档列表，于是"下面"像是什么都没有。
-          这里逐条列出（文件名 + 是否被锁），点一下切到那份文档。 */}
-      {sources && sources.length > 0 && (
-        <div className="mt-2 space-y-0.5 border-t border-[var(--line)] pt-2">
-          <div className="text-[11px] text-ink-500">{t("已上传 {{n}} 个文件", { n: sources.length })}</div>
-          {sources.map((d) => (
-            <button
-              key={d.id}
-              onClick={() => onSelect?.(d)}
-              className="flex w-full items-center gap-1.5 rounded px-1 py-1 text-left text-[11.5px] text-ink-700 hover:bg-[var(--panel2)]"
-              title={d.title}
-            >
-              <FileText className="h-3 w-3 shrink-0 text-ink-400" />
-              <span className="min-w-0 flex-1 truncate">{d.title}</span>
-              {!d.ai_editable && <Lock className="h-3 w-3 shrink-0 text-[var(--warn-fg)]" />}
-            </button>
-          ))}
-        </div>
-      )}
 
       {/* 支持哪些格式：默认收起，但**一定要有** —— 用户会问"我的 .doc 能不能传" */}
       {formats && (

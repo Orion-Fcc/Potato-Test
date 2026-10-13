@@ -884,6 +884,24 @@ def test_recalled_is_not_leaked_into_the_api_dict():
     assert "recalled" not in sec.as_dict()
 
 
+def test_section_prompt_stays_under_the_gateway_limit():
+    """★ 每节的提示词必须留在网关的字符上限内（约 4.5~5k）。
+
+    否则 `specgen._call_json` 会"截尾重试"（缩到 70% / 45%），把**排在尾部的
+    「需规原文片段」和输出格式说明整块截掉** —— 等于"喂了原文却没到模型手上"。
+    2026-10-13 实测：586 标题的需规下原提示词 8486 字符，缩到 45% 后检索原文全没了。
+    """
+    from app.spec_overview import build_section_prompt
+
+    headings = [f"模块{i}-需求说明{i}" for i in range(586)]
+    intro = "背景与范围说明内容。" * 40
+    recalled = "这是从需规检索出来的原文片段内容。" * 200  # 远超上限
+    for key in ("overview", "flow", "rules", "glossary"):
+        p = build_section_prompt(key, headings, intro, recalled)
+        assert len(p) <= 4500, f"{key} 的提示词 {len(p)} 字符，超过网关上界"
+        assert "只依据这些原文写" in p, f"{key} 的检索原文被标题清单挤掉了"
+
+
 def test_image_upload_rejects_non_images(client):
     """上传端点会把文件存到公开可读路径，所以"任意文件"等于开了个静态托管。"""
     c = client

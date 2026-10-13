@@ -880,6 +880,8 @@ export interface AnalyzeDocsResult {
   /** AI 实际看了多少个章节标题、多少字符的正文 —— 让用户知道"它看了多少"。 */
   headings_used?: number;
   doc_chars?: number;
+  /** 本轮真正喂给模型的**需规原文**合计字数（各节检索片段之和）。 */
+  recalled_chars?: number;
   /** true = 追加在原有内容后面（没覆盖用户改过的部分）。 */
   appended?: boolean;
 }

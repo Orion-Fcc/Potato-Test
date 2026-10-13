@@ -283,9 +283,9 @@ export function DocsPage() {
         setDirty(false);
       }
       const n = r.headings_used ?? 0;
-      const c = r.doc_chars ?? 0;
+      const c = r.recalled_chars ?? 0;
       setGenInfo(
-        t("AI 读了 {{n}} 个章节标题、{{c}} 字正文，产出 {{s}} 节。", {
+        t("AI 读了 {{n}} 个章节标题、{{c}} 字需规原文，产出 {{s}} 节。", {
           n,
           c,
           s: r.sections?.length ?? 0,

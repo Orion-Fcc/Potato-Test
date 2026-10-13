@@ -35,13 +35,23 @@ log = logging.getLogger("potato-test.spec_overview")
 # 先给文档开头（判领域）+ 全部标题清单（骨架），再让模型按需索取。
 # 为什么不把正文全塞进去：46 万字 ≈ 30 万 token，一次调用就爆了，而且绝大部分是细节，
 # 概览用不到。**标题就是骨架**，这正是"截取"的关键手段。
-_MAX_INTRO_CHARS = 1500
+# ★ 这几个上限是按**网关约束反推**的，不是随便定的（2026-10-13 重算）。
+#
+# 这个网关 user 提示词超过约 4.5~5k 字符就返回**空回复**（见 specgen._call_json），
+# 而它的兜底是"截尾重试"（缩到 70% / 45%）—— 提示词一超限，**排在尾部的
+# 「需规原文片段」和输出格式说明会被直接截掉**。
+# 实测（586 标题的需规）：原来的 intro1500 + 标题清单240条 + 原文3000 = **8486 字符**，
+# 缩到 45% 后检索原文整块消失 —— 等于"喂了原文，却没到模型手上"。
+# 所以整条提示词必须压到 ≤ ~4200 字符；下面几个上限就是按这个总额分配的。
+_MAX_INTRO_CHARS = 400  # 「这是什么系统」用不着 1500 字，400 够判断领域
 
 # 一次生成里最多引用多少个章节标题（给模型当骨架看）。
 _MAX_HEADINGS = 240
+# 标题清单的**字符**上限（光限条数挡不住长标题）。清单只是骨架，不该挤掉原文。
+_MAX_LISTING_CHARS = 1000
 
-# 每个"重点章节"最多取多少正文（用于角色/规则这类需要细节的部分）。
-_SECTION_CHARS = 3000
+# 检索到的"需规原文片段"最多多少字 —— 这才是模型真正要依据的内容。
+_SECTION_CHARS = 1800
 
 # 每节用一组"检索词"去知识库取最相关的**原文片段**（2026-10-13，用户要求
 # 「确保 AI 是依据需规来改文档」）。只喂标题等于只给骨架，正文才给事实 ——
@@ -94,6 +104,9 @@ class OverviewResult:
     # 用了多少标题、文档多少字符 —— 让用户知道"AI 到底看了多少"
     headings_used: int = 0
     doc_chars: int = 0
+    # 本轮**真正喂给模型的需规原文**合计多少字（各节检索片段之和，2026-10-13）。
+    # 这才是"AI 读了多少正文"的诚实数字 —— doc_chars 只是那 400 字的开头。
+    recalled_chars: int = 0
 
 
 _PLAN_SYSTEM = """你是资深需求分析师。用户会给你一份软件项目的需求文档（可能只是片段）
@@ -207,7 +220,11 @@ def build_section_prompt(
     used = hs[:_MAX_HEADINGS]
     listing = "\n".join(f"{i + 1}. {h}" for i, h in enumerate(used))
     more = ""
-    if len(hs) > len(used):
+    if len(listing) > _MAX_LISTING_CHARS:
+        # 按行截，别把最后一条标题截成半截。
+        listing = listing[:_MAX_LISTING_CHARS].rsplit("\n", 1)[0]
+        more = f"\n（标题清单过长，这里只列了开头一部分，共 {len(hs)} 个标题。）"
+    elif len(hs) > len(used):
         more = f"\n（清单过长，这里只列了前 {len(used)} 个，共 {len(hs)} 个标题。）"
     task = next((d for k, _t, d in _SECTION_SPECS if k == key), "")
     parts = [
@@ -562,7 +579,11 @@ def build_plan_prompt(headings: list[str], intro: str, extra: str = "") -> str:
     used = hs[:_MAX_HEADINGS]
     listing = "\n".join(f"{i + 1}. {h}" for i, h in enumerate(used))
     more = ""
-    if len(hs) > len(used):
+    if len(listing) > _MAX_LISTING_CHARS:
+        # 按行截，别把最后一条标题截成半截。
+        listing = listing[:_MAX_LISTING_CHARS].rsplit("\n", 1)[0]
+        more = f"\n（标题清单过长，这里只列了开头一部分，共 {len(hs)} 个标题。）"
+    elif len(hs) > len(used):
         more = f"\n（清单过长，这里只列了前 {len(used)} 个，共 {len(hs)} 个标题。）"
     parts = [
         f"## 文档开头（判断这是什么系统）\n{(intro or '').strip()[:_MAX_INTRO_CHARS]}\n",
@@ -1042,4 +1063,5 @@ async def analyze(project_id: int) -> OverviewResult:
         error=("部分章节生成失败：" + "；".join(failures)) if failures else "",
         headings_used=min(len(headings), _MAX_HEADINGS),
         doc_chars=len(intro),
+        recalled_chars=sum(len(s.recalled or "") for s in sections),
     )

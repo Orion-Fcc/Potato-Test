@@ -2082,6 +2082,7 @@ async def analyze_project_docs(pid: int, request: Request, body: dict | None = N
         "usage": res.usage or None,
         "headings_used": res.headings_used,
         "doc_chars": res.doc_chars,
+        "recalled_chars": res.recalled_chars,
         "appended": appended,
     }
 

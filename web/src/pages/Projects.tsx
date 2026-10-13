@@ -1,5 +1,14 @@
-import { ArrowRight, ChevronDown, ChevronRight, FolderOpen, Pencil, Plus, Trash2 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import {
+  ArrowRight,
+  ChevronDown,
+  ChevronRight,
+  FolderOpen,
+  MoreHorizontal,
+  Pencil,
+  Plus,
+  Trash2,
+} from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Link } from "react-router-dom";
 import { api, relTime, type Project, type ProjectGroup } from "../lib/api";
@@ -12,6 +21,85 @@ import { useToast, useErrorToast } from "../components/toast";
 
 /** Edit-only draft. Creating a project goes through NewProjectWizard. */
 type Draft = { id: number; name: string; base_url: string; group_id: number | null };
+
+/**
+ * 大系统右上角的「⋯」菜单（2026-10-13）。
+ *
+ * 原来"改名 / 共享需规 / 删除"是三个并排的小按钮，其中两个是图标、一个是文字，
+ * 形态不统一、要 hover 才明显。收进一个菜单后：入口只有一个、三个动作形态一致。
+ */
+function GroupMenu({
+  onRename,
+  onKnowledge,
+  onDelete,
+}: {
+  onRename: () => void;
+  onKnowledge: () => void;
+  onDelete: () => void;
+}) {
+  const { t } = useTranslation();
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && setOpen(false);
+    document.addEventListener("mousedown", onDoc);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDoc);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+  const item =
+    "flex w-full items-center rounded-md px-2.5 py-1.5 text-left text-[12.5px] text-ink-700 outline-none hover:bg-[var(--panel2)]";
+  return (
+    <div ref={ref} className="relative">
+      <button
+        onClick={() => setOpen((o) => !o)}
+        aria-label={t("更多")}
+        title={t("更多")}
+        aria-expanded={open}
+        className="rounded-md p-1.5 text-ink-400 outline-none transition-colors hover:bg-[var(--panel)] hover:text-ink-900"
+      >
+        <MoreHorizontal className="h-4 w-4" />
+      </button>
+      {open && (
+        <div className="absolute right-0 top-full z-20 mt-1 w-40 overflow-hidden rounded-lg border border-[var(--line)] bg-[var(--panel)] p-1 shadow-xl">
+          <button
+            className={item}
+            onClick={() => {
+              setOpen(false);
+              onRename();
+            }}
+          >
+            {t("改名")}
+          </button>
+          <button
+            className={item}
+            onClick={() => {
+              setOpen(false);
+              onKnowledge();
+            }}
+          >
+            {t("共享需规")}
+          </button>
+          <button
+            className={item + " text-[var(--bad-fg)]"}
+            onClick={() => {
+              setOpen(false);
+              onDelete();
+            }}
+          >
+            {t("删除")}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
 
 export function Projects() {
   const { t } = useTranslation();
@@ -256,18 +344,6 @@ export function Projects() {
     );
   };
 
-  const newProjectTile = (
-    <button
-      onClick={() => setWizard(true)}
-      className="grid min-h-[176px] place-items-center rounded-[var(--radius)] border border-dashed border-[var(--line-strong)] text-[13px] text-ink-500 outline-none transition-[border-color,color,background-color] hover:border-brand-200 hover:bg-brand-50/40 hover:text-brand-700"
-    >
-      <span className="flex items-center gap-1.5 font-medium">
-        <Plus className="h-4 w-4" />
-        {t("New project")}
-      </span>
-    </button>
-  );
-
   return (
     <div className="space-y-6">
       <PageHeader
@@ -277,12 +353,13 @@ export function Projects() {
           "Potato Test runs your natural-language test cases in a real browser. Pick a project to begin.",
         )}
         actions={
-          <>
+          // 三个控件收成**一组**（2026-10-13）：原来搜索框和两个按钮散在一行、间距不均。
+          <div className="flex items-center gap-2">
             <Input
               value={q}
               onChange={(e) => setQ(e.target.value)}
               placeholder={t("Search projects")}
-              className="w-56"
+              className="w-52"
             />
             <Button variant="outline" onClick={() => setGroupDraft({ id: null, name: "" })}>
               <FolderOpen className="h-4 w-4" />
@@ -292,7 +369,7 @@ export function Projects() {
               <Plus className="h-4 w-4" />
               {t("New project")}
             </Button>
-          </>
+          </div>
         }
       />
 
@@ -316,63 +393,56 @@ export function Projects() {
           </div>
         </Card>
       ) : (
-        <div className="space-y-7">
-          {/* 每个「大系统」一节：标题 + 它的项目 + 空的空态 */}
+        <div className="space-y-5">
+          {/* 每个「大系统」= 一个**区块**（2026-10-13 重做）：原来分组标题只比卡片名大一点点，
+              而页面大标题却很重 —— 层级是反的。现在整组包进一块带边框的区块，"组"才是主结构。 */}
           {groups.map((g) => {
             const ps = byGroup.get(g.id) ?? [];
             const off = collapsedGroups.has(g.id);
             return (
-              <section key={g.id} className="space-y-3">
-                <div className="flex flex-wrap items-center gap-2 border-b border-[var(--line)] pb-2">
+              <section
+                key={g.id}
+                className="rounded-[var(--radius)] border border-[var(--line)] bg-[color-mix(in_oklch,var(--panel2)_38%,transparent)] p-3.5"
+              >
+                <div className="mb-3 flex items-center gap-2">
                   {/* 点标题收起/展开这一组（2026-10-13 用户要求）。 */}
                   <button
                     onClick={() => toggleGroup(g.id)}
                     title={off ? t("展开") : t("收起")}
                     aria-expanded={!off}
-                    className="flex min-w-0 items-center gap-1.5 text-left outline-none"
+                    className="flex min-w-0 items-center gap-2 text-left outline-none"
                   >
                     {off ? (
-                      <ChevronRight className="h-3.5 w-3.5 shrink-0 text-ink-400" />
+                      <ChevronRight className="h-4 w-4 shrink-0 text-ink-400" />
                     ) : (
-                      <ChevronDown className="h-3.5 w-3.5 shrink-0 text-ink-400" />
+                      <ChevronDown className="h-4 w-4 shrink-0 text-ink-400" />
                     )}
                     <FolderOpen className="h-4 w-4 shrink-0 text-brand-600" />
-                    <h2 className="truncate text-[15px] font-semibold text-ink-900">{g.name}</h2>
-                    <span className="shrink-0 text-[11.5px] text-ink-400">
+                    <h2 className="truncate text-[15px] font-semibold tracking-tight text-ink-900">
+                      {g.name}
+                    </h2>
+                    <span className="shrink-0 rounded-full bg-[var(--panel)] px-2 py-0.5 text-[11px] text-ink-500">
                       {t("{{n}} 个项目", { n: g.projects })}
-                      {g.knowledge.chars > 0
-                        ? " · " + t("共享需规 {{c}} 字", { c: g.knowledge.chars })
-                        : ""}
                     </span>
+                    {g.knowledge.chars > 0 && (
+                      <span className="shrink-0 text-[11px] text-ink-400">
+                        {t("共享需规 {{c}} 字", { c: g.knowledge.chars })}
+                      </span>
+                    )}
                   </button>
-                  <div className="ml-auto flex items-center gap-1">
-                    <button
-                      onClick={() => setGroupDraft({ id: g.id, name: g.name })}
-                      className="rounded-md p-1.5 text-ink-400 transition-colors hover:bg-[var(--panel2)] hover:text-ink-900"
-                      title={t("改名")}
-                    >
-                      <Pencil className="h-3.5 w-3.5" />
-                    </button>
-                    <button
-                      onClick={() => openKb(g)}
-                      className="rounded-md px-2 py-1 text-[11.5px] text-ink-500 transition-colors hover:bg-[var(--panel2)] hover:text-ink-900"
-                    >
-                      {t("共享需规")}
-                    </button>
-                    <button
-                      onClick={() => setConfirmDelGroup(g)}
-                      className="rounded-md p-1.5 text-ink-400 transition-colors hover:bg-[var(--bad-bg)] hover:text-[var(--bad-fg)]"
-                      title={t("删除")}
-                    >
-                      <Trash2 className="h-3.5 w-3.5" />
-                    </button>
+                  <div className="ml-auto shrink-0">
+                    <GroupMenu
+                      onRename={() => setGroupDraft({ id: g.id, name: g.name })}
+                      onKnowledge={() => openKb(g)}
+                      onDelete={() => setConfirmDelGroup(g)}
+                    />
                   </div>
                 </div>
                 {!off && (
-                  <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                  <div className="grid gap-3.5 sm:grid-cols-2 lg:grid-cols-3">
                     {ps.map(renderCard)}
                     {ps.length === 0 && (
-                      <div className="grid min-h-[80px] place-items-center rounded-[var(--radius)] border border-dashed border-[var(--line)] px-4 text-center text-[12px] text-ink-400">
+                      <div className="grid min-h-[80px] place-items-center rounded-[var(--radius)] border border-dashed border-[var(--line-strong)] px-4 text-center text-[12px] text-ink-400">
                         {t("还没有项目归到它下面 —— 在项目的「Edit」里选「所属大系统」。")}
                       </div>
                     )}
@@ -382,19 +452,32 @@ export function Projects() {
             );
           })}
 
-          {/* 未归类：不在任何大系统下的项目（含全部项目都在大系统下时的新建入口） */}
-          <section className="space-y-3">
-            {groups.length > 0 && (
-              <div className="flex items-center gap-2 border-b border-[var(--line)] pb-2">
-                <h2 className="text-[13px] font-semibold text-ink-500">{t("未归类")}</h2>
-                <span className="text-[11.5px] text-ink-400">{t("{{n}} 个项目", { n: ungrouped.length })}</span>
+          {/* 未归类：**为空时整节不渲染**（2026-10-13）。原来"0 个项目"的空标题 + 一个大虚线
+              框纯属噪音；而且把"新建项目"放在它下面，语义上是错的 —— 新建项目不归任何组。 */}
+          {ungrouped.length > 0 && (
+            <section className="space-y-3">
+              {groups.length > 0 && (
+                <div className="flex items-center gap-2 border-b border-[var(--line)] pb-2">
+                  <h2 className="text-[13px] font-semibold text-ink-500">{t("未归类")}</h2>
+                  <span className="text-[11.5px] text-ink-400">
+                    {t("{{n}} 个项目", { n: ungrouped.length })}
+                  </span>
+                </div>
+              )}
+              <div className="grid gap-3.5 sm:grid-cols-2 lg:grid-cols-3">
+                {ungrouped.map(renderCard)}
               </div>
-            )}
-            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-              {ungrouped.map(renderCard)}
-              {newProjectTile}
-            </div>
-          </section>
+            </section>
+          )}
+
+          {/* 「新建项目」是**全局动作**，不属于任何一组 —— 单独一条，别再塞进"未归类"里。 */}
+          <button
+            onClick={() => setWizard(true)}
+            className="flex w-full items-center justify-center gap-1.5 rounded-[var(--radius)] border border-dashed border-[var(--line-strong)] py-3 text-[13px] text-ink-500 outline-none transition-[border-color,color,background-color] hover:border-brand-200 hover:bg-brand-50/40 hover:text-brand-700"
+          >
+            <Plus className="h-4 w-4" />
+            {t("New project")}
+          </button>
         </div>
       )}
 

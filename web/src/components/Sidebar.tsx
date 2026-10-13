@@ -22,7 +22,7 @@ import {
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Link, useNavigate } from "react-router-dom";
-import type { AuthUser, Project } from "../lib/api";
+import type { AuthUser, Project, ProjectGroup } from "../lib/api";
 import { setLang } from "../i18n";
 import { useAuth } from "../lib/auth";
 import { ChangePasswordModal } from "./ChangePasswordModal";
@@ -268,14 +268,36 @@ function AccountMenu({ user, collapsed }: { user: AuthUser; collapsed: boolean }
   );
 }
 
+/** 侧栏里的一个项目条目（比 `Item` 少一个图标，靠小圆点区分）。 */
+function ProjectLink({ to, label, collapsed }: { to: string; label: string; collapsed: boolean }) {
+  return (
+    <Link
+      to={to}
+      title={collapsed ? label : undefined}
+      className={clsx(
+        "group flex items-center gap-2.5 rounded-lg py-1.5 text-[13px] outline-none transition-[background-color,color] duration-150",
+        collapsed ? "justify-center px-0" : "pl-4 pr-2.5",
+        "text-ink-700 hover:bg-[color-mix(in_oklch,var(--panel2)_85%,transparent)] hover:text-ink-900",
+      )}
+    >
+      <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-ink-300 group-hover:bg-brand-500" />
+      {!collapsed && <span className="truncate">{label}</span>}
+    </Link>
+  );
+}
+
+
 export function Sidebar({
   projects,
+  groups,
   pid,
   section,
   onSearch,
   collapsed = false,
 }: {
   projects: Project[];
+  /** 「大系统」（2026-10-13）：没选项目时侧栏按它分组列项目，不再平铺一列。 */
+  groups: ProjectGroup[];
   pid: number | null;
   section: string | null;
   onSearch: () => void;
@@ -336,6 +358,54 @@ export function Sidebar({
         {pid == null ? (
           <>
             <Item to="/" active Icon={LayoutGrid} label={t("Projects")} collapsed={collapsed} />
+            {/* 大系统分组后的项目树（2026-10-13）。没选项目时才显示 —— 进了某个项目之后
+                这块侧栏是"这个项目的导航"，再塞一份项目列表只会碍事。折叠态不显示
+                （图标栏里放不下分组）。 */}
+            {!collapsed &&
+              projects.length > 0 &&
+              (() => {
+                const ungrouped = projects.filter((p) => !p.group_id);
+                const known = groups.filter((g) => projects.some((p) => p.group_id === g.id));
+                if (!known.length && !ungrouped.length) return null;
+                return (
+                  <div className="mt-4">
+                    {known.map((g) => (
+                      <div key={g.id} className="mb-2.5">
+                        <div className="tp-nav-label truncate px-2 pb-1" title={g.name}>
+                          {g.name}
+                        </div>
+                        <div className="space-y-0.5">
+                          {projects
+                            .filter((p) => p.group_id === g.id)
+                            .map((p) => (
+                              <ProjectLink
+                                key={p.id}
+                                to={`/projects/${p.id}/overview`}
+                                label={p.name}
+                                collapsed={collapsed}
+                              />
+                            ))}
+                        </div>
+                      </div>
+                    ))}
+                    {ungrouped.length > 0 && (
+                      <div className="mb-2.5">
+                        <div className="tp-nav-label px-2 pb-1">{t("未归类")}</div>
+                        <div className="space-y-0.5">
+                          {ungrouped.map((p) => (
+                            <ProjectLink
+                              key={p.id}
+                              to={`/projects/${p.id}/overview`}
+                              label={p.name}
+                              collapsed={collapsed}
+                            />
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
             {isAdmin && (
               <>
                 {!collapsed && (

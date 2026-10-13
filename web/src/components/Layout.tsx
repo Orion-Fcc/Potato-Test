@@ -2,7 +2,7 @@ import { ChevronRight, PanelLeft } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Outlet, useLocation, useNavigate, useParams } from "react-router-dom";
-import { api, type Project } from "../lib/api";
+import { api, type Project, type ProjectGroup } from "../lib/api";
 import { useOnboarding } from "../lib/useOnboarding";
 import { OnboardingFlow } from "./onboarding/OnboardingFlow";
 import { CommandPalette } from "./CommandPalette";
@@ -28,12 +28,20 @@ export function Layout() {
   const loc = useLocation();
   const navigate = useNavigate();
   const [projects, setProjects] = useState<Project[]>([]);
+  // 「大系统」（2026-10-13）：顶栏项目切换器 + 侧栏都按它分组，别再给一列平铺的项目。
+  const [groups, setGroups] = useState<ProjectGroup[]>([]);
   const [palette, setPalette] = useState(false);
   const [collapsed, setCollapsed] = useState(() => localStorage.getItem("tp.sidebar") === "collapsed");
   const guide = useOnboarding();
 
   useEffect(() => {
     api.listProjects().then(setProjects).catch(() => {});
+    api
+      .listProjectGroups()
+      .then(setGroups)
+      .catch(() => {
+        /* 大系统拉不到就退回平铺，不该让整个壳子起不来 */
+      });
   }, [loc.pathname]);
 
   const toggleSidebar = () =>
@@ -68,6 +76,7 @@ export function Layout() {
     <div className="flex min-h-screen">
       <Sidebar
         projects={projects}
+        groups={groups}
         pid={pid}
         section={section}
         onSearch={() => setPalette(true)}
@@ -98,11 +107,42 @@ export function Layout() {
                 value={String(pid)}
                 onChange={(e) => navigate(`/projects/${e.target.value}/${section ?? "overview"}`)}
               >
-                {projects.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.name}
-                  </option>
-                ))}
+                {groups.length === 0
+                  ? projects.map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {p.name}
+                      </option>
+                    ))
+                  : (() => {
+                      // 按大系统分组：归属明确的进各自 optgroup，剩下的进「未归类」。
+                      const ungrouped = projects.filter((p) => !p.group_id);
+                      return (
+                        <>
+                          {groups.map((g) => {
+                            const ps = projects.filter((p) => p.group_id === g.id);
+                            if (!ps.length) return null;
+                            return (
+                              <optgroup key={g.id} label={g.name}>
+                                {ps.map((p) => (
+                                  <option key={p.id} value={p.id}>
+                                    {p.name}
+                                  </option>
+                                ))}
+                              </optgroup>
+                            );
+                          })}
+                          {ungrouped.length > 0 && (
+                            <optgroup label={t("未归类")}>
+                              {ungrouped.map((p) => (
+                                <option key={p.id} value={p.id}>
+                                  {p.name}
+                                </option>
+                              ))}
+                            </optgroup>
+                          )}
+                        </>
+                      );
+                    })()}
               </Select>
               <ChevronRight className="h-3.5 w-3.5 text-ink-400/70" />
               <span className="text-ink-700">{t(SECTION_LABEL[section ?? "overview"] ?? section ?? "")}</span>

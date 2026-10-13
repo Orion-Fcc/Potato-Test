@@ -385,12 +385,22 @@ export function PageHeader({
 }) {
   return (
     <div className="flex flex-wrap items-end justify-between gap-4">
-      <div className="min-w-0">
+      {/* ★ 标题区 flex-1 / 动作区 shrink-0（2026-10-13）：以前动作区既没有 flex-1 也没有
+          shrink-0，副标题一长就把动作区**挤窄**，于是搜索框和下拉在动作区内部折成两行、
+          竖着叠起来（运行页实测：搜索框在上、状态筛选在下，明显不是本意）。
+          现在动作区保持自然宽度，真放不下时整块换行到标题下方，而不是自己竖着叠。 */}
+      <div className="min-w-0 flex-1">
         {eyebrow && <div className="tp-eyebrow mb-1.5">{eyebrow}</div>}
         <h1 className="tp-h1 text-[1.8rem] font-semibold leading-tight">{title}</h1>
         {subtitle && <p className="mt-1.5 text-[13px] text-ink-500">{subtitle}</p>}
       </div>
-      {actions && <div className="flex flex-wrap items-center gap-2">{actions}</div>}
+      {/* ★ 动作区**不允许内部换行**（2026-10-13）：以前这里是 flex-wrap，只要动作区比
+          自己的内容窄一点（本页副标题一长就会被挤窄），搜索框和筛选器就会**竖着叠成两行**
+          —— 看起来像两个互不相干的控件。真放不下时应该由外层的 flex-wrap 把整块挪到标题
+          下面，而不是自己内部裂开。 */}
+      {actions && (
+        <div className="flex shrink-0 flex-nowrap items-center gap-2">{actions}</div>
+      )}
     </div>
   );
 }

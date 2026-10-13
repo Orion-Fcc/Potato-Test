@@ -2,11 +2,12 @@ import { FileText, GitBranch, Loader2, Lock, Plus, Save, Sparkles, Trash2, Unloc
 import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useParams } from "react-router-dom";
-import { api, type ProjectDoc, type VerifiedCoverage } from "../lib/api";
+import { api, type KnowledgeFormats, type ProjectDoc, type VerifiedCoverage } from "../lib/api";
 import { Badge, Button, Card, Input, PageHeader } from "../components/ui";
 import { RichTextEditor } from "../components/RichTextEditor";
 import { InsightsPanel } from "../components/InsightsPanel";
 import { MermaidPreview } from "../components/MermaidPreview";
+import { SpecSourcePanel } from "../components/SpecSourcePanel";
 import { Empty, PageSkeleton } from "../components/feedback";
 import { useErrorToast, useToast } from "../components/toast";
 
@@ -148,6 +149,8 @@ export function DocsPage() {
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
   const [generating, setGenerating] = useState(false);
+  // 后端给的支持格式（用于上传处的 accept，避免和 docparse 的真实支持集合漂移）。
+  const [formats, setFormats] = useState<KnowledgeFormats | null>(null);
   const [genInfo, setGenInfo] = useState("");
   const [cov, setCov] = useState<VerifiedCoverage | null>(null);
 
@@ -170,6 +173,16 @@ export function DocsPage() {
   useEffect(() => {
     load();
   }, [load]);
+
+  // 支持格式取一次给上传处的 accept 用。取不到不影响功能（accept 只是提示）。
+  useEffect(() => {
+    api
+      .knowledgeFormats(pid)
+      .then(setFormats)
+      .catch(() => {
+        /* 静默：拿不到就用浏览器默认（什么都能选），后端仍会明确拒绝不支持的 */
+      });
+  }, [pid]);
 
   // 人工确认过的通过率：和文档分开取，取不到也不该让整页失败 ——
   // 它是"补充信息"，而文档本身才是这一页的主体。
@@ -325,13 +338,20 @@ export function DocsPage() {
         }
       />
 
-      {/* 「需规 / 资料」上传面板已于 2026-10-13 移除（用户要求「这一栏可以整体删除」）。
-          注意：删掉后前端**没有任何文件上传入口**了 —— 这个面板是唯一的。
-          如需恢复：从 git 历史取回 components/SpecSourcePanel.tsx 并挂回这里。 */}
-
-      {/* 文档与编辑器（2026-10-12 调整：面板移到文档下方） */}
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-[240px_1fr]">
-        {/* 左：文档清单 */}
+      {/* 文档与编辑器。2026-10-13：把「需规 / 资料」上传面板从整栏顶部挪进**左列**
+          （用户要求「移到左边里面」），和文档清单同一列 —— 它俩本来就是"这个项目里
+          有哪些资料"这一件事的两面。 */}
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-[260px_1fr]">
+        {/* 左：需规 / 资料 + 文档清单 */}
+        <div className="space-y-4">
+        <SpecSourcePanel
+          pid={pid}
+          formats={formats}
+          onDocCreated={async (doc) => {
+            await load();
+            setActive(doc);
+          }}
+        />
         <Card className="h-fit p-2">
           <div className="space-y-0.5">
             {docs.map((d) => {
@@ -390,6 +410,7 @@ export function DocsPage() {
             })}
           </div>
         </Card>
+        </div>
 
         {/* 右：编辑区 */}
         <div className="min-w-0 space-y-3">

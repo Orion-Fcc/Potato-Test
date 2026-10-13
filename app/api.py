@@ -1715,6 +1715,11 @@ async def search_project_knowledge(pid: int, request: Request, body: KnowledgeIn
 # 正文是富文本 HTML（用户要求能改字体/颜色/字号/贴图），渲染前必须净化。
 
 _DOC_KINDS = ("overview", "analysis", "flow", "spec_source", "custom")
+
+# 上传 HTML 存成文档正文时的字符上限（2026-10-13）。
+# 自包含的"单文件网页"（图片内嵌成 base64）动辄几 MB；净化器默认上限 40 万字符会把
+# 正文和图片大面积截掉 —— 实测一份 6.7MB 的需规在 40 万上限下只剩 3 张图（共 42 张）。
+_DOC_HTML_MAX_CHARS = 20_000_000
 _DOC_TITLE_DEFAULT = {
     "overview": "项目总览",
     "analysis": "需求分析",
@@ -1940,7 +1945,8 @@ async def create_doc_from_file(
         from bs4 import BeautifulSoup
 
         raw = str(BeautifulSoup(data, "lxml"))
-        html = sanitize(raw)
+        # 放宽上限（见 _DOC_HTML_MAX_CHARS）：默认 40 万会把自包含网页的图片/正文截掉。
+        html = sanitize(raw, max_chars=_DOC_HTML_MAX_CHARS)
         if not html:  # 净化失败关闭 → 回落到文本版，别存一份空文档
             html = sanitize(f"<h2>{_escape(name)}</h2>{text_body}")
     else:

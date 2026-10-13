@@ -133,6 +133,20 @@ class TestUploadBecomesDocument:
         assert "<table" in html, "表格被拍掉了"
         assert "单元格" in html
 
+    def test_large_html_is_not_truncated_at_the_default_cap(self, client):
+        """自包含网页动辄几 MB，净化器默认 40 万字符上限会把正文/图片截掉 ——
+        上传路径必须放宽上限（实测 6.7MB 的需规在 40 万上限下只剩 3 张图）。
+        这里造一份 > 40 万字符的 HTML，钉住"尾部内容还在"。"""
+        pid = _project(client, "upload-big-html")
+        filler = "<p>段落内容</p>" * 60000  # ~84 万字符，远超默认上限
+        page = f"<html><body>{filler}<p>__TAIL_MARKER__</p></body></html>".encode()
+        r = client.post(
+            f"/api/projects/{pid}/docs/from-file",
+            files={"file": ("big.html", page, "text/html")},
+        )
+        assert r.status_code == 200, r.text
+        assert "__TAIL_MARKER__" in r.json()["doc"]["html"], "大于 40 万字符的 HTML 被截断了"
+
     def test_the_uploader_chooses_whether_the_assistant_may_edit(self, client):
         """★ 上传处那个「允许助手修改」勾选决定权限（2026-10-12 用户要求）。
 

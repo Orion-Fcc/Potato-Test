@@ -1,11 +1,10 @@
 import * as SelectPrimitive from "@radix-ui/react-select";
 import clsx from "clsx";
 import { Check, ChevronDown, Minus } from "lucide-react";
-import { Children, isValidElement, useEffect, useRef } from "react";
+import { Children, Fragment, isValidElement, useEffect, useRef } from "react";
 import type {
   ButtonHTMLAttributes,
   InputHTMLAttributes,
-  ReactElement,
   ReactNode,
   TextareaHTMLAttributes,
 } from "react";
@@ -134,13 +133,37 @@ export function Select({
           !has("h") && "h-9",
           !has("w") && "w-full",
         );
-  const options = Children.toArray(children)
-    .filter((c): c is ReactElement<OptionProps> => isValidElement(c))
-    .map((c) => ({
-      value: String(c.props.value ?? ""),
-      label: c.props.children,
-      disabled: c.props.disabled,
-    }));
+  type Opt = { value: string; label: ReactNode; disabled?: boolean; group?: string };
+  const options: Opt[] = [];
+  // ★ 递归摊平（2026-10-13，踩过）：这是个 **Radix 下拉，不是原生 `<select>`** ——
+  //   children 会被包在 `<optgroup>` / Fragment / 数组里，只能自己走一遍树收集出来。
+  //   不摊平的后果不是"分组不显示"这么轻：当前值匹配不到任何 item，
+  //   `SelectPrimitive.Value` 渲染成**空**（顶栏项目名整个消失）。
+  const collect = (nodes: ReactNode, group?: string) => {
+    Children.forEach(nodes, (child) => {
+      if (!isValidElement(child)) return;
+      const t = child.type as unknown;
+      if (t === Fragment) {
+        collect((child.props as { children?: ReactNode }).children, group);
+        return;
+      }
+      if (t === "optgroup") {
+        const gp = child.props as { label?: string; children?: ReactNode };
+        collect(gp.children, String(gp.label ?? ""));
+        return;
+      }
+      const p = child.props as OptionProps;
+      options.push({ value: String(p.value ?? ""), label: p.children, disabled: p.disabled, group });
+    });
+  };
+  collect(children);
+  // 按 group 切成段：同一段连续渲染，只有带 group 名的段才画标题。
+  const segments: { group?: string; items: Opt[] }[] = [];
+  for (const o of options) {
+    const last = segments[segments.length - 1];
+    if (last && last.group === o.group) last.items.push(o);
+    else segments.push({ group: o.group, items: [o] });
+  }
   const toRadix = (v: string) => (v === "" ? EMPTY : v);
   const fromRadix = (v: string) => (v === EMPTY ? "" : v);
   const emit = (v: string) => {
@@ -169,19 +192,31 @@ export function Select({
           className="z-50 max-h-[min(20rem,var(--radix-select-content-available-height))] min-w-[var(--radix-select-trigger-width)] overflow-hidden rounded-xl border border-[var(--line)] bg-[var(--panel)] p-1 shadow-[var(--shadow-4)]"
         >
           <SelectPrimitive.Viewport>
-            {options.map((o) => (
-              <SelectPrimitive.Item
-                key={o.value}
-                value={toRadix(o.value)}
-                disabled={o.disabled}
-                className="relative flex cursor-pointer select-none items-center rounded-lg py-1.5 pl-2.5 pr-8 text-[13px] outline-none transition-colors data-[highlighted]:bg-brand-50 data-[highlighted]:text-brand-700 data-[disabled]:pointer-events-none data-[disabled]:opacity-40"
-              >
-                <SelectPrimitive.ItemText>{o.label}</SelectPrimitive.ItemText>
-                <SelectPrimitive.ItemIndicator className="absolute right-2 inline-flex items-center">
-                  <Check className="h-4 w-4 text-brand-600" />
-                </SelectPrimitive.ItemIndicator>
-              </SelectPrimitive.Item>
-            ))}
+            {segments.map((seg, si) => {
+              const item = (o: Opt, key: string) => (
+                <SelectPrimitive.Item
+                  key={key}
+                  value={toRadix(o.value)}
+                  disabled={o.disabled}
+                  className="relative flex cursor-pointer select-none items-center rounded-lg py-1.5 pl-2.5 pr-8 text-[13px] outline-none transition-colors data-[highlighted]:bg-brand-50 data-[highlighted]:text-brand-700 data-[disabled]:pointer-events-none data-[disabled]:opacity-40"
+                >
+                  <SelectPrimitive.ItemText>{o.label}</SelectPrimitive.ItemText>
+                  <SelectPrimitive.ItemIndicator className="absolute right-2 inline-flex items-center">
+                    <Check className="h-4 w-4 text-brand-600" />
+                  </SelectPrimitive.ItemIndicator>
+                </SelectPrimitive.Item>
+              );
+              return seg.group ? (
+                <SelectPrimitive.Group key={`g${si}`}>
+                  <SelectPrimitive.Label className="px-2.5 py-1 text-[11px] font-medium text-ink-400">
+                    {seg.group}
+                  </SelectPrimitive.Label>
+                  {seg.items.map((o) => item(o, `${si}:${o.value}`))}
+                </SelectPrimitive.Group>
+              ) : (
+                seg.items.map((o) => item(o, `${si}:${o.value}`))
+              );
+            })}
           </SelectPrimitive.Viewport>
         </SelectPrimitive.Content>
       </SelectPrimitive.Portal>

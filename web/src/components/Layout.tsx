@@ -82,7 +82,13 @@ export function Layout() {
         onSearch={() => setPalette(true)}
         collapsed={collapsed}
       />
-      <CommandPalette open={palette} onClose={() => setPalette(false)} projects={projects} pid={pid} />
+      <CommandPalette
+        open={palette}
+        onClose={() => setPalette(false)}
+        projects={projects}
+        groups={groups}
+        pid={pid}
+      />
       <div className="flex min-w-0 flex-1 flex-col">
         <div className="tp-topbar sticky top-0 z-30 flex h-12 items-center gap-2 border-b border-[var(--line)] px-4 text-[13px]">
           <button

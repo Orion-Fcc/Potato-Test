@@ -116,3 +116,43 @@ export function usePolling(fn: () => void | Promise<void>, active: boolean, visi
     };
   }, [active, visibleMs, hiddenMs]);
 }
+
+/**
+ * 「大系统」分组的折叠状态（2026-10-13）。
+ *
+ * 项目页和侧栏都要能按大系统收起/展开，而状态必须**跨页面一致**
+ * （在项目页收起的那组，切到侧栏也该是收起的），所以抽成 hook + 同一个 localStorage 键，
+ * 而不是两边各存一份 —— 各存一份就会出现"这边收起了、那边还摊着"的割裂。
+ */
+const COLLAPSED_GROUPS_KEY = "tp.groups.collapsed";
+
+export function useCollapsedGroups(): {
+  collapsed: Set<number>;
+  toggle: (id: number) => void;
+} {
+  const [collapsed, setCollapsed] = useState<Set<number>>(() => {
+    try {
+      const raw = localStorage.getItem(COLLAPSED_GROUPS_KEY);
+      const arr = raw ? (JSON.parse(raw) as unknown) : [];
+      return new Set<number>(
+        Array.isArray(arr) ? arr.filter((x): x is number => typeof x === "number") : [],
+      );
+    } catch {
+      return new Set<number>(); // 隐私模式 / 坏数据 → 默认全展开
+    }
+  });
+  const toggle = (id: number) => {
+    setCollapsed((cur) => {
+      const next = new Set(cur);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      try {
+        localStorage.setItem(COLLAPSED_GROUPS_KEY, JSON.stringify([...next]));
+      } catch {
+        /* 存不下就算了，本次会话内依然生效 */
+      }
+      return next;
+    });
+  };
+  return { collapsed, toggle };
+}

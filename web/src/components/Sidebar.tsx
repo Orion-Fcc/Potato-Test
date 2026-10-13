@@ -1,6 +1,8 @@
 import clsx from "clsx";
 import {
   Bug,
+  ChevronDown,
+  ChevronRight,
   ChevronUp,
   FileText,
   FlaskConical,
@@ -25,6 +27,7 @@ import { Link, useNavigate } from "react-router-dom";
 import type { AuthUser, Project, ProjectGroup } from "../lib/api";
 import { setLang } from "../i18n";
 import { useAuth } from "../lib/auth";
+import { useCollapsedGroups } from "../lib/hooks";
 import { ChangePasswordModal } from "./ChangePasswordModal";
 import { ACCENTS, accentSwatch, getAccent, getTheme, setAccent, setTheme, type Accent, type ThemeMode } from "../lib/theme";
 
@@ -307,6 +310,8 @@ export function Sidebar({
   const { t, i18n } = useTranslation();
   const lang = i18n.language;
   const { authEnabled, sharedWorkspace, isAdmin, user } = useAuth();
+  // 大系统分组的折叠状态（和项目页共用同一个 localStorage 键，两边一致）。
+  const { collapsed: collapsedGroups, toggle: toggleGroup } = useCollapsedGroups();
   return (
     <aside
       className={clsx(
@@ -369,25 +374,42 @@ export function Sidebar({
                 if (!known.length && !ungrouped.length) return null;
                 return (
                   <div className="mt-4">
-                    {known.map((g) => (
-                      <div key={g.id} className="mb-2.5">
-                        <div className="tp-nav-label truncate px-2 pb-1" title={g.name}>
-                          {g.name}
+                    {known.map((g) => {
+                      const off = collapsedGroups.has(g.id);
+                      const ps = projects.filter((p) => p.group_id === g.id);
+                      return (
+                        <div key={g.id} className="mb-2.5">
+                          <button
+                            onClick={() => toggleGroup(g.id)}
+                            title={off ? t("展开") : t("收起")}
+                            aria-expanded={!off}
+                            className="tp-nav-label flex w-full items-center gap-1 rounded px-2 pb-1 text-left outline-none transition-colors hover:text-ink-700"
+                          >
+                            {off ? (
+                              <ChevronRight className="h-3 w-3 shrink-0" />
+                            ) : (
+                              <ChevronDown className="h-3 w-3 shrink-0" />
+                            )}
+                            <span className="truncate">{g.name}</span>
+                            <span className="ml-auto shrink-0 text-[10px] tabular-nums opacity-70">
+                              {ps.length}
+                            </span>
+                          </button>
+                          {!off && (
+                            <div className="space-y-0.5">
+                              {ps.map((p) => (
+                                <ProjectLink
+                                  key={p.id}
+                                  to={`/projects/${p.id}/overview`}
+                                  label={p.name}
+                                  collapsed={collapsed}
+                                />
+                              ))}
+                            </div>
+                          )}
                         </div>
-                        <div className="space-y-0.5">
-                          {projects
-                            .filter((p) => p.group_id === g.id)
-                            .map((p) => (
-                              <ProjectLink
-                                key={p.id}
-                                to={`/projects/${p.id}/overview`}
-                                label={p.name}
-                                collapsed={collapsed}
-                              />
-                            ))}
-                        </div>
-                      </div>
-                    ))}
+                      );
+                    })}
                     {ungrouped.length > 0 && (
                       <div className="mb-2.5">
                         <div className="tp-nav-label px-2 pb-1">{t("未归类")}</div>

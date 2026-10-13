@@ -2,7 +2,7 @@ import { CornerDownLeft, Search } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useNavigate } from "react-router-dom";
-import type { Project } from "../lib/api";
+import type { Project, ProjectGroup } from "../lib/api";
 
 const SECTIONS: [string, string][] = [
   ["overview", "Overview"],
@@ -17,11 +17,14 @@ export function CommandPalette({
   open,
   onClose,
   projects,
+  groups,
   pid,
 }: {
   open: boolean;
   onClose: () => void;
   projects: Project[];
+  /** 「大系统」（2026-10-13）：搜大系统名要能带出它下面的项目，结果里也标出来。 */
+  groups: ProjectGroup[];
   pid: number | null;
 }) {
   const navigate = useNavigate();
@@ -33,19 +36,31 @@ export function CommandPalette({
   }, [open]);
 
   const items = useMemo(() => {
-    const list: { label: string; hint: string; to: string }[] = [
+    const gname = new Map<number, string>();
+    for (const g of groups) gname.set(g.id, g.name);
+    const list: { label: string; hint: string; group?: string; to: string }[] = [
       { label: t("Home"), hint: t("all projects"), to: "/" },
     ];
-    for (const p of projects) list.push({ label: p.name, hint: t("project"), to: `/projects/${p.id}/overview` });
+    for (const p of projects)
+      list.push({
+        label: p.name,
+        hint: t("project"),
+        group: p.group_id != null ? gname.get(p.group_id) : undefined,
+        to: `/projects/${p.id}/overview`,
+      });
     if (pid != null) {
       for (const [key, label] of SECTIONS)
         list.push({ label: t(label), hint: t("section"), to: `/projects/${pid}/${key}` });
     }
     return list;
-  }, [projects, pid]);
+  }, [projects, groups, pid]);
 
   const results = useMemo(
-    () => items.filter((i) => `${i.label} ${i.hint}`.toLowerCase().includes(q.toLowerCase())),
+    // ★ 大系统名也参与匹配：输入"培训管理"应当把它下面的项目都带出来。
+    () =>
+      items.filter((i) =>
+        `${i.label} ${i.hint} ${i.group ?? ""}`.toLowerCase().includes(q.toLowerCase()),
+      ),
     [items, q],
   );
 
@@ -87,6 +102,11 @@ export function CommandPalette({
               className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-ink-700 hover:bg-brand-50 hover:text-brand-700"
             >
               <span className="capitalize text-ink-900">{r.label}</span>
+              {r.group && (
+                <span className="shrink-0 rounded bg-[var(--panel2)] px-1.5 py-0.5 text-[10.5px] text-ink-500">
+                  {r.group}
+                </span>
+              )}
               <span className="text-xs text-ink-500">{r.hint}</span>
               {i === 0 && <CornerDownLeft className="ml-auto h-3.5 w-3.5 text-ink-500" />}
             </button>

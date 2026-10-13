@@ -1,10 +1,10 @@
-import { ArrowRight, FolderOpen, Pencil, Plus, Trash2 } from "lucide-react";
+import { ArrowRight, ChevronDown, ChevronRight, FolderOpen, Pencil, Plus, Trash2 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Link } from "react-router-dom";
 import { api, relTime, type Project, type ProjectGroup } from "../lib/api";
 import { pct, rateTone } from "../lib/metrics";
-import { useAbortSignal, useDebounced } from "../lib/hooks";
+import { useAbortSignal, useCollapsedGroups, useDebounced } from "../lib/hooks";
 import { Badge, Button, Card, Field, Input, PageHeader } from "../components/ui";
 import { Modal } from "../components/Modal";
 import { NewProjectWizard } from "../components/NewProjectWizard";
@@ -18,6 +18,8 @@ export function Projects() {
   const toast = useToast();
   const fail = useErrorToast();
   const signal = useAbortSignal();
+  // 大系统分组的折叠状态（和侧栏共用同一个 localStorage 键）。
+  const { collapsed: collapsedGroups, toggle: toggleGroup } = useCollapsedGroups();
   const [projects, setProjects] = useState<Project[]>([]);
   // 「大系统」容器（2026-10-13）：把若干小模块项目归到它下面。
   const [groups, setGroups] = useState<ProjectGroup[]>([]);
@@ -56,9 +58,23 @@ export function Projects() {
   }, [load, loadGroups]);
 
   const dq = useDebounced(q, 180);
+  // ★ 搜索也匹配**大系统名**（2026-10-13 用户要求「搜索要能按大系统」）：
+  // 输入"培训管理"应当把它下面的项目都带出来，而不是因为没有项目名匹配就报"无结果"。
+  const groupName = useMemo(() => {
+    const m = new Map<number, string>();
+    for (const g of groups) m.set(g.id, g.name);
+    return m;
+  }, [groups]);
   const filtered = useMemo(
-    () => projects.filter((p) => p.name.toLowerCase().includes(dq.toLowerCase())),
-    [projects, dq],
+    () =>
+      projects.filter((p) => {
+        const needle = dq.trim().toLowerCase();
+        if (!needle) return true;
+        if (p.name.toLowerCase().includes(needle)) return true;
+        const g = p.group_id != null ? groupName.get(p.group_id) : undefined;
+        return !!g && g.toLowerCase().includes(needle);
+      }),
+    [projects, dq, groupName],
   );
 
   // 按大系统分组：group_id -> 项目列表（null = 未归类）。
@@ -304,17 +320,31 @@ export function Projects() {
           {/* 每个「大系统」一节：标题 + 它的项目 + 空的空态 */}
           {groups.map((g) => {
             const ps = byGroup.get(g.id) ?? [];
+            const off = collapsedGroups.has(g.id);
             return (
               <section key={g.id} className="space-y-3">
                 <div className="flex flex-wrap items-center gap-2 border-b border-[var(--line)] pb-2">
-                  <FolderOpen className="h-4 w-4 text-brand-600" />
-                  <h2 className="text-[15px] font-semibold text-ink-900">{g.name}</h2>
-                  <span className="text-[11.5px] text-ink-400">
-                    {t("{{n}} 个项目", { n: g.projects })}
-                    {g.knowledge.chars > 0
-                      ? " · " + t("共享需规 {{c}} 字", { c: g.knowledge.chars })
-                      : ""}
-                  </span>
+                  {/* 点标题收起/展开这一组（2026-10-13 用户要求）。 */}
+                  <button
+                    onClick={() => toggleGroup(g.id)}
+                    title={off ? t("展开") : t("收起")}
+                    aria-expanded={!off}
+                    className="flex min-w-0 items-center gap-1.5 text-left outline-none"
+                  >
+                    {off ? (
+                      <ChevronRight className="h-3.5 w-3.5 shrink-0 text-ink-400" />
+                    ) : (
+                      <ChevronDown className="h-3.5 w-3.5 shrink-0 text-ink-400" />
+                    )}
+                    <FolderOpen className="h-4 w-4 shrink-0 text-brand-600" />
+                    <h2 className="truncate text-[15px] font-semibold text-ink-900">{g.name}</h2>
+                    <span className="shrink-0 text-[11.5px] text-ink-400">
+                      {t("{{n}} 个项目", { n: g.projects })}
+                      {g.knowledge.chars > 0
+                        ? " · " + t("共享需规 {{c}} 字", { c: g.knowledge.chars })
+                        : ""}
+                    </span>
+                  </button>
                   <div className="ml-auto flex items-center gap-1">
                     <button
                       onClick={() => setGroupDraft({ id: g.id, name: g.name })}
@@ -338,14 +368,16 @@ export function Projects() {
                     </button>
                   </div>
                 </div>
-                <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-                  {ps.map(renderCard)}
-                  {ps.length === 0 && (
-                    <div className="grid min-h-[80px] place-items-center rounded-[var(--radius)] border border-dashed border-[var(--line)] px-4 text-center text-[12px] text-ink-400">
-                      {t("还没有项目归到它下面 —— 在项目的「Edit」里选「所属大系统」。")}
-                    </div>
-                  )}
-                </div>
+                {!off && (
+                  <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                    {ps.map(renderCard)}
+                    {ps.length === 0 && (
+                      <div className="grid min-h-[80px] place-items-center rounded-[var(--radius)] border border-dashed border-[var(--line)] px-4 text-center text-[12px] text-ink-400">
+                        {t("还没有项目归到它下面 —— 在项目的「Edit」里选「所属大系统」。")}
+                      </div>
+                    )}
+                  </div>
+                )}
               </section>
             );
           })}

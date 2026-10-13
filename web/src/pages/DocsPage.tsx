@@ -2,12 +2,11 @@ import { FileText, GitBranch, Loader2, Lock, Plus, Save, Sparkles, Trash2, Unloc
 import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useParams } from "react-router-dom";
-import { api, type KnowledgeFormats, type ProjectDoc, type VerifiedCoverage } from "../lib/api";
+import { api, type ProjectDoc, type VerifiedCoverage } from "../lib/api";
 import { Badge, Button, Card, Input, PageHeader } from "../components/ui";
 import { RichTextEditor } from "../components/RichTextEditor";
 import { InsightsPanel } from "../components/InsightsPanel";
 import { MermaidPreview } from "../components/MermaidPreview";
-import { SpecSourcePanel } from "../components/SpecSourcePanel";
 import { Empty, PageSkeleton } from "../components/feedback";
 import { useErrorToast, useToast } from "../components/toast";
 
@@ -149,8 +148,6 @@ export function DocsPage() {
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
   const [generating, setGenerating] = useState(false);
-  // 后端给的支持格式（用于上传处的 accept，避免和 docparse 的真实支持集合漂移）。
-  const [formats, setFormats] = useState<KnowledgeFormats | null>(null);
   const [genInfo, setGenInfo] = useState("");
   const [cov, setCov] = useState<VerifiedCoverage | null>(null);
 
@@ -173,16 +170,6 @@ export function DocsPage() {
   useEffect(() => {
     load();
   }, [load]);
-
-  // 支持格式取一次给「上传成文档」的 accept 用。取不到不影响功能（accept 只是提示）。
-  useEffect(() => {
-    api
-      .knowledgeFormats(pid)
-      .then(setFormats)
-      .catch(() => {
-        /* 静默：拿不到就用浏览器默认（什么都能选），后端仍会明确拒绝不支持的 */
-      });
-  }, [pid]);
 
   // 人工确认过的通过率：和文档分开取，取不到也不该让整页失败 ——
   // 它是"补充信息"，而文档本身才是这一页的主体。
@@ -338,27 +325,9 @@ export function DocsPage() {
         }
       />
 
-      {/* 需规 / 资料 上传（2026-10-12 从「助手」页搬过来）。
-          位置本来就该在这儿：**上传需规是"项目文档"这件事的第一步** ——
-          没有它，右边的「AI 分析与生成」无从下手。放在助手页时，
-          用户得先知道去那儿上传、再回来生成，中间那一步没有任何提示。
-
-          ★ 上传会**同时**走两条路（2026-10-12）：
-            知识库（AI 检索用的分块）+ 项目文档（你读、你改的正文）。
-          所以这里不再需要单独一个「上传成文档」按钮 ——
-          两个入口会让用户不知道该点哪个，而且"允许助手修改"这个选择
-          必须和上传动作在一起（见 SpecSourcePanel 里的勾选框）。 */}
-      <SpecSourcePanel
-        pid={pid}
-        formats={formats}
-        onUploaded={() => {
-          /* 知识库更新不影响文档列表 */
-        }}
-        onDocCreated={async (doc) => {
-          await load();
-          setActive(doc);
-        }}
-      />
+      {/* 「需规 / 资料」上传面板已于 2026-10-13 移除（用户要求「这一栏可以整体删除」）。
+          注意：删掉后前端**没有任何文件上传入口**了 —— 这个面板是唯一的。
+          如需恢复：从 git 历史取回 components/SpecSourcePanel.tsx 并挂回这里。 */}
 
       {/* 文档与编辑器（2026-10-12 调整：面板移到文档下方） */}
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-[240px_1fr]">

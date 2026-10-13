@@ -53,6 +53,27 @@ _MAX_LISTING_CHARS = 1000
 # 检索到的"需规原文片段"最多多少字 —— 这才是模型真正要依据的内容。
 _SECTION_CHARS = 1800
 
+# 提示词里"依据内容"那段的标题。检索模式 / 通读模式文案不同 ——
+# 一个是原文摘录、一个是通读后抽出的要点，别让人（和模型）以为都是原文。
+_SOURCE_LABEL_RETRIEVED = "需规原文片段（**只依据这些原文写**；这是从项目需规里检索出的相关段落）"
+_SOURCE_LABEL_FULL = "需规通读要点（**只依据这些原文写**；这是把整份需规通读一遍后抽出的相关事实）"
+
+# ---- 「通读全文」模式（2026-10-13 用户要求"是否检索全文"开关）----------------
+#
+# 网关单次 user 提示词超过约 4.5~5k 字符就返回空，一份 3 万字的需规**塞不进一次调用**，
+# 所以"全文"只能靠**分块多次调用**：把整份需规分段读一遍、抽成"按节归类的事实条目"，
+# 再按这些笔记写各节。慢（几十次调用）、贵，但真读到了全文 —— 由用户开关决定。
+_FULL_CHUNK_CHARS = 2200  # 每次通读喂进去的原文上限
+_FULL_MAX_CHUNKS = 30  # 通读调用次数上限（防跑飞）
+_FULL_NOTE_CAP = 80  # 每节保留的笔记条数上限
+
+_FULL_SYSTEM = """你是资深需求分析师。用户会给你**需求文档的一段原文**。
+请只抽取原文里**确实写了的事实**，按下面六类归好；原文没写的**一律不写**，不要推断、不要补常识。
+用中文，只输出 JSON。
+
+六类：overview（项目总览 / 背景 / 目标 / 范围）、modules（模块与功能）、flow（流程 / 状态流转 / 审批）、
+roles（角色 / 权限 / 岗位）、rules（规则 / 校验 / 约束）、glossary（名词 / 术语）。"""
+
 # 每节用一组"检索词"去知识库取最相关的**原文片段**（2026-10-13，用户要求
 # 「确保 AI 是依据需规来改文档」）。只喂标题等于只给骨架，正文才给事实 ——
 # 检索片段让模型手里有原文，显著压低"照着标题名编内容"的幻觉。
@@ -213,7 +234,11 @@ _SECTION_SPECS: tuple[tuple[str, str, str], ...] = (
 
 
 def build_section_prompt(
-    key: str, headings: list[str], intro: str, extra: str = ""
+    key: str,
+    headings: list[str],
+    intro: str,
+    extra: str = "",
+    source_label: str = _SOURCE_LABEL_RETRIEVED,
 ) -> str:
     """针对**某一节**拼提示词。抽成函数是为了可单测（不必真调模型）。"""
     hs = [h.strip() for h in headings if h and h.strip()]
@@ -234,10 +259,7 @@ def build_section_prompt(
         f"## 章节标题清单（共 {len(hs)} 个）\n{listing}{more}\n",
     ]
     if extra.strip():
-        parts.append(
-            "## 需规原文片段（**只依据这些原文写**；这是从项目需规里检索出的相关段落）\n"
-            f"{extra.strip()[:_SECTION_CHARS]}\n"
-        )
+        parts.append(f"## {source_label}\n{extra.strip()[:_SECTION_CHARS]}\n")
     if key == "flow":
         # 流程这一节要的是 Mermaid 源码，不是 HTML —— 输出格式完全不同
         parts.append(
@@ -943,8 +965,78 @@ async def _recall_text(
     return "\n\n".join(parts)
 
 
-async def analyze(project_id: int) -> OverviewResult:
+async def _full_read_notes(project_id: int, usage: dict) -> dict[str, list[str]]:
+    """把整份需规**分段通读**一遍，抽成"按节归类的事实条目"（2026-10-13）。
+
+    为什么分段：网关单次 user 提示词 ~4.5~5k 字符就返回空，整份需规塞不进一次调用。
+    所以按 `_FULL_CHUNK_CHARS` 切段、逐一抽事实 —— **每段一次调用**（慢、贵，用户开关决定）。
+    单段失败只少一条笔记，不拖垮整次生成。
+    """
+    from sqlalchemy import select
+
+    from app import specgen
+    from app.db import db_session
+    from app.models import KnowledgeChunk
+
+    async with db_session() as s:
+        rows = (
+            await s.execute(
+                select(KnowledgeChunk.text)
+                .where(KnowledgeChunk.project_id == project_id)
+                .order_by(KnowledgeChunk.chunk_index)
+            )
+        ).scalars().all()
+    text = "\n\n".join(rows)
+    if not text.strip():
+        return {}
+
+    # 按段落聚合到 _FULL_CHUNK_CHARS 一段（不切碎段落）。
+    segs: list[str] = []
+    buf = ""
+    for para in text.split("\n\n"):
+        if buf and len(buf) + len(para) + 2 > _FULL_CHUNK_CHARS:
+            segs.append(buf)
+            buf = para
+        else:
+            buf = f"{buf}\n\n{para}" if buf else para
+    if buf:
+        segs.append(buf)
+    segs = segs[:_FULL_MAX_CHUNKS]
+
+    keys = [k for k, _t, _d in _SECTION_SPECS]
+    notes: dict[str, list[str]] = {k: [] for k in keys}
+    for seg in segs:
+        user = (
+            f"## 需规原文片段\n{seg}\n\n"
+            '只输出 JSON：{"overview":["…"],"modules":["…"],"flow":["…"],'
+            '"roles":["…"],"rules":["…"],"glossary":["…"]}；'
+            "某一类原文没写就给空数组；每条尽量短（一句话）。"
+        )
+        try:
+            data, u = await specgen._call_json(_FULL_SYSTEM, user, max_tokens=1200, role="docgen")
+        except Exception as exc:  # noqa: BLE001 — 单段失败只少一条笔记
+            log.debug("spec_overview: 通读分段失败：%s", exc)
+            continue
+        for k in ("prompt", "completion", "cached", "total", "calls"):
+            usage[k] += int((u or {}).get(k, 0) or 0)
+        if not isinstance(data, dict):
+            continue
+        for k in keys:
+            arr = data.get(k)
+            if not isinstance(arr, list):
+                continue
+            for x in arr:
+                t = str(x).strip()
+                if t and t not in notes[k] and len(notes[k]) < _FULL_NOTE_CAP:
+                    notes[k].append(t)
+    return notes
+
+
+async def analyze(project_id: int, *, full: bool = False) -> OverviewResult:
     """读项目知识库 → 产出一份项目概况。**绝不抛异常。**
+
+    `full=True` 走「通读全文」模式（2026-10-13 用户开关）：先把整份需规分段读一遍抽成
+    要点，再按要点写各节 —— 慢、贵，但真读到全文。默认 False（检索片段，快）。
 
     六节各发一次调用，失败的那一节记下来但**不影响其它节** ——
     六节里坏一节，用户拿到的是五节，而不是零节。
@@ -966,10 +1058,12 @@ async def analyze(project_id: int) -> OverviewResult:
             error="这个项目的『需规/资料』还是空的，没有可分析的文档。先上传需规再生成。"
         )
 
-    # 每节的"依据原文"在 `one()` 里按主题单独检索（见 `_recall_text`）——
-    # 比"一次性取 6 段固定章节"更贴题：流程图取流程相关片段、角色取权限相关片段。
-
+    # 每节的"依据原文"：检索模式在 `one()` 里按主题单独检索（见 `_recall_text`）；
+    # 通读模式先在这里把整份需规读一遍、抽成要点。
     usage = {"prompt": 0, "completion": 0, "cached": 0, "total": 0, "calls": 0}
+    full_notes: dict[str, list[str]] = {}
+    if full:
+        full_notes = await _full_read_notes(project_id, usage)
     failures: list[str] = []
     # ★ 并发上限 1（2026-10-12 第三次调，见下面的实测）。
     #
@@ -984,9 +1078,15 @@ async def analyze(project_id: int) -> OverviewResult:
     gate = asyncio.Semaphore(1)
 
     async def one(key: str) -> OverviewSection:
-        # ★ 先按本节主题检索**原文片段**，再让它写（2026-10-13）。
-        recalled = await _recall_text(project_id, key)
-        user = build_section_prompt(key, headings, intro, recalled)
+        # ★ 先备好"依据原文"，再让它写（2026-10-13）。
+        #   检索模式：按本节主题取相关片段；通读模式：用通读得到的该节要点。
+        if full:
+            recalled = "\n".join(f"- {x}" for x in full_notes.get(key, []))[:_SECTION_CHARS]
+            label = _SOURCE_LABEL_FULL
+        else:
+            recalled = await _recall_text(project_id, key)
+            label = _SOURCE_LABEL_RETRIEVED
+        user = build_section_prompt(key, headings, intro, recalled, label)
         title = dict((k, t) for k, t, _d in _SECTION_SPECS).get(key, key)
         # ★ 判断"这一节有没有产出"要按节看字段（2026-10-12 实测踩到）：
         # `flow` 这一节的内容在 `mermaid` 里，不在 `html` 里。原来统一判 `sec.html`，

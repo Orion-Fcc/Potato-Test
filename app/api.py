@@ -2015,8 +2015,10 @@ async def analyze_project_docs(pid: int, request: Request, body: dict | None = N
     if kind not in ("overview", "analysis", "flow"):
         raise HTTPException(400, "kind 必须是 overview / analysis / flow 之一")
     replace = bool(body.get("replace"))
+    # 「通读全文」模式（2026-10-13 用户开关）：慢、贵，但真读整份需规。
+    full = bool(body.get("full"))
 
-    res = await spec_overview.analyze(pid)
+    res = await spec_overview.analyze(pid, full=full)
     if res.error and not res.sections:
         # 失败要如实报，不能回一份空文档让用户以为"这个项目没内容"。
         return {

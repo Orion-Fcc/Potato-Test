@@ -1153,7 +1153,7 @@ export const api = {
       body: JSON.stringify(b),
     }),
   /** 让 AI 把整份需规读成项目概况并存成可编辑文档（要跑模型，比较慢）。 */
-  analyzeDocs: (pid: number, b: { kind?: string; replace?: boolean } = {}) =>
+  analyzeDocs: (pid: number, b: { kind?: string; replace?: boolean; full?: boolean } = {}) =>
     req<AnalyzeDocsResult>(`/projects/${pid}/docs/analyze`, {
       method: "POST",
       body: JSON.stringify(b),

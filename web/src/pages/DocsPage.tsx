@@ -148,6 +148,8 @@ export function DocsPage() {
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
   const [generating, setGenerating] = useState(false);
+  // 「通读全文」开关（2026-10-13 用户要求）：默认关（快，只检索相关片段）。
+  const [fullRead, setFullRead] = useState(false);
   // 后端给的支持格式（用于上传处的 accept，避免和 docparse 的真实支持集合漂移）。
   const [formats, setFormats] = useState<KnowledgeFormats | null>(null);
   const [genInfo, setGenInfo] = useState("");
@@ -270,7 +272,7 @@ export function DocsPage() {
     setGenerating(true);
     setGenInfo("");
     try {
-      const r = await api.analyzeDocs(pid, { kind: active.kind, replace });
+      const r = await api.analyzeDocs(pid, { kind: active.kind, replace, full: fullRead });
       if (!r.ok) {
         setGenInfo(r.error || t("生成失败"));
         fail(new Error(r.error || "analyze failed"));
@@ -508,6 +510,20 @@ export function DocsPage() {
                         {t("重新生成（覆盖）")}
                       </Button>
                     )}
+                    {/* 「通读全文」开关（2026-10-13 用户要求）。默认关：只检索相关片段，快。
+                        打开后先分块通读整份需规、再写各节 —— 慢、更贵，但真读到全文。 */}
+                    <label
+                      className="flex cursor-pointer select-none items-center gap-1.5 text-[12px] text-ink-600"
+                      title={t("打开后先把整份需规通读一遍（多次调用，慢且更费），而不是只检索相关片段。")}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={fullRead}
+                        onChange={(e) => setFullRead(e.target.checked)}
+                        className="h-3.5 w-3.5 accent-[var(--brand-600)]"
+                      />
+                      {t("检索全文")}
+                    </label>
                   </>
                 )}
                 {/* 出处徽标只对**有正文**的节显示。流程图没有正文

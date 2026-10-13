@@ -361,7 +361,9 @@ class TestBuildPlanPrompt:
 
     def test_huge_heading_lists_are_capped_and_disclosed(self):
         p = build_plan_prompt([f"标题{i}" for i in range(2000)], "")
-        assert "只列了前" in p, "截断必须说明，否则 AI 以为那就是全部"
+        # 两条截断路径文案不同（条数上限 / 字符上限），但都必须**说明被截了**并给出总数。
+        assert "只列了前" in p or "标题清单过长" in p, "截断必须说明，否则 AI 以为那就是全部"
+        assert "共 2000 个标题" in p
 
     def test_intro_is_capped(self):
         p = build_plan_prompt(["a"], "x" * 100_000)
@@ -757,7 +759,7 @@ def test_analyze_reports_failure_instead_of_empty_doc(client, monkeypatch):
     c = client
     pid = c.post("/api/projects", json={"name": "doc-fail"}).json()["id"]
 
-    async def boom(_pid: int):
+    async def boom(_pid: int, **_kw):
         from app.spec_overview import OverviewResult
 
         return OverviewResult(error="AGNES_API_KEY 未配置")
@@ -779,7 +781,7 @@ def test_analyze_stores_editable_doc_with_sources(client, monkeypatch):
     c = client
     pid = c.post("/api/projects", json={"name": "doc-ok"}).json()["id"]
 
-    async def fake(_pid: int):
+    async def fake(_pid: int, **_kw):
         from app.spec_overview import OverviewResult, OverviewSection
 
         return OverviewResult(
@@ -815,7 +817,7 @@ def test_regenerating_appends_by_default(client, monkeypatch):
     pid = c.post("/api/projects", json={"name": "doc-append"}).json()["id"]
     c.put(f"/api/projects/{pid}/docs", json={"kind": "overview", "title": "t", "html": "<p>我手写的内容</p>"})
 
-    async def fake(_pid: int):
+    async def fake(_pid: int, **_kw):
         from app.spec_overview import OverviewResult, OverviewSection
 
         return OverviewResult(sections=[OverviewSection("overview", "项目总览", "<p>AI 内容</p>", [])])
@@ -833,7 +835,7 @@ def test_replace_flag_overwrites(client, monkeypatch):
     pid = c.post("/api/projects", json={"name": "doc-replace"}).json()["id"]
     c.put(f"/api/projects/{pid}/docs", json={"kind": "overview", "title": "t", "html": "<p>旧内容</p>"})
 
-    async def fake(_pid: int):
+    async def fake(_pid: int, **_kw):
         from app.spec_overview import OverviewResult, OverviewSection
 
         return OverviewResult(sections=[OverviewSection("overview", "总览", "<p>新内容</p>", [])])
@@ -900,6 +902,15 @@ def test_section_prompt_stays_under_the_gateway_limit():
         p = build_section_prompt(key, headings, intro, recalled)
         assert len(p) <= 4500, f"{key} 的提示词 {len(p)} 字符，超过网关上界"
         assert "只依据这些原文写" in p, f"{key} 的检索原文被标题清单挤掉了"
+
+
+def test_full_mode_uses_its_own_source_label():
+    """「通读全文」模式的提示词要说清"这是通读抽出的要点"，别让人以为仍是原文摘录。"""
+    from app.spec_overview import _SOURCE_LABEL_FULL, build_section_prompt
+
+    p = build_section_prompt("rules", ["甲"], "背景", "- 同一范围不能配两条。", _SOURCE_LABEL_FULL)
+    assert "需规通读要点" in p
+    assert "只依据这些原文写" in p
 
 
 def test_image_upload_rejects_non_images(client):

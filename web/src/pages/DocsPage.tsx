@@ -1,5 +1,5 @@
-import { FileText, FileUp, GitBranch, Loader2, Lock, Plus, Save, Sparkles, Trash2, Unlock, Wand2 } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { FileText, GitBranch, Loader2, Lock, Plus, Save, Sparkles, Trash2, Unlock, Wand2 } from "lucide-react";
+import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useParams } from "react-router-dom";
 import { api, type KnowledgeFormats, type ProjectDoc, type VerifiedCoverage } from "../lib/api";
@@ -149,9 +149,7 @@ export function DocsPage() {
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
   const [generating, setGenerating] = useState(false);
-  // 「上传成文档」的文件选择框 + 后端给的支持格式（用于 accept，
-  // 避免和 docparse 的真实支持集合漂移）。
-  const docFileRef = useRef<HTMLInputElement>(null);
+  // 后端给的支持格式（用于上传处的 accept，避免和 docparse 的真实支持集合漂移）。
   const [formats, setFormats] = useState<KnowledgeFormats | null>(null);
   const [genInfo, setGenInfo] = useState("");
   const [cov, setCov] = useState<VerifiedCoverage | null>(null);
@@ -287,32 +285,6 @@ export function DocsPage() {
     }
   }
 
-  /** 把一个文件解析成**可查看可编辑的文档**（2026-10-12）。
-   *
-   *  原来上传只进知识库（AI 检索用的分块），文档页里看不到 ——
-   *  用户反馈「上传的需归文档无法查看修改」就是这个断点。 */
-  async function uploadToDoc(file: File) {
-    setSaving(true);
-    try {
-      const r = await api.docFromFile(pid, file);
-      toast(
-        "success",
-        r.created
-          ? t("已把「{{name}}」存成文档（{{n}} 字）。", {
-              name: file.name,
-              n: r.chars.toLocaleString(),
-            })
-          : t("已更新文档「{{name}}」。", { name: file.name }),
-      );
-      await load();
-      if (r.doc) setActive(r.doc);
-    } catch (e) {
-      fail(e);
-    } finally {
-      setSaving(false);
-    }
-  }
-
   const addCustom = async () => {
     const name = window.prompt(t("新文档标题"), t("自定义文档"));
     if (!name) return;
@@ -354,31 +326,6 @@ export function DocsPage() {
         subtitle={t("AI 读过的项目说明：总览、需求分析、流程图。可以像 Word 一样编辑。")}
         actions={
           <>
-            {/* ★ 「上传成文档」（2026-10-12）。
-                它和上面那个「需规 / 资料 · 上传文档」的分工要说清：
-                  * 上面那个 → **知识库**（AI 检索用的分块，大文档靠它）；
-                  * 这个     → **项目文档**（你读、你改的正文）。
-                用户反馈「上传的需归文档无法查看修改」，就是因为原来只有前一条路。 */}
-            <input
-              ref={docFileRef}
-              type="file"
-              className="hidden"
-              accept={formats?.accept}
-              onChange={(e) => {
-                const f = e.target.files?.[0];
-                if (f) void uploadToDoc(f);
-                e.target.value = "";
-              }}
-            />
-            <Button
-              variant="outline"
-              disabled={saving}
-              onClick={() => docFileRef.current?.click()}
-              title={t("把文件存成可查看、可编辑的文档")}
-            >
-              {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <FileUp className="h-4 w-4" />}
-              {t("上传成文档")}
-            </Button>
             <Button variant="outline" onClick={addCustom}>
               <Plus className="h-4 w-4" />
               {t("New document")}
@@ -395,12 +342,21 @@ export function DocsPage() {
           位置本来就该在这儿：**上传需规是"项目文档"这件事的第一步** ——
           没有它，右边的「AI 分析与生成」无从下手。放在助手页时，
           用户得先知道去那儿上传、再回来生成，中间那一步没有任何提示。
-          ⚠ 它进的是**知识库**；要变成可编辑的文档请用右上角「上传成文档」。 */}
+
+          ★ 上传会**同时**走两条路（2026-10-12）：
+            知识库（AI 检索用的分块）+ 项目文档（你读、你改的正文）。
+          所以这里不再需要单独一个「上传成文档」按钮 ——
+          两个入口会让用户不知道该点哪个，而且"允许助手修改"这个选择
+          必须和上传动作在一起（见 SpecSourcePanel 里的勾选框）。 */}
       <SpecSourcePanel
         pid={pid}
         formats={formats}
         onUploaded={() => {
-          /* 知识库更新不影响文档列表，无需 reload */
+          /* 知识库更新不影响文档列表 */
+        }}
+        onDocCreated={async (doc) => {
+          await load();
+          setActive(doc);
         }}
       />
 
@@ -460,12 +416,18 @@ export function DocsPage() {
 
         {/* 右：编辑区 */}
         <div className="min-w-0 space-y-3">
+          {/* ★ 这个空态**实际上到不了**（2026-10-12 实测确认）：后端
+              `list_project_docs` 总会补上「项目总览 / 需求分析 / 流程图」三个占位，
+              所以 `docs` 永远非空、`active` 也永远有值 —— 我改了这里的文案之后
+              在浏览器里根本看不到它，才发现这一点。
+              保留它作为兜底（后端某天改成不补占位时还要有个东西显示），
+              但文案要说真话，不能指向一个已经删掉的按钮。 */}
           {!active ? (
             <Card className="p-6">
               <Empty
                 title={t("还没有文档")}
                 sub={t(
-                  "两种做法：点右上角「上传成文档」把文件存成可编辑的文档；或在下面「需规 / 资料」上传，再由 AI 读一遍写成文档。",
+                  "在下面「需规 / 资料」里上传文件：它会同时存成可查看可编辑的文档，并加进 AI 检索的资料库。上传前可以选「允许助手修改」。",
                 )}
               />
             </Card>
@@ -608,3 +570,4 @@ export function DocsPage() {
     </div>
   );
 }
+

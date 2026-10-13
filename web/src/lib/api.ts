@@ -1173,9 +1173,14 @@ export const api = {
   docFromFile: async (
     pid: number,
     file: File,
+    aiEditable: boolean,
   ): Promise<{ ok: boolean; created: boolean; doc: ProjectDoc; chars: number; truncated: boolean; warnings: string[] }> => {
     const fd = new FormData();
     fd.append("file", file);
+    // 用户在上传处选的"助手能不能改"。
+    // ★ 必须走 **Form 字段**：这个端点是 multipart，普通标量参数在 FastAPI 里
+    // 会被当成 **query** 而静默忽略（踩过：勾了"只有我能改"却没锁上，且无报错）。
+    fd.append("ai_editable", aiEditable ? "1" : "0");
     return req(`/projects/${pid}/docs/from-file`, {
       method: "POST",
       body: fd,

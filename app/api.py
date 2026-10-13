@@ -12,7 +12,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import unquote
 
-from fastapi import APIRouter, Depends, File, HTTPException, Request, Response, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.responses import RedirectResponse, StreamingResponse
 from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
@@ -1873,6 +1873,11 @@ async def create_doc_from_file(
     pid: int,
     request: Request,
     file: UploadFile = File(...),
+    # ★ 必须是 `Form`，不能是普通标量参数（2026-10-12 实测踩到）。
+    # FastAPI 对"同时有 File 的端点"里的裸标量参数按 **query** 处理，
+    # 于是前端以表单字段发来的 ai_editable 被**静默忽略**、永远用默认值 ——
+    # 结果是用户取消勾选"允许助手修改"，上传完却没锁上，而且没有任何报错。
+    ai_editable: str = Form("1"),
 ) -> dict:
     """把一个上传文件变成**可查看、可编辑的文档**（2026-10-12）。
 
@@ -1889,11 +1894,12 @@ async def create_doc_from_file(
     所以这里把解析出的原文写进一份 `spec_source` 文档：同一份文件
     既进了知识库、也在文档页里看得见改得动。
 
-    ## 助手对它的权限
+    ## `ai_editable`
 
-    **永远只读**（`ai_editable=False`）。这是外部原件，助手往里写就等于篡改，
-    而用户日后核对时看到的是被改过的版本 —— 那种错误几乎发现不了。
-    助手仍然能读它（`read_project_docs` 不看这一列）。
+    上传处那个「允许助手修改」的勾选（默认勾上）。
+    用户明确要求「上传的文件我可以选择 ai 是否可以改」——
+    上传**外部原件**（客户给的说明书、别人写的需规）时取消勾选：
+    那是别人给的东西，助手改了就对不上，而用户日后核对时看到的是被改过的版本。
     """
     await _project_access(request, pid, "editor")
     from app import docparse
@@ -1913,14 +1919,8 @@ async def create_doc_from_file(
     if not text:
         raise HTTPException(400, f"「{name}」解析出来是空的，没有内容可存入文档。")
 
-    # ★ 上传的资料原文**始终不允许助手改写**（2026-10-12）。
-    #
-    # 理由：它是**外部原件**（客户给的说明书、别人写的需规）。助手往里写东西
-    # 就等于篡改原件，而用户日后核对时看到的是被改过的版本 ——
-    # 这种错误极难发现。助手仍然能**读**它（read_project_docs 不看这一列）。
-    #
-    # 所以这一列恒为 False，不给调用方"传错就解锁"的机会。
-    editable = False
+    # 用户在**上传处**选的"允许助手修改"（默认允许）。
+    editable = str(ai_editable).strip() not in ("0", "false", "False", "")
     # 文本 → HTML。用 escape + <p> 保留段落：上传的是纯文本资料，
     # 不该去猜它的 markdown 结构（猜错了正文会变形），所以逐段成 <p>。
     from html import escape as _escape

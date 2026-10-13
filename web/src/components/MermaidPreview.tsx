@@ -25,6 +25,9 @@ export function MermaidPreview({ html }: { html: string }) {
   const { t } = useTranslation();
   const [rendered, setRendered] = useState<Record<number, string>>({});
   const [errors, setErrors] = useState<Record<number, string>>({});
+  /** 点开的大图源码（null = 没开）。存 SVG 而不是下标：
+   *  源码变了图会重画，存下标可能指向已经不存在的那张。 */
+  const [zoom, setZoom] = useState<string | null>(null);
   const seq = useRef(0);
 
   // 从正文里扫出所有图表源码。
@@ -114,7 +117,8 @@ export function MermaidPreview({ html }: { html: string }) {
   if (!sources.length) return null;
 
   return (
-    <div className="space-y-2">
+    <>
+      <div className="space-y-2">
       <div className="flex items-center gap-1.5 text-[12px] text-ink-500">
         <GitBranch className="h-3.5 w-3.5" />
         {t("流程图预览（下面的图由正文里的 mermaid 源码渲染，改源码图就变）")}
@@ -135,13 +139,31 @@ export function MermaidPreview({ html }: { html: string }) {
             </div>
           </div>
         ) : rendered[i] ? (
-          <div
-            key={i}
-            className="tp-mermaid-box overflow-x-auto rounded-lg border border-[var(--line)] bg-[var(--panel)] p-3"
-            // mermaid 输出的 SVG 由库自己生成；源码里的 HTML 已被
-            // securityLevel:"strict" 拦下，正文本身也在入库时净化过。
-            dangerouslySetInnerHTML={{ __html: rendered[i] }}
-          />
+          <div key={i}>
+            {/* ★ 点一下放大（2026-10-12 用户要求「流程图我就想点开看」）。
+                项目文档里的图受栏宽约束，节点多的纵向链会被压小、字看不真。
+                点开用占满屏幕的浮层显示**原始尺寸**的图。
+                整块可点 —— 用户的直觉是"点图看图"，不是"找一个小按钮"。 */}
+            <div
+              className="tp-mermaid-box group relative overflow-x-auto rounded-lg border border-[var(--line)] bg-[var(--panel)] p-3 transition-colors hover:border-brand-300"
+              onClick={() => setZoom(rendered[i])}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  setZoom(rendered[i]);
+                }
+              }}
+              role="button"
+              tabIndex={0}
+              title={t("点开查看大图")}
+              // mermaid 输出的 SVG 由库自己生成；源码里的 HTML 已被
+              // securityLevel:"strict" 拦下，正文本身也在入库时净化过。
+              dangerouslySetInnerHTML={{ __html: rendered[i] }}
+            />
+            <p className="mt-1 text-[10.5px] text-ink-400 group-hover:text-ink-500">
+              {t("点图可放大查看")}
+            </p>
+          </div>
         ) : (
           <div
             key={i}
@@ -151,6 +173,48 @@ export function MermaidPreview({ html }: { html: string }) {
           </div>
         ),
       )}
-    </div>
+      </div>
+
+      {/* 放大浮层：把图按**原始尺寸**放出来 + 允许滚动。
+          缩小到屏幕内等于把"看不清"的问题重复一遍，所以这里不限高。 */}
+      {zoom && (
+      <div
+        // ★ `inset-0` 只固定了四个边，但**内容更高时 flex 容器会被撑高**：
+        //   实测弹层高度变成了 1735px（视口只有 900），于是 body 掉到屏幕外，
+        //   图的下半部分看不见、背后页面内容还从半透明底里透出来，和标题糊在一起。
+        //   `max-h-[100dvh]` 把它钉在视口内，`overflow-hidden` 保证不溢出。
+        className="fixed inset-0 z-50 flex max-h-[100dvh] flex-col gap-2 overflow-hidden bg-black/90 p-3 sm:p-6"
+        onClick={() => setZoom(null)}
+        role="dialog"
+        aria-modal="true"
+      >
+        {/* ★ 文字不能用 text-white/90（2026-10-12 修）：浮层背景是 black/60 + 模糊，
+            而图自己有**浅色底**，白字压在浅色底上直接看不见（实测截图里那行是透明的）。
+            给这一行自己一个深色胶囊底，无论图多亮都读得清。 */}
+        <div className="flex shrink-0 items-center gap-2">
+          <span className="inline-flex items-center gap-2 rounded-lg bg-black/75 px-3 py-1.5 text-[12px] text-white shadow-lg">
+            <GitBranch className="h-3.5 w-3.5" />
+            {t("点任意处关闭 · 内容可滚动")}
+          </span>
+          <button
+            className="ml-auto rounded-lg bg-black/75 px-3 py-1.5 text-[12px] text-white shadow-lg hover:bg-black/90"
+            onClick={(e) => {
+              e.stopPropagation();
+              setZoom(null);
+            }}
+          >
+            {t("关闭")}
+          </button>
+        </div>
+        {/* flex-1 + min-h-0：占满剩余高度，图在里面滚动。
+            自身不缩放 —— 缩小到屏幕内等于把"看不清"重复一遍。 */}
+        <div
+          className="tp-mermaid-zoom min-h-0 flex-1 overflow-auto rounded-xl bg-[var(--panel)] p-4"
+          onClick={(e) => e.stopPropagation()}
+          dangerouslySetInnerHTML={{ __html: zoom }}
+        />
+      </div>
+      )}
+    </>
   );
 }

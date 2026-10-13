@@ -107,30 +107,57 @@ class TestUploadBecomesDocument:
         got = next(d for d in docs if d["kind"] == "spec_source")
         assert "同一范围不能配两条" in got["html"]
 
-    def test_uploaded_material_is_always_read_only_for_the_assistant(self, client):
-        """★ 上传的资料原文对助手**永远只读**。
+    def test_the_uploader_chooses_whether_the_assistant_may_edit(self, client):
+        """★ 上传处那个「允许助手修改」勾选决定权限（2026-10-12 用户要求）。
 
-        它是外部原件（客户给的说明书、别人写的需规）。助手往里写就是篡改原件，
-        而用户日后核对时看到的是被改过的版本 —— 那种错误几乎发现不了。
-        助手仍然能**读**它。"""
-        pid = _project(client, "upload-readonly")
+        用户原话：「上传的文件我可以选择 ai 是否可以改」。
+        所以上传**必须**能选，而且这个选择要真的落到 `ai_editable` 上。
+
+        默认勾上（可改）：项目文档的主要用法是"助手起稿、人改"，
+        默认锁上会让人以为功能坏了。上传**外部原件**（客户给的说明书、
+        别人写的需规）的人会主动取消勾选 —— 那是别人给的东西，改了就对不上。
+        """
+        pid = _project(client, "upload-choice")
+
+        # ① 勾上（默认）→ 助手可改
+        ok = client.post(
+            f"/api/projects/{pid}/docs/from-file",
+            files={"file": ("可以改.txt", "内容甲".encode(), "text/plain")},
+            data={"ai_editable": "1"},
+        )
+        assert ok.status_code == 200, ok.text
+        assert ok.json()["doc"]["ai_editable"] is True
+
+        # ② 取消勾选 → 只有人能改
+        locked = client.post(
+            f"/api/projects/{pid}/docs/from-file",
+            files={"file": ("锁住.txt", "内容乙".encode(), "text/plain")},
+            data={"ai_editable": "0"},
+        )
+        assert locked.status_code == 200, locked.text
+        assert locked.json()["doc"]["ai_editable"] is False
+        assert locked.json()["doc"]["id"] != ok.json()["doc"]["id"], "两份文件应当是两条文档"
+
+    def test_the_lock_actually_stops_the_assistant(self, client):
+        """选了"只有我能改"就必须真的拦得住 —— 否则那个勾选只是装饰。"""
+        pid = _project(client, "upload-locked-really")
         r = client.post(
             f"/api/projects/{pid}/docs/from-file",
             files={"file": ("外部资料.txt", "原件内容XYZ".encode(), "text/plain")},
+            data={"ai_editable": "0"},
         )
-        assert r.status_code == 200, r.text
-        assert r.json()["doc"]["ai_editable"] is False, "上传的资料竟然允许助手改写"
+        assert r.json()["doc"]["ai_editable"] is False
 
         from app.assistant import _read_project_docs, _write_project_doc
 
-        # 能读
+        # 能读（用户要求「ai 可以阅读那里面所有文档」）
         rd = asyncio.run(_read_project_docs(pid, {"kind": "spec_source"}))
-        assert "原件内容XYZ" in rd.get("readable", ""), f"助手读不到上传的资料：{rd}"
+        assert "原件内容XYZ" in rd.get("readable", ""), f"助手读不到：{rd}"
         # 不能写
         wr = asyncio.run(
             _write_project_doc(pid, {"kind": "spec_source", "markdown": "助手篡改的内容"})
         )
-        assert "error" in wr, f"助手改写了上传的原件：{wr}"
+        assert "error" in wr, f"助手改写了锁住的原件：{wr}"
         after = next(
             d
             for d in client.get(f"/api/projects/{pid}/docs").json()["docs"]

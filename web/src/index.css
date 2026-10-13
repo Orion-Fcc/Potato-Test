@@ -471,6 +471,20 @@ button, a, input, textarea, [role="button"] {
   flex: 0 0 auto;
 }
 
+/* 点开的大图浮层（2026-10-12，用户要求「流程图我就想点开看」）。
+ *
+ * ★ 这里**故意不设任何限高/缩放**：页内那张图受宽度约束会被压小，
+ * 浮层的意义就是把图放到**原始尺寸**让你看清字。
+ * 浮层自己 overflow:auto，图比屏幕大就滚动 —— 缩小到屏幕内等于把
+ * 刚才那个"看不清"的问题重复一遍。
+ */
+.tp-mermaid-zoom svg {
+  max-width: none !important;
+  max-height: none !important;
+  height: auto !important;
+  /* 深色主题下 mermaid 的 base 主题用的是浅色背景变量，浮层也跟着走，不用改 */
+}
+
 /* 多行截断（2026-10-10，用户反馈"看不到所有界面"）。
  *
  * 为什么不直接用 Tailwind 的 `line-clamp-4`：它要 `@tailwindcss/line-clamp`

@@ -9,7 +9,7 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { api, type KnowledgeFormats } from "../lib/api";
+import { api, type KnowledgeFormats, type ProjectDoc } from "../lib/api";
 import { Button, Card } from "./ui";
 import { useErrorToast } from "./toast";
 
@@ -32,6 +32,7 @@ export function SpecSourcePanel({
   pid,
   onUploaded,
   formats: formatsProp,
+  onDocCreated,
 }: {
   pid: number;
   onUploaded?: () => void;
@@ -39,6 +40,8 @@ export function SpecSourcePanel({
    *  父组件（项目文档页）也要用同一份清单做「上传成文档」的 accept ——
    *  两处各取一次会多一个请求，而且理论上可能拿到不同的结果。 */
   formats?: KnowledgeFormats | null;
+  /** 上传同时生成了一份文档 → 通知父组件刷新列表并切过去。 */
+  onDocCreated?: (doc: ProjectDoc) => void;
 }) {
   const { t } = useTranslation();
   const fail = useErrorToast();
@@ -51,6 +54,15 @@ export function SpecSourcePanel({
   const [note, setNote] = useState("");
   const [problems, setProblems] = useState("");
   const [open, setOpen] = useState(false);
+  /** ★ 上传的文件助手能不能改（2026-10-12 用户要求「上传的文件我可以选择
+   *  ai 是否可以改」）。
+   *
+   *   默认**勾上**（允许助手改）：项目文档的主要用法是"助手起稿、人改"，
+   *   默认锁上会让人以为功能坏了。但上传的**外部原件**（客户给的说明书、
+   *   别人写的需规）经常不该被 AI 动 —— 那是别人给的东西，改了就对不上，
+   *   所以这个选择必须摆在**上传的地方**，而不是藏到上传后去逐份设。
+   */
+  const [aiEditable, setAiEditable] = useState(true);
 
   const load = useCallback(async () => {
     try {
@@ -74,7 +86,12 @@ export function SpecSourcePanel({
   }, [pid, load, formatsProp]);
 
   /** 一次可以选多个文件。逐个上传而不是本地拼成一个大字符串：
-   *  那样浏览器和接口都不必一次吞下整份合并后的文档（100MB 的需规实测过）。 */
+   *  那样浏览器和接口都不必一次吞下整份合并后的文档（100MB 的需规实测过）。
+   *
+   *  ★ 每个文件走**两条**路（2026-10-12 修用户报的"上传的需归文档无法查看修改"）：
+   *    `/knowledge/append`  → 知识库（AI 检索用的分块，大文档靠它）
+   *    `/docs/from-file`    → 项目文档（你读、你改的正文）
+   *  只走前者的话，文档页里根本没有这份文件 —— 用户看不见也改不了。 */
   async function onPick(list: FileList | null) {
     const files = Array.from(list ?? []);
     if (!files.length) return;
@@ -83,6 +100,7 @@ export function SpecSourcePanel({
     setProblems("");
     const done: string[] = [];
     const bad: string[] = [];
+    let lastDoc: ProjectDoc | null = null;
     for (const f of files) {
       try {
         const r = await api.extractKnowledge(pid, f);
@@ -94,15 +112,30 @@ export function SpecSourcePanel({
         );
         if (r.warnings.length) bad.push(`${r.filename}: ${r.warnings.join("; ")}`);
         setStats({ chars: saved.chars, chunks: saved.chunks });
+        // 同时存成可查看可编辑的文档，并按用户的选择决定助手能不能改
+        try {
+          const d = await api.docFromFile(pid, f, aiEditable);
+          lastDoc = d.doc;
+        } catch (e) {
+          // 文档这一路失败不该把知识库那条已经成功的路说成失败 ——
+          // 但要如实说清"语句库进了、文档没进"，否则用户会找不到那份文档。
+          bad.push(`${r.filename}：已进知识库，但存成文档失败（${e instanceof Error ? e.message : String(e)}）`);
+        }
       } catch (e) {
         bad.push(`${f.name}: ${e instanceof Error ? e.message : String(e)}`);
       }
     }
-    if (done.length) setNote(`${t("Imported")}: ${done.join("、")}`);
+    if (done.length) {
+      setNote(
+        `${t("Imported")}: ${done.join("、")}` +
+          (lastDoc ? t("；并已存成文档，可在左侧点开查看") : ""),
+      );
+    }
     if (bad.length) setProblems(bad.join("；"));
     setBusy(false);
     if (fileRef.current) fileRef.current.value = ""; // 同一个文件还能再选一次
     if (done.length) onUploaded?.();
+    if (lastDoc) onDocCreated?.(lastDoc);
   }
 
   const hasDocs = (stats?.chars ?? 0) > 0;
@@ -123,6 +156,22 @@ export function SpecSourcePanel({
         )}
 
         <div className="ml-auto flex items-center gap-2">
+          {/* ★ 上传前先选"助手能不能改"（2026-10-12 用户要求）。
+              放在按钮**左边**：用户点上传前一定会看到它。
+              默认勾上（可改）—— 默认锁上会让人以为功能坏了；
+              上传外部原件（客户给的说明书）的人会主动取消勾选。 */}
+          <label
+            className="flex cursor-pointer select-none items-center gap-1.5 text-[11.5px] text-ink-600"
+            title={t("取消勾选后，助手不能修改这些文件（它仍然能读）")}
+          >
+            <input
+              type="checkbox"
+              checked={aiEditable}
+              onChange={(e) => setAiEditable(e.target.checked)}
+              className="h-3.5 w-3.5 accent-[var(--brand-600)]"
+            />
+            {t("允许助手修改")}
+          </label>
           <input
             ref={fileRef}
             type="file"

@@ -332,6 +332,7 @@ const zh: Record<string, string> = {
   "Judge escalation (review)": "判定复核（强模型）",
   "Failure narrative / case memory": "失败叙述 / 用例记忆",
   "Case generation from spec": "需规生成用例",
+  "Project docs generation (overview / analysis / flowchart)": "生成项目文档（总览 / 需求分析 / 流程图）",
   "Assistant chat & Feishu": "助手对话 / 飞书",
   "~95% of all tokens — the only lever that really cuts cost": "约占总 token 的 95% —— 唯一真正能省钱的旋钮",
   "small volume, quality-critical — keep the strong model here": "量小但质量关键 —— 这里该留强模型",

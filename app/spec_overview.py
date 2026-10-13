@@ -982,7 +982,9 @@ async def analyze(project_id: int) -> OverviewResult:
         for attempt in attempts:
             try:
                 async with gate:
-                    data, u = await specgen._call_json(_PLAN_SYSTEM, user, max_tokens=4000)
+                    data, u = await specgen._call_json(
+                        _PLAN_SYSTEM, user, max_tokens=4000, role="docgen"
+                    )
                 for k in ("prompt", "completion", "cached", "total", "calls"):
                     usage[k] += int((u or {}).get(k, 0) or 0)
                 sec = parse_section(key, data)

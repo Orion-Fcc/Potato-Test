@@ -379,7 +379,9 @@ def parse_modules(raw: Any, valid_titles: list[str]) -> list[dict]:
     return out
 
 
-async def _call_json(system: str, user: str, max_tokens: int = 8000) -> tuple[dict, dict]:
+async def _call_json(
+    system: str, user: str, max_tokens: int = 8000, role: str = "specgen"
+) -> tuple[dict, dict]:
     """一次 JSON 模式调用，返回 (解析出的对象, usage 账本)。
 
     复用 app/llm.py 的池与它的重试语义：池里换 key 是我们自己的事（429 换下一套），
@@ -419,7 +421,7 @@ async def _call_json(system: str, user: str, max_tokens: int = 8000) -> tuple[di
     data: Any = None
     for i, prompt in enumerate(attempts):
         res, _prof = await _llm.chat_with_pool(
-            role="specgen",
+            role=role,
             system=system,
             user=prompt,
             json_mode=True,

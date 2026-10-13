@@ -31,6 +31,7 @@ const ROLE_LABEL: Record<string, string> = {
   judge_escalate: "Judge escalation (review)",
   narrative: "Failure narrative / case memory",
   specgen: "Case generation from spec",
+  docgen: "Project docs generation (overview / analysis / flowchart)",
   assistant: "Assistant chat & Feishu",
 };
 
@@ -149,6 +150,7 @@ const PREMIUM_ROLES = [
   "judge_escalate",
   "judge",
   "specgen",
+  "docgen",
   "narrative",
   "assistant",
   "agent",

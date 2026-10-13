@@ -50,6 +50,10 @@ ROLES: tuple[str, ...] = (
     "judge_escalate",  # 复核层：初判失败/闸门报警时才动用（更贵的模型放这里）
     "narrative",
     "specgen",
+    # 生成「项目说明文档」（项目总览 / 需求分析 / 流程图）—— 2026-10-13 从 specgen 拆出来。
+    # 拆的原因：它和"需规生成用例"是两件事（一个写给人看的说明书、一个生成测试用例），
+    # 共用一个用途时用户没法单独把"文档生成"挂到强模型上（反馈：「生成流程图没这项」）。
+    "docgen",
     "assistant",
 )
 
@@ -62,6 +66,7 @@ PREMIUM_ROLES: tuple[str, ...] = (
     "judge_escalate",
     "judge",
     "specgen",
+    "docgen",
     "narrative",
     "assistant",
     "agent",
@@ -78,6 +83,7 @@ SUGGESTED_PREMIUM_ROLES: tuple[str, ...] = (
     "judge_escalate",
     "judge",
     "specgen",
+    "docgen",
     "narrative",
     "assistant",
 )
@@ -93,12 +99,13 @@ SUGGESTED_PREMIUM_ROLES: tuple[str, ...] = (
 # 每次 LLM 往返约 1.6 万输入 token；judge 每条用例固定一次（~3-4k 输入）、
 # judge_escalate 仅在失败/闸门报警时才调用、narrative 仅在失败时、specgen 各一次、
 # assistant 偶发。所以 agent 占绝对多数 —— 这正是"省钱主旋钮在 agent"的量化依据。
-# 六个值之和必须为 100（前端按它做兜底占比）。
+# 这些值之和必须为 100（前端按它做兜底占比）。
 ROLE_TOKEN_SHARE_ESTIMATE: dict[str, float] = {
-    "agent": 94.0,
+    "agent": 93.0,
     "judge": 2.5,
     "judge_escalate": 1.5,
     "specgen": 1.0,
+    "docgen": 1.0,
     "narrative": 0.5,
     "assistant": 0.5,
 }

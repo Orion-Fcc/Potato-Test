@@ -462,7 +462,7 @@ async def optimize_module(
     last: Exception | None = None
     for attempt in (1, 2, 3):
         try:
-            data, usage = await specgen._call_json(_SYSTEM, user, max_tokens=4000)
+            data, usage = await specgen._call_json(_SYSTEM, user, max_tokens=4000, role="caseopt")
             # 流程图同样要过规范化与判定 —— 它和项目文档的流程图走**同一套**校验，
             # 否则同一个渲染器在这里会收到没清理过的源码，整张图炸掉。
             flow = ""

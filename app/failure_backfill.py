@@ -130,6 +130,9 @@ async def backfill_root_causes(
                     json_mode=True,
                     temperature=0,
                     timeout=90.0,
+                    # 失败根因分类单独给一个用途（2026-10-13）：原来不传 role，
+                    # 走的是池的第 1 套，没法像别的环节那样被单独指定。
+                    role="failattr",
                 )
                 data = res.json(default=None)
                 if not isinstance(data, dict):

@@ -54,6 +54,12 @@ ROLES: tuple[str, ...] = (
     # 拆的原因：它和"需规生成用例"是两件事（一个写给人看的说明书、一个生成测试用例），
     # 共用一个用途时用户没法单独把"文档生成"挂到强模型上（反馈：「生成流程图没这项」）。
     "docgen",
+    # AI 用例优化（「AI 优化」页：按失败清单改写既有用例）—— 2026-10-13 从 specgen 拆出来，
+    # 同理：它是"改既有用例"，和"从需规生成新用例"不是一件事，共用就没法单独分配。
+    "caseopt",
+    # 失败根因分类回填（失败清单的「补全分类」）—— 原来**不传 role**，走的是池的第 1 套，
+    # 完全没法单独指定；补一个用途让它也能被分配。
+    "failattr",
     "assistant",
 )
 
@@ -67,6 +73,8 @@ PREMIUM_ROLES: tuple[str, ...] = (
     "judge",
     "specgen",
     "docgen",
+    "caseopt",
+    "failattr",
     "narrative",
     "assistant",
     "agent",
@@ -84,6 +92,8 @@ SUGGESTED_PREMIUM_ROLES: tuple[str, ...] = (
     "judge",
     "specgen",
     "docgen",
+    "caseopt",
+    "failattr",
     "narrative",
     "assistant",
 )
@@ -101,11 +111,13 @@ SUGGESTED_PREMIUM_ROLES: tuple[str, ...] = (
 # assistant 偶发。所以 agent 占绝对多数 —— 这正是"省钱主旋钮在 agent"的量化依据。
 # 这些值之和必须为 100（前端按它做兜底占比）。
 ROLE_TOKEN_SHARE_ESTIMATE: dict[str, float] = {
-    "agent": 93.0,
+    "agent": 91.5,
     "judge": 2.5,
     "judge_escalate": 1.5,
     "specgen": 1.0,
     "docgen": 1.0,
+    "caseopt": 1.0,
+    "failattr": 0.5,
     "narrative": 0.5,
     "assistant": 0.5,
 }

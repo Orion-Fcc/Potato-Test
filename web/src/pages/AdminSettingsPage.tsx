@@ -32,6 +32,8 @@ const ROLE_LABEL: Record<string, string> = {
   narrative: "Failure narrative / case memory",
   specgen: "Case generation from spec",
   docgen: "Project docs generation (overview / analysis / flowchart)",
+  caseopt: "AI case optimization (rewrite cases)",
+  failattr: "Failure root-cause classification",
   assistant: "Assistant chat & Feishu",
 };
 
@@ -151,6 +153,8 @@ const PREMIUM_ROLES = [
   "judge",
   "specgen",
   "docgen",
+  "caseopt",
+  "failattr",
   "narrative",
   "assistant",
   "agent",

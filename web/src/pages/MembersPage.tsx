@@ -92,7 +92,6 @@ export function MembersPage() {
   return (
     <div className="space-y-6">
       <PageHeader
-        eyebrow={t("Project")}
         title={t("Members")}
         subtitle={t("Who can access this project, and at what level.")}
       />

@@ -10,18 +10,8 @@ import { NotificationBell } from "./NotificationBell";
 import { Sidebar } from "./Sidebar";
 import { Select } from "./ui";
 
-const SECTION_LABEL: Record<string, string> = {
-  overview: "Overview",
-  docs: "Project Docs",
-  proposals: "AI Optimization",
-  assistant: "Assistant",
-  cases: "Test Cases",
-  suites: "Suites",
-  runs: "Runs",
-  compare: "Compare",
-  issues: "Issues",
-  settings: "Settings",
-};
+// 面包屑不再显示章节名（2026-10-13）：它和页面 H1 一字不差，只留项目切换器。
+// SECTION_LABEL 因此删掉了 —— 留着会变成没人用的死表。
 
 export function Layout() {
   const { pid: pidParam } = useParams();
@@ -108,6 +98,9 @@ export function Layout() {
           ) : (
             <>
               <ChevronRight className="h-3.5 w-3.5 text-ink-400/70" />
+              {/* ★ 面包屑到这里就结束（2026-10-13）：**不再重复章节名**。
+                  章节名下面紧接着就是页面的 H1（也是章节名），而项目名侧栏也有一份 ——
+                  三段里两段是重复的。这里只留"项目切换器"这一件只有它能做的事。 */}
               <Select
                 variant="bare"
                 value={String(pid)}
@@ -150,8 +143,6 @@ export function Layout() {
                       );
                     })()}
               </Select>
-              <ChevronRight className="h-3.5 w-3.5 text-ink-400/70" />
-              <span className="text-ink-700">{t(SECTION_LABEL[section ?? "overview"] ?? section ?? "")}</span>
             </>
           )}
           <span className="ml-2 hidden truncate font-mono text-[11px] text-ink-400 md:inline">

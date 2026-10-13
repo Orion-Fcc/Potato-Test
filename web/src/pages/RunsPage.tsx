@@ -213,7 +213,6 @@ export function RunsPage() {
   return (
     <div className="space-y-6">
       <PageHeader
-        eyebrow={t("Project")}
         title={t("Runs")}
         subtitle={
           <>
@@ -279,9 +278,9 @@ export function RunsPage() {
             }
           />
           <Stat
-            label={t("Suite coverage")}
+            label={t("Case execution rate")}
             value={metrics.enabled ? `${metrics.coverage}%` : "—"}
-            sub={t("{{r}}/{{e}} cases", { r: metrics.ranCount, e: metrics.enabled })}
+            sub={t("{{r}}/{{e}} executed", { r: metrics.ranCount, e: metrics.enabled })}
             right={
               metrics.enabled > 0 ? (
                 <StatRing pct={metrics.coverage} size={46} thickness={4} showLabel={false} color="var(--brand-600)" />

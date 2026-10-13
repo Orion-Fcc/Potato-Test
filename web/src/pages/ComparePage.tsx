@@ -32,7 +32,6 @@ function RunPicker({ pid, onCompare }: { pid: number; onCompare: (ids: number[])
   return (
     <div className="space-y-6">
       <PageHeader
-        eyebrow={t("Project")}
         title={t("Compare runs")}
         subtitle={t("Pick two or more runs to see per-case outcomes side by side.")}
       />

@@ -164,7 +164,7 @@ export function SettingsPage() {
 
   return (
     <div className="space-y-6">
-      <PageHeader eyebrow={t("Project")} title={t("Settings")} subtitle={t("Project configuration.")} />
+      <PageHeader title={t("Settings")} subtitle={t("Project configuration.")} />
 
       <div className="mx-auto max-w-3xl space-y-6">
         <Card className="space-y-3 p-5">

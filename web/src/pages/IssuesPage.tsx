@@ -80,7 +80,6 @@ export function IssuesPage() {
   return (
     <div className="space-y-6">
       <PageHeader
-        eyebrow={t("Project")}
         title={t("Issues")}
         subtitle={t("Bugs from failed tests — track, fix, and re-run to verify.")}
         actions={tab === "issues" ? <Button onClick={newIssue}>{t("+ New issue")}</Button> : undefined}

@@ -22,6 +22,9 @@ import { useErrorToast } from "./toast";
  *  因为一张混着写接口的清单，让人误点一次的代价是在测试环境里建/删真数据。
  *  清单里保留它们是有价值的（知道系统有哪些写接口），但只能是"知道"。
  */
+/** 默认只渲染这么多个（2026-10-13）：实测 35+ 条会占 1836px。 */
+const ENDPOINT_PREVIEW = 8;
+
 export function ApiEndpointsPanel({ pid }: { pid: number }) {
   const { t } = useTranslation();
   const fail = useErrorToast();
@@ -31,6 +34,9 @@ export function ApiEndpointsPanel({ pid }: { pid: number }) {
   );
   const [loading, setLoading] = useState(true);
   const [open, setOpen] = useState<number | null>(null);
+  // ★ 列表默认只显示前几个（2026-10-13）：这份清单实测能到 35+ 条、占 **1836px**
+  //   （概览页一共 3807px —— 它一个人占掉一半）。默认收起大半，要看全的按一下。
+  const [showAll, setShowAll] = useState(false);
   const [probe, setProbe] = useState<Record<number, ApiProbeResult | "loading">>({});
 
   const load = useCallback(
@@ -64,6 +70,8 @@ export function ApiEndpointsPanel({ pid }: { pid: number }) {
 
   const read = data?.endpoints.filter((e) => !e.writable) ?? [];
   const write = data?.endpoints.filter((e) => e.writable) ?? [];
+  const all = [...read, ...write];
+  const shown = showAll ? all : all.slice(0, ENDPOINT_PREVIEW);
 
   return (
     <Card className="p-4">
@@ -101,7 +109,7 @@ export function ApiEndpointsPanel({ pid }: { pid: number }) {
             </span>
           </div>
           <div className="space-y-1">
-            {[...read, ...write].map((e) => {
+            {shown.map((e) => {
               const isOpen = open === e.id;
               const pr = probe[e.id];
               return (
@@ -214,6 +222,14 @@ export function ApiEndpointsPanel({ pid }: { pid: number }) {
               );
             })}
           </div>
+          {all.length > ENDPOINT_PREVIEW && (
+            <button
+              onClick={() => setShowAll((v) => !v)}
+              className="mt-2 w-full rounded-lg border border-dashed border-[var(--line-strong)] py-1.5 text-[12px] text-ink-500 outline-none transition-colors hover:border-brand-200 hover:text-brand-700"
+            >
+              {showAll ? t("Show fewer") : t("Show all {{n}}", { n: all.length })}
+            </button>
+          )}
         </>
       )}
     </Card>

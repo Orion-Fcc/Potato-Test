@@ -10,7 +10,6 @@ import { chartTooltip } from "../components/table";
 import { Empty, PageSkeleton } from "../components/feedback";
 import { SetupChecklist } from "../components/SetupChecklist";
 import { FailureDigestPanel } from "../components/FailureDigestPanel";
-import { CaseChangePanel } from "../components/CaseChangePanel";
 import { ApiEndpointsPanel } from "../components/ApiEndpointsPanel";
 
 export function OverviewPage() {
@@ -41,7 +40,6 @@ export function OverviewPage() {
   return (
     <div className="space-y-6">
       <PageHeader
-        eyebrow={t("Project")}
         title={t("Overview")}
         subtitle={t("Suite health at a glance.")}
       />
@@ -89,9 +87,8 @@ export function OverviewPage() {
         />
       </div>
 
-      {/* 用例改动审计：谁（人/助手）把哪条用例的哪个字段改成了什么。
-          放在 KPI 之后、趋势之前 —— 和上方的失败清单呼应（清单驱动改动，审计记录改动）。 */}
-      <CaseChangePanel />
+      {/* 用例改动审计已搬到「测试用例」页（2026-10-13）—— 它记的是用例的改动，
+          堆在概览里只会把这一页撑长。 */}
 
       {/* 后端接口探索（2026-10-09）。放在概览里而不是塞进设置页：
           它是"这个系统长什么样"的一部分（菜单、列表数据从哪来），

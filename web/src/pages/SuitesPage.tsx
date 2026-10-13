@@ -113,7 +113,6 @@ export function SuitesPage() {
   return (
     <div className="space-y-6">
       <PageHeader
-        eyebrow={t("Project")}
         title={t("Suites")}
         subtitle={t("Owned, assigned test suites with reminders. Anyone can run; each run records who did.")}
         actions={<Button onClick={() => setDraft(emptyDraft())}>{t("New suite")}</Button>}

@@ -8,6 +8,7 @@ import { rateColor, rateTone } from "../lib/metrics";
 import { Badge, Button, Card, Checkbox, Field, Input, PageHeader, Select, Stat, StatRing } from "../components/ui";
 import { CASE_STATUS_LABELS, CASE_TYPE_LABELS, PRIORITY_LABELS, label } from "../lib/labels";
 import { CaseDrawer } from "../components/CaseDrawer";
+import { CaseChangePanel } from "../components/CaseChangePanel";
 import { Modal } from "../components/Modal";
 import { SpecGenPanel } from "../components/SpecGenPanel";
 import { useToast, useErrorToast } from "../components/toast";
@@ -378,10 +379,10 @@ export function CasesPage() {
         </div>
       )}
       <PageHeader
-        eyebrow={t("Project")}
         title={t("Test Cases")}
         subtitle={
-          <span className="tabular-nums">{t("{{n}} cases in this project.", { n: cases.length })}</span>
+          // 不再重复条数：下面第一张指标卡就是「用例总数」（2026-10-13）。
+          <span>{t("Test cases for the selected project.")}</span>
         }
         actions={
           <>
@@ -413,9 +414,9 @@ export function CasesPage() {
 
       <div className="tp-rise grid grid-cols-2 gap-4 lg:grid-cols-4">
         <Stat
-          label={t("Coverage")}
+          label={t("Case execution rate")}
           value={`${cov.coverage}%`}
-          sub={t("{{r}}/{{e}} ever run", { r: cov.ranCount, e: cov.enabled })}
+          sub={t("{{r}}/{{e}} executed", { r: cov.ranCount, e: cov.enabled })}
           right={<StatRing pct={cov.coverage} size={46} thickness={4} color="var(--brand-600)" />}
         />
         <Stat
@@ -794,6 +795,10 @@ export function CasesPage() {
           })}
         </div>
       )}
+
+      {/* 用例改动审计从「概览」搬到这页（2026-10-13）：它记的是**用例**的改动，属于这里；
+          放在概览里把那一页撑到 4 屏多（实测 4184px）。 */}
+      <CaseChangePanel />
 
       {editing && (
         <CaseDrawer

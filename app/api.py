@@ -1921,13 +1921,30 @@ async def create_doc_from_file(
 
     # 用户在**上传处**选的"允许助手修改"（默认允许）。
     editable = str(ai_editable).strip() not in ("0", "false", "False", "")
-    # 文本 → HTML。用 escape + <p> 保留段落：上传的是纯文本资料，
-    # 不该去猜它的 markdown 结构（猜错了正文会变形），所以逐段成 <p>。
+
+    # ★ 上传的 HTML 要**保留原始结构**（2026-10-13 修用户报的「html 文件变了、图片看不到」）。
+    #
+    # 原因：`docparse.extract` 是给**检索**用的 —— 它把任何文件拍成可搜索的纯文本
+    # （HTML 走 markdownify 变成 markdown）。而文档正文要给人**看**。原来两条路都用
+    # `res.text`，于是 HTML 的图片 / 表格 / 样式全没了 —— 正文只剩一段被转义的文本。
+    #
+    # 分流：知识库继续用 `res.text`（检索要纯文本）；文档正文对 HTML **用原文件**
+    # （过一遍净化，脚本 / iframe 仍被 strip）。非 HTML（docx/pdf/xlsx/rtf/md/txt）没有
+    # HTML 结构可保，仍按纯文本逐段成 <p>（猜 markdown 会把正文弄乱）。
     from html import escape as _escape
 
     paras = [p.strip() for p in text.split("\n") if p.strip()]
-    body = "".join(f"<p>{_escape(p)}</p>" for p in paras[:20000])
-    html = sanitize(f"<h2>{_escape(name)}</h2>{body}")
+    text_body = "".join(f"<p>{_escape(p)}</p>" for p in paras[:20000])
+
+    if res.fmt == "html":
+        from bs4 import BeautifulSoup
+
+        raw = str(BeautifulSoup(data, "lxml"))
+        html = sanitize(raw)
+        if not html:  # 净化失败关闭 → 回落到文本版，别存一份空文档
+            html = sanitize(f"<h2>{_escape(name)}</h2>{text_body}")
+    else:
+        html = sanitize(f"<h2>{_escape(name)}</h2>{text_body}")
 
     async with db_session() as s:
         row = (

@@ -107,6 +107,32 @@ class TestUploadBecomesDocument:
         got = next(d for d in docs if d["kind"] == "spec_source")
         assert "同一范围不能配两条" in got["html"]
 
+    def test_html_upload_keeps_images_and_tables(self, client):
+        """★ 2026-10-13：上传 HTML 必须**保留结构**（图片 / 表格），不能拍成纯文本。
+
+        用户反馈「html 的文件变了、图片等很多东西都看不到」。根因：文档正文原来复用
+        `res.text`（给检索用的纯文本，HTML 会被 markdownify）+ 逐段转义成 <p> ——
+        `<img>`/`<table>`/样式全丢。这条钉住：HTML 走原文件（净化后），图片和表格要留。
+        """
+        pid = _project(client, "upload-html")
+        png = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+        page = (
+            "<html><body><h1>章节</h1>"
+            f'<img src="{png}" alt="图">'
+            "<table><tr><td>单元格</td></tr></table>"
+            "</body></html>"
+        ).encode()
+        r = client.post(
+            f"/api/projects/{pid}/docs/from-file",
+            files={"file": ("需规.html", page, "text/html")},
+        )
+        assert r.status_code == 200, r.text
+        html = r.json()["doc"]["html"]
+        assert "<img" in html, "图片被拍掉了 —— HTML 正文又走回纯文本了"
+        assert "data:image/png;base64," in html, "内嵌图片被丢掉"
+        assert "<table" in html, "表格被拍掉了"
+        assert "单元格" in html
+
     def test_the_uploader_chooses_whether_the_assistant_may_edit(self, client):
         """★ 上传处那个「允许助手修改」勾选决定权限（2026-10-12 用户要求）。
 

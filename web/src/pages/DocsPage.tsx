@@ -1,5 +1,5 @@
-import { FileText, GitBranch, Loader2, Lock, Plus, Save, Sparkles, Trash2, Unlock, Wand2 } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { FileText, GitBranch, Loader2, Lock, Plus, Save, Sparkles, Trash2, Unlock, Upload, Wand2 } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useParams } from "react-router-dom";
 import { api, type KnowledgeFormats, type ProjectDoc, type VerifiedCoverage } from "../lib/api";
@@ -7,7 +7,6 @@ import { Badge, Button, Card, Input, PageHeader } from "../components/ui";
 import { RichTextEditor } from "../components/RichTextEditor";
 import { InsightsPanel } from "../components/InsightsPanel";
 import { MermaidPreview } from "../components/MermaidPreview";
-import { SpecSourcePanel } from "../components/SpecSourcePanel";
 import { Empty, PageSkeleton } from "../components/feedback";
 import { useErrorToast, useToast } from "../components/toast";
 
@@ -153,6 +152,9 @@ export function DocsPage() {
   const [formats, setFormats] = useState<KnowledgeFormats | null>(null);
   const [genInfo, setGenInfo] = useState("");
   const [cov, setCov] = useState<VerifiedCoverage | null>(null);
+  // 上传需规 / 资料（2026-10-13）：入口在左列文档清单里（见下方 JSX）。
+  const fileRef = useRef<HTMLInputElement>(null);
+  const [uploading, setUploading] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -209,6 +211,38 @@ export function DocsPage() {
     setTitle(active.title || "");
     setDirty(false);
   }, [active]);
+
+  // 上传需规 / 资料（2026-10-13）：同时走两条路 —— 知识库（AI 检索分块）+ 一份项目文档
+  // （和别的文档一样可读可改）。默认「允许助手修改」，上传后可在该文档上随时切换。
+  const onUpload = async (list: FileList | null) => {
+    const files = Array.from(list ?? []);
+    if (!files.length) return;
+    setUploading(true);
+    const done: string[] = [];
+    const bad: string[] = [];
+    let lastDoc: ProjectDoc | null = null;
+    for (const f of files) {
+      try {
+        const r = await api.extractKnowledge(pid, f);
+        await api.appendKnowledge(pid, `## ${r.filename}\n${r.text}\n`);
+        done.push(r.filename);
+        try {
+          const d = await api.docFromFile(pid, f, true);
+          lastDoc = d.doc;
+        } catch (e) {
+          bad.push(`${r.filename}：${t("已进知识库，但存成文档失败")}（${e instanceof Error ? e.message : String(e)}）`);
+        }
+      } catch (e) {
+        bad.push(`${f.name}: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+    setUploading(false);
+    if (fileRef.current) fileRef.current.value = "";
+    if (done.length) toast("success", `${t("已上传")}：${done.join("、")}`);
+    if (bad.length) fail(new Error(bad.join("；")));
+    await load();
+    if (lastDoc) setActive(lastDoc);
+  };
 
   const save = async () => {
     if (!active) return;
@@ -338,20 +372,11 @@ export function DocsPage() {
         }
       />
 
-      {/* 文档与编辑器。2026-10-13：把「需规 / 资料」上传面板从整栏顶部挪进**左列**
-          （用户要求「移到左边里面」），和文档清单同一列 —— 它俩本来就是"这个项目里
-          有哪些资料"这一件事的两面。 */}
+      {/* 文档与编辑器。2026-10-13：上传入口放进左列的**文档清单里**（用户要求
+          「需规和他们一样，在这里面加入上传」）—— 上传完直接成为列表里的一员，
+          和 项目总览 / 需求分析 / 流程图 完全一样。 */}
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-[260px_1fr]">
-        {/* 左：需规 / 资料 + 文档清单 */}
-        <div className="space-y-4">
-        <SpecSourcePanel
-          pid={pid}
-          formats={formats}
-          onDocCreated={async (doc) => {
-            await load();
-            setActive(doc);
-          }}
-        />
+        {/* 左：文档清单（含上传入口） */}
         <Card className="h-fit p-2">
           <div className="space-y-0.5">
             {docs.map((d) => {
@@ -368,14 +393,6 @@ export function DocsPage() {
                   >
                     <Icon className="h-4 w-4 shrink-0 text-ink-400" />
                     <span className="min-w-0 flex-1 truncate">{d.title}</span>
-                    {d.kind === "spec_source" && (
-                      <span
-                        className="shrink-0 rounded bg-[var(--panel2)] px-1 text-[10px] text-ink-500"
-                        title={t("你上传的资料原文")}
-                      >
-                        {t("上传")}
-                      </span>
-                    )}
                     {d.origin === "ai" && (
                       <span
                         className="shrink-0 text-[10px] text-ink-400"
@@ -408,9 +425,34 @@ export function DocsPage() {
                 </div>
               );
             })}
+
+            {/* 上传入口（2026-10-13）：和文档同列、同样式。点它上传需规 / 资料，
+                解析后存成一份文档（列表里的一员，和 总览/需求分析/流程图 一样），
+                同时也进知识库供 AI 检索。默认「允许助手修改」，之后可在该文档上切换。 */}
+            <button
+              onClick={() => fileRef.current?.click()}
+              disabled={uploading}
+              className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-[13px] text-ink-500 transition-colors hover:bg-[var(--panel2)] disabled:opacity-50"
+            >
+              {uploading ? (
+                <Loader2 className="h-4 w-4 shrink-0 animate-spin text-ink-400" />
+              ) : (
+                <Upload className="h-4 w-4 shrink-0 text-ink-400" />
+              )}
+              <span className="min-w-0 flex-1 truncate">
+                {uploading ? t("读取中…") : t("上传需规 / 资料")}
+              </span>
+            </button>
+            <input
+              ref={fileRef}
+              type="file"
+              multiple
+              accept={formats?.accept ?? ".md,.txt,.docx,.pdf,.xlsx,.html,.rtf"}
+              className="hidden"
+              onChange={(e) => onUpload(e.target.files)}
+            />
           </div>
         </Card>
-        </div>
 
         {/* 右：编辑区 */}
         <div className="min-w-0 space-y-3">

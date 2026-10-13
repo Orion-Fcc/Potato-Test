@@ -351,6 +351,8 @@ export function DocsPage() {
       <SpecSourcePanel
         pid={pid}
         formats={formats}
+        sources={docs.filter((d) => d.kind === "spec_source")}
+        onSelect={setActive}
         onUploaded={() => {
           /* 知识库更新不影响文档列表 */
         }}
@@ -379,6 +381,14 @@ export function DocsPage() {
                   >
                     <Icon className="h-4 w-4 shrink-0 text-ink-400" />
                     <span className="min-w-0 flex-1 truncate">{d.title}</span>
+                    {d.kind === "spec_source" && (
+                      <span
+                        className="shrink-0 rounded bg-[var(--panel2)] px-1 text-[10px] text-ink-500"
+                        title={t("你上传的资料原文")}
+                      >
+                        {t("上传")}
+                      </span>
+                    )}
                     {d.origin === "ai" && (
                       <span
                         className="shrink-0 text-[10px] text-ink-400"
@@ -481,9 +491,12 @@ export function DocsPage() {
                 {/* ★ 「只有我能改」开关（2026-10-12 用户要求）。
                     读不受影响 —— 助手永远能读全部；这一项只拦**写**。
                     占位文档（id=0）没有行可改，所以不显示这个开关。
-                    `spec_source`（上传的资料原文）本身就是"只读资料" ——
-                    助手改它等于篡改你的原件，所以不给开。 */}
-                {active.id > 0 && active.kind !== "spec_source" && (
+
+                    2026-10-13：`spec_source`（上传的资料原文）**也放开**这个开关 ——
+                    原来把它排除在外（"原件不给开"），于是用户看到上传的需规挂着锁、
+                    却找不到任何地方改它，观感就是"我不可以修改"。上传时选过之后
+                    仍然应该能改，这里补上。 */}
+                {active.id > 0 && (
                   <label
                     className="flex cursor-pointer select-none items-center gap-1.5 rounded-lg border border-[var(--line)] px-2.5 py-1.5 text-[12px] text-ink-700"
                     title={t("勾上之后助手不能修改这份文档（它仍然能读）")}

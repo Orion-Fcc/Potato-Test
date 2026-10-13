@@ -721,6 +721,7 @@ async def list_headings(project_id: int) -> list[str]:
     """
     from sqlalchemy import select
 
+    from app import knowledge
     from app.db import db_session
     from app.models import KnowledgeChunk
 
@@ -728,7 +729,7 @@ async def list_headings(project_id: int) -> list[str]:
         rows = (
             await s.execute(
                 select(KnowledgeChunk.text)
-                .where(KnowledgeChunk.project_id == project_id)
+                .where(await knowledge.effective_condition(s, project_id))
                 .order_by(KnowledgeChunk.chunk_index)
             )
         ).scalars().all()
@@ -896,6 +897,7 @@ async def section_text(project_id: int, titles: list[str], cap: int = MAX_SECTIO
     """
     from sqlalchemy import select
 
+    from app import knowledge
     from app.db import db_session
     from app.models import KnowledgeChunk
 
@@ -906,7 +908,7 @@ async def section_text(project_id: int, titles: list[str], cap: int = MAX_SECTIO
         rows = (
             await s.execute(
                 select(KnowledgeChunk.text)
-                .where(KnowledgeChunk.project_id == project_id)
+                .where(await knowledge.effective_condition(s, project_id))
                 .order_by(KnowledgeChunk.chunk_index)
             )
         ).scalars().all()
@@ -940,6 +942,7 @@ async def document_intro(project_id: int, chars: int = 2000) -> str:
     """
     from sqlalchemy import select
 
+    from app import knowledge
     from app.db import db_session
     from app.models import KnowledgeChunk
 
@@ -947,7 +950,7 @@ async def document_intro(project_id: int, chars: int = 2000) -> str:
         rows = (
             await s.execute(
                 select(KnowledgeChunk.text)
-                .where(KnowledgeChunk.project_id == project_id)
+                .where(await knowledge.effective_condition(s, project_id))
                 .order_by(KnowledgeChunk.chunk_index)
                 .limit(6)
             )

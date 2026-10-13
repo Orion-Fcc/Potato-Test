@@ -14,7 +14,7 @@ from urllib.parse import unquote
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.responses import RedirectResponse, StreamingResponse
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sse_starlette.sse import EventSourceResponse
 
@@ -39,6 +39,7 @@ from app.models import (
     IssueComment,
     Notification,
     Project,
+    ProjectGroup,
     ProjectMember,
     Run,
     RunResult,
@@ -89,6 +90,8 @@ from app.schemas import (
     LlmSettingsIn,
     LlmTestIn,
     LoginIn,
+    GroupIn,
+    GroupPatch,
     MemberIn,
     MemberPatch,
     ProjectIn,
@@ -1118,6 +1121,8 @@ async def _project_with_counts(s, p) -> dict:
     `has_login_state` 的补算（storage_state 凭据也算登录态）保持原样。
     """
     d = _project(p)
+    # 所属「大系统」（2026-10-13）：列表/单取都要带，前端据此分组。
+    d["group_id"] = p.group_id
     if not d["has_login_state"]:
         d["has_login_state"] = bool(
             (
@@ -1218,6 +1223,7 @@ async def create_project(body: ProjectIn, request: Request) -> dict:
             name=body.name.strip(),
             base_url=body.base_url,
             login_state=body.login_state,
+            group_id=body.group_id,
             case_timeout_s=_s.case_timeout_s,
             case_max_steps=_s.case_max_steps,
             run_concurrency=_s.run_concurrency,
@@ -1248,6 +1254,11 @@ async def update_project(pid: int, body: ProjectPatch, request: Request) -> dict
             if _k in body.model_fields_set:
                 setattr(p, _k, getattr(body, _k))
                 data.pop(_k, None)
+        # 归属大系统同理：**显式传 null = 移出大系统**，没传 = 不碰。
+        # 用 exclude_none 的 data 循环做不到这件事（null 会被丢掉）。
+        if "group_id" in body.model_fields_set:
+            p.group_id = body.group_id
+            data.pop("group_id", None)
         if "feishu_bitable_url" in data:
             from app.feishu_bitable import parse_bitable_url
 
@@ -1258,6 +1269,128 @@ async def update_project(pid: int, body: ProjectPatch, request: Request) -> dict
             setattr(p, k, v)
         await s.flush()
         return _project(p)
+
+
+# ---------------------------------------------------------------------------
+# 「大系统」容器（2026-10-13 用户要求）
+# ---------------------------------------------------------------------------
+#
+# 用户的系统是**一个大系统**、下面挂若干模块项目，每个模块都要用同一份系统级需规。
+# 这一层只做两件事：**归类**（项目挂到某个大系统下）+ **共享资料**（大系统的需规
+# 子项目都能检索到）。**不是父子项目树** —— 大系统本身不跑用例，所以不必把用例/运行
+# 往上汇总，改动面小得多。
+#
+# 权限：这一层是**工作区级**的（不属于某个项目）。本地实例是单用户 / shared_workspace，
+# 直接放行；多用户部署下它等同于"谁能建项目"，要收紧就在这一组端点上加 admin 判断。
+
+
+async def _group_or_404(s, gid: int) -> ProjectGroup:
+    row = (
+        await s.execute(select(ProjectGroup).where(ProjectGroup.id == gid))
+    ).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(404, "大系统不存在")
+    return row
+
+
+@router.get("/project-groups")
+async def list_project_groups() -> list[dict]:
+    """所有「大系统」+ 挂了几个项目 + 共享需规多大。"""
+    from app import knowledge
+
+    async with db_session() as s:
+        groups = (
+            (await s.execute(select(ProjectGroup).order_by(ProjectGroup.name))).scalars().all()
+        )
+        out: list[dict] = []
+        for g in groups:
+            cnt = (
+                await s.execute(
+                    select(func.count()).select_from(Project).where(Project.group_id == g.id)
+                )
+            ).scalar_one()
+            out.append(
+                {
+                    "id": g.id,
+                    "name": g.name,
+                    "projects": int(cnt),
+                    "knowledge": await knowledge.group_stats(s, g.id),
+                }
+            )
+        return out
+
+
+@router.post("/project-groups")
+async def create_project_group(body: GroupIn) -> dict:
+    async with db_session() as s:
+        name = body.name.strip()
+        if not name:
+            raise HTTPException(400, "大系统名字不能为空")
+        g = ProjectGroup(name=name)
+        s.add(g)
+        await s.flush()
+        return {
+            "id": g.id,
+            "name": g.name,
+            "projects": 0,
+            "knowledge": {"chunks": 0, "chars": 0},
+        }
+
+
+@router.put("/project-groups/{gid}")
+async def update_project_group(gid: int, body: GroupPatch) -> dict:
+    from app.models import _utcnow
+
+    async with db_session() as s:
+        g = await _group_or_404(s, gid)
+        if body.name is not None:
+            nm = body.name.strip()
+            if not nm:
+                raise HTTPException(400, "大系统名字不能为空")
+            g.name = nm
+        g.updated_at = _utcnow()
+        await s.flush()
+        return {"id": g.id, "name": g.name}
+
+
+@router.delete("/project-groups/{gid}")
+async def delete_project_group(gid: int) -> dict:
+    """删大系统：**不删项目**（把它们退回平铺），只删它的共享需规块。"""
+    from app import knowledge
+
+    async with db_session() as s:
+        g = await _group_or_404(s, gid)
+        await s.execute(update(Project).where(Project.group_id == gid).values(group_id=None))
+        await knowledge.delete_group_knowledge(s, gid)
+        await s.delete(g)
+        await s.flush()
+        return {"deleted": True}
+
+
+@router.get("/project-groups/{gid}/knowledge")
+async def get_group_knowledge(gid: int) -> dict:
+    """大系统的**共享**需规（子项目检索时都能用到它）。"""
+    from app import knowledge
+
+    async with db_session() as s:
+        await _group_or_404(s, gid)
+        text = await knowledge.get_group_text(s, gid)
+        st = await knowledge.group_stats(s, gid)
+        return {"text": text, "chars": st["chars"], "chunks": st["chunks"]}
+
+
+@router.put("/project-groups/{gid}/knowledge")
+async def set_group_knowledge(gid: int, body: KnowledgeIn) -> dict:
+    """换掉大系统的共享需规 —— 只动**共享**那份，不碰任何项目自己的资料。"""
+    from app import knowledge
+    from app.models import _utcnow
+
+    async with db_session() as s:
+        g = await _group_or_404(s, gid)
+        res = await knowledge.replace_group_knowledge(s, gid, body.text or "", source="大系统共享")
+        g.updated_at = _utcnow()
+        await s.flush()
+        return {"ok": True, **res}
 
 
 @router.get("/projects/{pid}/roles")

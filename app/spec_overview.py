@@ -974,7 +974,7 @@ async def _full_read_notes(project_id: int, usage: dict) -> dict[str, list[str]]
     """
     from sqlalchemy import select
 
-    from app import specgen
+    from app import knowledge, specgen
     from app.db import db_session
     from app.models import KnowledgeChunk
 
@@ -982,7 +982,7 @@ async def _full_read_notes(project_id: int, usage: dict) -> dict[str, list[str]]
         rows = (
             await s.execute(
                 select(KnowledgeChunk.text)
-                .where(KnowledgeChunk.project_id == project_id)
+                .where(await knowledge.effective_condition(s, project_id))
                 .order_by(KnowledgeChunk.chunk_index)
             )
         ).scalars().all()

@@ -1,8 +1,8 @@
-import { ArrowRight, Pencil, Plus, Trash2 } from "lucide-react";
+import { ArrowRight, FolderOpen, Pencil, Plus, Trash2 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Link } from "react-router-dom";
-import { api, relTime, type Project } from "../lib/api";
+import { api, relTime, type Project, type ProjectGroup } from "../lib/api";
 import { pct, rateTone } from "../lib/metrics";
 import { useAbortSignal, useDebounced } from "../lib/hooks";
 import { Badge, Button, Card, Field, Input, PageHeader } from "../components/ui";
@@ -11,7 +11,7 @@ import { NewProjectWizard } from "../components/NewProjectWizard";
 import { useToast, useErrorToast } from "../components/toast";
 
 /** Edit-only draft. Creating a project goes through NewProjectWizard. */
-type Draft = { id: number; name: string; base_url: string };
+type Draft = { id: number; name: string; base_url: string; group_id: number | null };
 
 export function Projects() {
   const { t } = useTranslation();
@@ -19,10 +19,16 @@ export function Projects() {
   const fail = useErrorToast();
   const signal = useAbortSignal();
   const [projects, setProjects] = useState<Project[]>([]);
+  // 「大系统」容器（2026-10-13）：把若干小模块项目归到它下面。
+  const [groups, setGroups] = useState<ProjectGroup[]>([]);
   const [q, setQ] = useState("");
   const [draft, setDraft] = useState<Draft | null>(null);
   const [wizard, setWizard] = useState(false);
   const [confirmDel, setConfirmDel] = useState<Project | null>(null);
+  // 大系统的三个弹窗：新建/改名、编辑共享需规、删除确认。
+  const [groupDraft, setGroupDraft] = useState<{ id: number | null; name: string } | null>(null);
+  const [kbEdit, setKbEdit] = useState<{ id: number; name: string; text: string } | null>(null);
+  const [confirmDelGroup, setConfirmDelGroup] = useState<ProjectGroup | null>(null);
 
   const load = useMemo(
     () => () =>
@@ -34,9 +40,20 @@ export function Projects() {
         }),
     [signal, fail],
   );
+  const loadGroups = useMemo(
+    () => () =>
+      api
+        .listProjectGroups({ signal })
+        .then(setGroups)
+        .catch(() => {
+          /* 大系统拉不到不该让整页打不开 —— 项目列表本身才是主体 */
+        }),
+    [signal],
+  );
   useEffect(() => {
     load();
-  }, [load]);
+    loadGroups();
+  }, [load, loadGroups]);
 
   const dq = useDebounced(q, 180);
   const filtered = useMemo(
@@ -44,12 +61,31 @@ export function Projects() {
     [projects, dq],
   );
 
+  // 按大系统分组：group_id -> 项目列表（null = 未归类）。
+  const byGroup = useMemo(() => {
+    const m = new Map<number | null, Project[]>();
+    for (const p of filtered) {
+      const k = p.group_id ?? null;
+      const arr = m.get(k);
+      if (arr) arr.push(p);
+      else m.set(k, [p]);
+    }
+    return m;
+  }, [filtered]);
+  const ungrouped = byGroup.get(null) ?? [];
+
   const save = async () => {
     if (!draft?.name.trim()) return toast("error", t("Name is required"));
     try {
-      await api.updateProject(draft.id, { name: draft.name.trim(), base_url: draft.base_url });
+      await api.updateProject(draft.id, {
+        name: draft.name.trim(),
+        base_url: draft.base_url,
+        // null = 移出大系统（后端按"有没有传这个键"判断，传 null 是有意义的）
+        group_id: draft.group_id,
+      });
       setDraft(null);
       load();
+      loadGroups();
       toast("success", t("Saved"));
     } catch (e) {
       fail(e);
@@ -62,18 +98,168 @@ export function Projects() {
       await api.deleteProject(confirmDel.id);
       setConfirmDel(null);
       load();
+      loadGroups();
       toast("success", t("Project deleted"));
     } catch (e) {
       fail(e);
     }
   };
 
+  const saveGroup = async () => {
+    if (!groupDraft?.name.trim()) return toast("error", t("Name is required"));
+    try {
+      if (groupDraft.id == null) await api.createProjectGroup(groupDraft.name.trim());
+      else await api.updateProjectGroup(groupDraft.id, { name: groupDraft.name.trim() });
+      setGroupDraft(null);
+      loadGroups();
+      toast("success", t("Saved"));
+    } catch (e) {
+      fail(e);
+    }
+  };
+
+  const doDeleteGroup = async () => {
+    if (!confirmDelGroup) return;
+    try {
+      await api.deleteProjectGroup(confirmDelGroup.id);
+      setConfirmDelGroup(null);
+      load();
+      loadGroups();
+      toast("success", t("大系统已删除，它下面的项目已退回平铺"));
+    } catch (e) {
+      fail(e);
+    }
+  };
+
+  const openKb = async (g: ProjectGroup) => {
+    try {
+      const r = await api.getGroupKnowledge(g.id);
+      setKbEdit({ id: g.id, name: g.name, text: r.text });
+    } catch (e) {
+      fail(e);
+    }
+  };
+  const saveKb = async () => {
+    if (!kbEdit) return;
+    try {
+      const r = await api.setGroupKnowledge(kbEdit.id, kbEdit.text);
+      setKbEdit(null);
+      loadGroups();
+      toast("success", t("已保存共享需规：{{c}} 字", { c: r.chars }));
+    } catch (e) {
+      fail(e);
+    }
+  };
+
+  /** 一张项目卡。抽出来是因为分组后要在"大系统里"和"未归类"两处复用。 */
+  const renderCard = (p: Project) => {
+    const rate = p.last_run?.pass_rate;
+    return (
+      <Card key={p.id} hover className="group relative flex flex-col overflow-hidden p-5">
+        <div className="flex items-start justify-between gap-2">
+          <Link to={`/projects/${p.id}/overview`} className="min-w-0">
+            <div className="truncate text-[15px] font-semibold text-ink-900 transition-colors group-hover:text-brand-700">
+              {p.name}
+            </div>
+            <div className="mt-0.5 truncate font-mono text-[11px] text-ink-400">
+              {p.base_url ?? t("no base url")}
+            </div>
+          </Link>
+          <div className="flex shrink-0 gap-0.5 opacity-0 transition-opacity duration-150 group-hover:opacity-100 group-focus-within:opacity-100">
+            <button
+              onClick={() =>
+                setDraft({
+                  id: p.id,
+                  name: p.name,
+                  base_url: p.base_url ?? "",
+                  group_id: p.group_id ?? null,
+                })
+              }
+              className="rounded-md p-1.5 text-ink-400 outline-none transition-colors hover:bg-[var(--panel2)] hover:text-ink-900"
+              aria-label={t("Edit")}
+            >
+              <Pencil className="h-3.5 w-3.5" />
+            </button>
+            <button
+              onClick={() => setConfirmDel(p)}
+              className="rounded-md p-1.5 text-ink-400 outline-none transition-colors hover:bg-[var(--bad-bg)] hover:text-[var(--bad-fg)]"
+              aria-label={t("Delete")}
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+            </button>
+          </div>
+        </div>
+
+        <div className="mt-5 flex items-end gap-6">
+          <div>
+            <div className="text-[1.4rem] font-semibold tabular-nums tracking-tight text-ink-900">
+              {p.case_count ?? 0}
+            </div>
+            <div className="text-[10.5px] uppercase tracking-wider text-ink-400">{t("cases")}</div>
+          </div>
+          <div>
+            <div
+              className={
+                "text-[1.4rem] font-semibold tabular-nums tracking-tight " +
+                (rate == null
+                  ? "text-ink-900"
+                  : rateTone(rate) === "ok"
+                    ? "text-[var(--ok-fg)]"
+                    : rateTone(rate) === "warn"
+                      ? "text-[var(--warn-fg)]"
+                      : "text-[var(--bad-fg)]")
+              }
+            >
+              {rate != null ? pct(rate) : "—"}
+            </div>
+            <div className="text-[10.5px] uppercase tracking-wider text-ink-400">{t("pass")}</div>
+          </div>
+          {p.last_run && (
+            <div className="ml-auto flex flex-col items-end gap-1">
+              <Badge status={p.last_run.status} />
+              <span className="text-[10.5px] text-ink-400">{relTime(p.last_run.finished_at)}</span>
+            </div>
+          )}
+        </div>
+
+        <div className="mt-5 flex items-center gap-2 border-t border-[var(--line)] pt-3.5">
+          <Link to={`/projects/${p.id}/overview`}>
+            <Button size="sm">
+              {t("Go to project")}
+              <ArrowRight className="h-3.5 w-3.5 transition-transform group-hover:translate-x-0.5" />
+            </Button>
+          </Link>
+          {p.has_login_state && (
+            <span className="ml-auto inline-flex items-center gap-1.5 rounded-full bg-brand-50 px-2 py-0.5 text-[10.5px] font-medium text-brand-700">
+              <span className="h-1.5 w-1.5 rounded-full bg-brand-600" />
+              {t("logged in")}
+            </span>
+          )}
+        </div>
+      </Card>
+    );
+  };
+
+  const newProjectTile = (
+    <button
+      onClick={() => setWizard(true)}
+      className="grid min-h-[176px] place-items-center rounded-[var(--radius)] border border-dashed border-[var(--line-strong)] text-[13px] text-ink-500 outline-none transition-[border-color,color,background-color] hover:border-brand-200 hover:bg-brand-50/40 hover:text-brand-700"
+    >
+      <span className="flex items-center gap-1.5 font-medium">
+        <Plus className="h-4 w-4" />
+        {t("New project")}
+      </span>
+    </button>
+  );
+
   return (
     <div className="space-y-6">
       <PageHeader
         eyebrow={t("Workspace")}
         title={t("Projects")}
-        subtitle={t("Potato Test runs your natural-language test cases in a real browser. Pick a project to begin.")}
+        subtitle={t(
+          "Potato Test runs your natural-language test cases in a real browser. Pick a project to begin.",
+        )}
         actions={
           <>
             <Input
@@ -82,6 +268,10 @@ export function Projects() {
               placeholder={t("Search projects")}
               className="w-56"
             />
+            <Button variant="outline" onClick={() => setGroupDraft({ id: null, name: "" })}>
+              <FolderOpen className="h-4 w-4" />
+              {t("新建大系统")}
+            </Button>
             <Button onClick={() => setWizard(true)}>
               <Plus className="h-4 w-4" />
               {t("New project")}
@@ -99,7 +289,9 @@ export function Projects() {
             </div>
             <div className="text-base font-semibold text-ink-900">{t("No projects yet")}</div>
             <p className="text-[13px] leading-relaxed text-ink-500">
-              {t("A project holds the cases for one system under test. Creating one takes about a minute — a URL, an account, and your first case.")}
+              {t(
+                "A project holds the cases for one system under test. Creating one takes about a minute — a URL, an account, and your first case.",
+              )}
             </p>
             <Button className="mt-2" onClick={() => setWizard(true)}>
               <Plus className="h-4 w-4" />
@@ -108,102 +300,70 @@ export function Projects() {
           </div>
         </Card>
       ) : (
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-        {filtered.map((p) => {
-          const rate = p.last_run?.pass_rate;
-          return (
-            <Card
-              key={p.id}
-              hover
-              className="group relative flex flex-col overflow-hidden p-5"
-            >
-              <div className="flex items-start justify-between gap-2">
-                <Link to={`/projects/${p.id}/overview`} className="min-w-0">
-                  <div className="truncate text-[15px] font-semibold text-ink-900 transition-colors group-hover:text-brand-700">
-                    {p.name}
-                  </div>
-                  <div className="mt-0.5 truncate font-mono text-[11px] text-ink-400">
-                    {p.base_url ?? t("no base url")}
-                  </div>
-                </Link>
-                <div className="flex shrink-0 gap-0.5 opacity-0 transition-opacity duration-150 group-hover:opacity-100 group-focus-within:opacity-100">
-                  <button
-                    onClick={() => setDraft({ id: p.id, name: p.name, base_url: p.base_url ?? "" })}
-                    className="rounded-md p-1.5 text-ink-400 outline-none transition-colors hover:bg-[var(--panel2)] hover:text-ink-900"
-                    aria-label={t("Edit")}
-                  >
-                    <Pencil className="h-3.5 w-3.5" />
-                  </button>
-                  <button
-                    onClick={() => setConfirmDel(p)}
-                    className="rounded-md p-1.5 text-ink-400 outline-none transition-colors hover:bg-[var(--bad-bg)] hover:text-[var(--bad-fg)]"
-                    aria-label={t("Delete")}
-                  >
-                    <Trash2 className="h-3.5 w-3.5" />
-                  </button>
-                </div>
-              </div>
-
-              <div className="mt-5 flex items-end gap-6">
-                <div>
-                  <div className="text-[1.4rem] font-semibold tabular-nums tracking-tight text-ink-900">
-                    {p.case_count ?? 0}
-                  </div>
-                  <div className="text-[10.5px] uppercase tracking-wider text-ink-400">{t("cases")}</div>
-                </div>
-                <div>
-                  <div
-                    className={
-                      "text-[1.4rem] font-semibold tabular-nums tracking-tight " +
-                      (rate == null
-                        ? "text-ink-900"
-                        : rateTone(rate) === "ok"
-                          ? "text-[var(--ok-fg)]"
-                          : rateTone(rate) === "warn"
-                            ? "text-[var(--warn-fg)]"
-                            : "text-[var(--bad-fg)]")
-                    }
-                  >
-                    {rate != null ? pct(rate) : "—"}
-                  </div>
-                  <div className="text-[10.5px] uppercase tracking-wider text-ink-400">{t("pass")}</div>
-                </div>
-                {p.last_run && (
-                  <div className="ml-auto flex flex-col items-end gap-1">
-                    <Badge status={p.last_run.status} />
-                    <span className="text-[10.5px] text-ink-400">{relTime(p.last_run.finished_at)}</span>
-                  </div>
-                )}
-              </div>
-
-              <div className="mt-5 flex items-center gap-2 border-t border-[var(--line)] pt-3.5">
-                <Link to={`/projects/${p.id}/overview`}>
-                  <Button size="sm">
-                    {t("Go to project")}
-                    <ArrowRight className="h-3.5 w-3.5 transition-transform group-hover:translate-x-0.5" />
-                  </Button>
-                </Link>
-                {p.has_login_state && (
-                  <span className="ml-auto inline-flex items-center gap-1.5 rounded-full bg-brand-50 px-2 py-0.5 text-[10.5px] font-medium text-brand-700">
-                    <span className="h-1.5 w-1.5 rounded-full bg-brand-600" />
-                    {t("logged in")}
+        <div className="space-y-7">
+          {/* 每个「大系统」一节：标题 + 它的项目 + 空的空态 */}
+          {groups.map((g) => {
+            const ps = byGroup.get(g.id) ?? [];
+            return (
+              <section key={g.id} className="space-y-3">
+                <div className="flex flex-wrap items-center gap-2 border-b border-[var(--line)] pb-2">
+                  <FolderOpen className="h-4 w-4 text-brand-600" />
+                  <h2 className="text-[15px] font-semibold text-ink-900">{g.name}</h2>
+                  <span className="text-[11.5px] text-ink-400">
+                    {t("{{n}} 个项目", { n: g.projects })}
+                    {g.knowledge.chars > 0
+                      ? " · " + t("共享需规 {{c}} 字", { c: g.knowledge.chars })
+                      : ""}
                   </span>
-                )}
-              </div>
-            </Card>
-          );
-        })}
+                  <div className="ml-auto flex items-center gap-1">
+                    <button
+                      onClick={() => setGroupDraft({ id: g.id, name: g.name })}
+                      className="rounded-md p-1.5 text-ink-400 transition-colors hover:bg-[var(--panel2)] hover:text-ink-900"
+                      title={t("改名")}
+                    >
+                      <Pencil className="h-3.5 w-3.5" />
+                    </button>
+                    <button
+                      onClick={() => openKb(g)}
+                      className="rounded-md px-2 py-1 text-[11.5px] text-ink-500 transition-colors hover:bg-[var(--panel2)] hover:text-ink-900"
+                    >
+                      {t("共享需规")}
+                    </button>
+                    <button
+                      onClick={() => setConfirmDelGroup(g)}
+                      className="rounded-md p-1.5 text-ink-400 transition-colors hover:bg-[var(--bad-bg)] hover:text-[var(--bad-fg)]"
+                      title={t("删除")}
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+                </div>
+                <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                  {ps.map(renderCard)}
+                  {ps.length === 0 && (
+                    <div className="grid min-h-[80px] place-items-center rounded-[var(--radius)] border border-dashed border-[var(--line)] px-4 text-center text-[12px] text-ink-400">
+                      {t("还没有项目归到它下面 —— 在项目的「Edit」里选「所属大系统」。")}
+                    </div>
+                  )}
+                </div>
+              </section>
+            );
+          })}
 
-        <button
-          onClick={() => setWizard(true)}
-          className="grid min-h-[176px] place-items-center rounded-[var(--radius)] border border-dashed border-[var(--line-strong)] text-[13px] text-ink-500 outline-none transition-[border-color,color,background-color] hover:border-brand-200 hover:bg-brand-50/40 hover:text-brand-700"
-        >
-          <span className="flex items-center gap-1.5 font-medium">
-            <Plus className="h-4 w-4" />
-            {t("New project")}
-          </span>
-        </button>
-      </div>
+          {/* 未归类：不在任何大系统下的项目（含全部项目都在大系统下时的新建入口） */}
+          <section className="space-y-3">
+            {groups.length > 0 && (
+              <div className="flex items-center gap-2 border-b border-[var(--line)] pb-2">
+                <h2 className="text-[13px] font-semibold text-ink-500">{t("未归类")}</h2>
+                <span className="text-[11.5px] text-ink-400">{t("{{n}} 个项目", { n: ungrouped.length })}</span>
+              </div>
+            )}
+            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+              {ungrouped.map(renderCard)}
+              {newProjectTile}
+            </div>
+          </section>
+        </div>
       )}
 
       {filtered.length === 0 && projects.length > 0 && (
@@ -232,8 +392,26 @@ export function Projects() {
                   placeholder="https://your-app.example.com"
                 />
               </Field>
+              <Field label={t("所属大系统（可选）")}>
+                <select
+                  value={draft.group_id ?? ""}
+                  onChange={(e) =>
+                    setDraft({ ...draft, group_id: e.target.value ? Number(e.target.value) : null })
+                  }
+                  className="h-9 w-full rounded-[var(--radius)] border border-[var(--line-strong)] bg-[var(--panel)] px-3 text-[13px] text-ink-900 outline-none"
+                >
+                  <option value="">{t("不属于任何大系统")}</option>
+                  {groups.map((g) => (
+                    <option key={g.id} value={g.id}>
+                      {g.name}
+                    </option>
+                  ))}
+                </select>
+              </Field>
               <div className="flex justify-end gap-2 pt-1">
-                <Button variant="outline" onClick={() => setDraft(null)}>{t("Cancel")}</Button>
+                <Button variant="outline" onClick={() => setDraft(null)}>
+                  {t("Cancel")}
+                </Button>
                 <Button onClick={save}>{t("Save")}</Button>
               </div>
             </div>
@@ -251,8 +429,96 @@ export function Projects() {
               })}
             </p>
             <div className="mt-5 flex justify-end gap-2">
-              <Button variant="outline" onClick={() => setConfirmDel(null)}>{t("Cancel")}</Button>
-              <Button variant="danger" onClick={doDelete}>{t("Delete")}</Button>
+              <Button variant="outline" onClick={() => setConfirmDel(null)}>
+                {t("Cancel")}
+              </Button>
+              <Button variant="danger" onClick={doDelete}>
+                {t("Delete")}
+              </Button>
+            </div>
+          </Card>
+        </Modal>
+      )}
+
+      {/* 新建 / 改名大系统 */}
+      {groupDraft && (
+        <Modal onClose={() => setGroupDraft(null)} className="max-w-md">
+          <Card className="p-5">
+            <h2 className="mb-1 text-lg font-semibold text-ink-900">
+              {groupDraft.id == null ? t("新建大系统") : t("改名")}
+            </h2>
+            <p className="mb-4 text-[12px] leading-relaxed text-ink-500">
+              {t("大系统用来把若干小模块项目归拢在一起；它自己可以放一份共享需规，下面的项目都检索得到。")}
+            </p>
+            <Field label={t("大系统名称")}>
+              <Input
+                value={groupDraft.name}
+                onChange={(e) => setGroupDraft({ ...groupDraft, name: e.target.value })}
+                placeholder={t("例如：民航培训管理系统")}
+                autoFocus
+              />
+            </Field>
+            <div className="mt-4 flex justify-end gap-2">
+              <Button variant="outline" onClick={() => setGroupDraft(null)}>
+                {t("Cancel")}
+              </Button>
+              <Button onClick={saveGroup}>{t("Save")}</Button>
+            </div>
+          </Card>
+        </Modal>
+      )}
+
+      {/* 大系统共享需规 */}
+      {kbEdit && (
+        <Modal onClose={() => setKbEdit(null)} className="max-w-3xl">
+          <Card className="p-5">
+            <h2 className="mb-1 text-lg font-semibold text-ink-900">
+              {t("共享需规")} · {kbEdit.name}
+            </h2>
+            <p className="mb-3 text-[12px] leading-relaxed text-ink-500">
+              {t(
+                "粘贴这个系统级的需规/资料。**它下面的每个项目**检索时都会带上它 —— 传一次，各模块共用。",
+              )}
+            </p>
+            <textarea
+              value={kbEdit.text}
+              onChange={(e) => setKbEdit({ ...kbEdit, text: e.target.value })}
+              rows={16}
+              className="w-full rounded-[var(--radius)] border border-[var(--line-strong)] bg-[var(--panel)] p-3 font-mono text-[12px] leading-relaxed text-ink-900 outline-none"
+              placeholder={t("把系统级需规粘贴到这里……")}
+            />
+            <div className="mt-4 flex items-center gap-2">
+              <span className="text-[11.5px] text-ink-400">
+                {t("{{c}} 字", { c: kbEdit.text.length })}
+              </span>
+              <div className="ml-auto flex gap-2">
+                <Button variant="outline" onClick={() => setKbEdit(null)}>
+                  {t("Cancel")}
+                </Button>
+                <Button onClick={saveKb}>{t("Save")}</Button>
+              </div>
+            </div>
+          </Card>
+        </Modal>
+      )}
+
+      {confirmDelGroup && (
+        <Modal onClose={() => setConfirmDelGroup(null)} className="max-w-md">
+          <Card className="p-5">
+            <h2 className="text-lg font-semibold text-ink-900">{t("删除大系统")}</h2>
+            <p className="mt-2 text-sm text-ink-500">
+              {t(
+                "删除「{{name}}」？它下面的 {{n}} 个项目**不会被删**，只会退回未归类；它那份共享需规会被删掉。",
+                { name: confirmDelGroup.name, n: confirmDelGroup.projects },
+              )}
+            </p>
+            <div className="mt-5 flex justify-end gap-2">
+              <Button variant="outline" onClick={() => setConfirmDelGroup(null)}>
+                {t("Cancel")}
+              </Button>
+              <Button variant="danger" onClick={doDeleteGroup}>
+                {t("Delete")}
+              </Button>
             </div>
           </Card>
         </Modal>

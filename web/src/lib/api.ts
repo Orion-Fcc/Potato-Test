@@ -4,6 +4,8 @@ export interface Project {
   id: number;
   name: string;
   base_url: string | null;
+  /** 所属「大系统」（2026-10-13）。null/undefined = 不属于任何大系统（平铺显示）。 */
+  group_id?: number | null;
   has_login_state: boolean;
   roles?: string[];
   gitlab_project?: string | null;
@@ -22,6 +24,16 @@ export interface Project {
     pass_rate: number | null;
     finished_at: string | null;
   } | null;
+}
+
+/** 「大系统」容器（2026-10-13）：把若干小模块项目归到一个大系统下面。
+ *  `knowledge` 是它那份**共享需规**的大小 —— 子项目检索时都会带上它。 */
+export interface ProjectGroup {
+  id: number;
+  name: string;
+  /** 挂在这个大系统下的项目数。 */
+  projects: number;
+  knowledge: { chunks: number; chars: number };
 }
 
 interface BrowserStateSlot {
@@ -1285,11 +1297,33 @@ export const api = {
       live_shot_every?: number | null;
       feishu_chat_id?: string | null;
       feishu_bitable_url?: string | null;
+      // 所属大系统：传 null = 移出大系统；不传 = 不改（后端按 model_fields_set 判断）。
+      group_id?: number | null;
     },
   ) =>
     req<Project>(`/projects/${pid}`, { method: "PUT", body: JSON.stringify(b) }),
   deleteProject: (pid: number) =>
     req<{ deleted: number }>(`/projects/${pid}`, { method: "DELETE" }),
+  // ── 「大系统」容器（2026-10-13）──────────────────────────────────────
+  // 把若干小模块项目归到一个大系统下面；大系统自己可以放**共享需规**，
+  // 子项目检索时自动带上它（见后端 app/knowledge.py::effective_condition）。
+  listProjectGroups: (o?: Opts) => req<ProjectGroup[]>("/project-groups", o),
+  createProjectGroup: (name: string) =>
+    req<ProjectGroup>("/project-groups", { method: "POST", body: JSON.stringify({ name }) }),
+  updateProjectGroup: (gid: number, patch: { name?: string }) =>
+    req<{ id: number; name: string }>(`/project-groups/${gid}`, {
+      method: "PUT",
+      body: JSON.stringify(patch),
+    }),
+  deleteProjectGroup: (gid: number) =>
+    req<{ deleted: boolean }>(`/project-groups/${gid}`, { method: "DELETE" }),
+  getGroupKnowledge: (gid: number, o?: Opts) =>
+    req<{ text: string; chars: number; chunks: number }>(`/project-groups/${gid}/knowledge`, o),
+  setGroupKnowledge: (gid: number, text: string) =>
+    req<{ ok: boolean; chunks: number; chars: number }>(`/project-groups/${gid}/knowledge`, {
+      method: "PUT",
+      body: JSON.stringify({ text }),
+    }),
   // Workspace-scoped persistent browser state (cookies/localStorage/sessionStorage/
   // IndexedDB kept between cases and runs, isolated per project).
   getBrowserState: (pid: number, o?: Opts) =>

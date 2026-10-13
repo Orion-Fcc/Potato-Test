@@ -31,11 +31,36 @@ class Base(DeclarativeBase):
     pass
 
 
+class ProjectGroup(Base):
+    """「大系统」容器（2026-10-13 用户要求）—— 把若干小项目/模块挂在一个大系统下面。
+
+    ## 为什么要有它
+
+    用户的系统是**一个很大的系统**（民航培训管理平台），而现在每个模块
+    （培训资源管理 / 飞行学员管理 / 考核单管理…）都是**一个独立项目**。
+    平铺在一个侧栏里既看不出从属关系，也逼着每个模块**各传一遍同一份系统级需规**。
+
+    所以加这一层（**不是**父子项目树：大系统本身不是一个能跑用例的项目）：
+      * 项目可归属一个「大系统」（`Project.group_id`）；
+      * 大系统自己可放**共享的需规/资料**（`KnowledgeChunk.group_id`），
+        子项目检索时**自己的块 + 所属大系统的块一起用** —— 上层传一次、下面各模块都可用。
+    """
+
+    __tablename__ = "project_group"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
 class Project(Base):
     __tablename__ = "project"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     name: Mapped[str] = mapped_column(String(200), nullable=False)
+    # 所属「大系统」（2026-10-13）。NULL = 不属于任何大系统（侧栏里平铺显示）。
+    group_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     base_url: Mapped[str | None] = mapped_column(String(2048), nullable=True)
     # GitLab project this project's issues sync with (numeric id or "group/path"); the
     # access token lives in an encrypted Credential (type="gitlab_token").
@@ -706,6 +731,16 @@ class KnowledgeChunk(Base):
     project_id: Mapped[int] = mapped_column(
         ForeignKey("project.id", ondelete="CASCADE"), index=True, nullable=False
     )
+    # 所属「大系统」的共享知识块（2026-10-13）。
+    #
+    # ★ 两种块的区分：
+    #   * 项目自己的块：project_id=<pid>，group_id=NULL；
+    #   * 大系统共享的块：project_id=0（哨兵，没有这个项目）+ group_id=<gid>。
+    #     为什么用 0 而不是让 project_id 可空：它是 NOT NULL，而 SQLite 改一列的
+    #     NOT NULL 要**重建整张表**（knowledge_chunk 可能几十万行）。0 不会被任何项目
+    #     用到（id 从 1 开始），SQLite 默认也不强制外键，所以安全。
+    # 检索某项目时的有效块 = 自己的 + `group_id == 它所属大系统` 的（见 knowledge.py）。
+    group_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     # Position in the document, so hits can be shown in source order and a merge
     # (re-upload / paste) can replace a project's chunks deterministically.
     chunk_index: Mapped[int] = mapped_column(Integer, nullable=False)

@@ -11,11 +11,26 @@ class ProjectIn(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     base_url: str | None = None
     login_state: str | None = None  # storage_state JSON string
+    # 所属「大系统」（2026-10-13）：建项目时可直接归到某个大系统下面，NULL=不归。
+    group_id: int | None = None
+
+
+class GroupIn(BaseModel):
+    """新建「大系统」（2026-10-13）。"""
+
+    name: str = Field(min_length=1, max_length=200)
+
+
+class GroupPatch(BaseModel):
+    name: str | None = None
 
 
 class ProjectPatch(BaseModel):
     name: str | None = None
     base_url: str | None = None
+    # 归属大系统。注意语义：**没传 = 不改**；显式传 null = 移出大系统（见 api.update_project，
+    # 它按 model_fields_set 判断"到底传没传"）。
+    group_id: int | None = None
     case_timeout_s: int | None = Field(default=None, ge=15, le=600)
     case_max_steps: int | None = Field(default=None, ge=3, le=100)
     run_concurrency: int | None = Field(default=None, ge=1, le=16)

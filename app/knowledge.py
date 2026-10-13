@@ -222,7 +222,7 @@ async def get_all_text(session, project_id: int) -> str:
         (
             await session.execute(
                 select(KnowledgeChunk)
-                .where(KnowledgeChunk.project_id == project_id)
+                .where(await effective_condition(session, project_id))
                 .order_by(KnowledgeChunk.chunk_index)
             )
         )
@@ -238,10 +238,88 @@ async def stats(session, project_id: int) -> dict:
             select(
                 func.count(KnowledgeChunk.id),
                 func.coalesce(func.sum(KnowledgeChunk.chars), 0),
-            ).where(KnowledgeChunk.project_id == project_id)
+            ).where(await effective_condition(session, project_id))
         )
     ).one()
     return {"chunks": int(chunks[0]), "chars": int(chunks[1])}
+
+
+# ---- 「大系统」共享知识（2026-10-13）---------------------------------------------
+
+
+async def effective_condition(session, project_id: int):
+    """「这个项目能用的知识块」的 SQL 条件：**自己的 + 所属大系统共享的**。
+
+    用户的系统是一个大系统、下面挂着若干模块项目，每个模块都要用同一份系统级需规。
+    让每个项目各存一份既费空间又必然漂移，所以大系统的资料只存一份
+    （`KnowledgeChunk.group_id` 指向它、`project_id=0` 哨兵，见该模型），
+    检索时合并进来 —— 上层传一次，下面各模块都搜得到。
+    """
+    from sqlalchemy import or_
+
+    from app.models import Project
+
+    gid = (
+        await session.execute(select(Project.group_id).where(Project.id == project_id))
+    ).scalar_one_or_none()
+    cond = KnowledgeChunk.project_id == project_id
+    if gid:
+        cond = or_(cond, KnowledgeChunk.group_id == gid)
+    return cond
+
+
+async def replace_group_knowledge(session, group_id: int, text: str, source: str = "") -> dict:
+    """换掉某个大系统的**共享**知识块（只动 group 的，不碰任何项目自己的）。"""
+    chunks = chunk_text(text or "")
+    await session.execute(delete(KnowledgeChunk).where(KnowledgeChunk.group_id == group_id))
+    total = 0
+    for c in chunks:
+        session.add(
+            KnowledgeChunk(
+                project_id=0,  # 哨兵：不属于任何项目，只属于这个大系统
+                group_id=group_id,
+                chunk_index=c.index,
+                line_no=c.line_no,
+                heading=c.heading,
+                text=c.text,
+                chars=c.chars,
+                source=source[:400],
+            )
+        )
+        total += c.chars
+    await session.flush()
+    return {"chunks": len(chunks), "chars": total}
+
+
+async def get_group_text(session, group_id: int) -> str:
+    rows = (
+        (
+            await session.execute(
+                select(KnowledgeChunk.text)
+                .where(KnowledgeChunk.group_id == group_id)
+                .order_by(KnowledgeChunk.chunk_index)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return "\n\n".join(rows)
+
+
+async def group_stats(session, group_id: int) -> dict:
+    row = (
+        await session.execute(
+            select(
+                func.count(KnowledgeChunk.id),
+                func.coalesce(func.sum(KnowledgeChunk.chars), 0),
+            ).where(KnowledgeChunk.group_id == group_id)
+        )
+    ).one()
+    return {"chunks": int(row[0]), "chars": int(row[1])}
+
+
+async def delete_group_knowledge(session, group_id: int) -> None:
+    await session.execute(delete(KnowledgeChunk).where(KnowledgeChunk.group_id == group_id))
 
 
 # ---- retrieval -------------------------------------------------------------
@@ -296,12 +374,10 @@ async def search(project_id: int, query: str, limit: int = SEARCH_LIMIT) -> dict
         }
 
     async with db_session() as s:
+        # 作用域 = 项目自己的块 + 所属大系统（若有）的共享块，见 effective_condition。
+        scope = await effective_condition(s, project_id)
         total = (
-            await s.execute(
-                select(func.count(KnowledgeChunk.id)).where(
-                    KnowledgeChunk.project_id == project_id
-                )
-            )
+            await s.execute(select(func.count(KnowledgeChunk.id)).where(scope))
         ).scalar_one()
 
         # Prefilter in SQL. ilike on each term with OR — broad on purpose, because
@@ -319,7 +395,7 @@ async def search(project_id: int, query: str, limit: int = SEARCH_LIMIT) -> dict
             (
                 await s.execute(
                     select(KnowledgeChunk)
-                    .where(KnowledgeChunk.project_id == project_id, cond)
+                    .where(scope, cond)
                     .order_by(KnowledgeChunk.chunk_index)
                     .limit(2_000)  # hard stop; scoring below re-ranks what fits
                 )

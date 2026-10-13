@@ -145,6 +145,18 @@ _ADDITIVE_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("project", "case_seq", "INTEGER NOT NULL DEFAULT 0"),
     # 2026-10-09 用例来源溯源（人写的 / 从需规哪一节生成的），见 models.TestCase.source。
     ("test_case", "source", "VARCHAR(300)"),
+    # 2026-10-13「大系统」：项目归属 + 大系统共享需规块（见 models.ProjectGroup）。
+    # 都是可空列，存量行 = NULL，行为不变（项目仍平铺、知识块仍只属于它自己）。
+    ("project", "group_id", "INTEGER"),
+    ("knowledge_chunk", "group_id", "INTEGER"),
+)
+
+# 后加的**索引**（`_add_missing_columns` 只加列，索引得单独建）。
+# 用 IF NOT EXISTS，幂等；表不存在就跳过（新库由 create_all 建好索引）。
+_ADDITIVE_INDEXES: tuple[tuple[str, str, str], ...] = (
+    # (表, 索引名, 列定义)
+    ("project", "ix_project_group_id", '"group_id"'),
+    ("knowledge_chunk", "ix_knowledge_chunk_group_id", '"group_id"'),
 )
 
 
@@ -165,6 +177,12 @@ def _add_missing_columns(sync_conn) -> None:
         if column in cols:
             continue
         sync_conn.exec_driver_sql(f'ALTER TABLE "{table}" ADD COLUMN "{column}" {ddl_type}')
+    for table, index_name, cols in _ADDITIVE_INDEXES:
+        if table not in existing_tables:
+            continue
+        sync_conn.exec_driver_sql(
+            f'CREATE INDEX IF NOT EXISTS "{index_name}" ON "{table}" ({cols})'
+        )
 
 
 @asynccontextmanager

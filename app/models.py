@@ -247,6 +247,13 @@ class ProjectDoc(Base):
     source_url: Mapped[str | None] = mapped_column(String(1000), nullable=True)
     source_name: Mapped[str | None] = mapped_column(String(300), nullable=True)
     source_bytes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # ★ 上次**解析产物**的指纹（2026-10-16）。
+    #
+    # 用来回答一个问题：这份正文还是解析出来的那一份，还是**人已经改过**了？
+    # 重传同一个文件时靠它决定要不要覆盖 —— 不看指纹的话，用户手工改过的正文
+    # 会被新解析结果**静默抹掉**，而他只是想把文件重传一遍。
+    # （不能用 origin == "human" 判断：首次上传写进去的就是 "human"。）
+    html_parse_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 

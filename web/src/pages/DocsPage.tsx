@@ -371,7 +371,7 @@ export function DocsPage() {
     <div className="space-y-4">
       <PageHeader
         title={t("Project Docs")}
-        subtitle={t("AI 读过的项目说明：总览、需求分析、流程图。可以像 Word 一样编辑。")}
+        subtitle={t("项目说明与上传的资料都在左边；每一份都可以像 Word 一样直接编辑。")}
         actions={
           <>
             <Button variant="outline" onClick={addCustom}>
@@ -607,6 +607,15 @@ export function DocsPage() {
                   <span>
                     {t("这份文档已设为「只有我能改」：助手不能写它，但仍然能读。你自己照常编辑。")}
                   </span>
+                </div>
+              )}
+
+              {/* ★ 上传来的资料也要能改 —— 这里明说一句（2026-10-16）。
+                  界面上原来只有"总览 / 需求分析 / 流程图"的说明，用户会以为上传的资料只读；
+                  实际它和别的文档共用同一个编辑器，改完点右上角「保存」即可。 */}
+              {active.kind === "spec_source" && (
+                <div className="tp-alert tp-alert-info px-3 py-2 text-[12px]">
+                  {t("上传的资料和别的文档一样：可以在这里直接改，改完点右上角「保存」。")}
                 </div>
               )}
 

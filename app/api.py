@@ -2092,6 +2092,12 @@ async def create_doc_from_file(
     else:
         html = sanitize(f"<h2>{_escape(name)}</h2>{text_body}")
 
+    # 解析产物的指纹（2026-10-16）：重传时用它判断"正文是不是已经被人改过"，
+    # 别把人工修改静默覆盖掉。见 models.ProjectDoc.html_parse_hash。
+    from hashlib import sha256 as _sha256
+
+    parse_hash = _sha256(html.encode("utf-8")).hexdigest()[:32]
+
     # ★ 存一份**原件**（2026-10-16 用户要求「我想全部看到原件」）。
     #
     # 解析出来的正文是**有损**的：PDF 丢版面、docx 丢标题层级、图片和表格都不在里面。
@@ -2145,6 +2151,7 @@ async def create_doc_from_file(
                 html=html,
                 origin="human",
                 ai_editable=editable,
+                html_parse_hash=parse_hash,
                 source_key=src_key or None,
                 source_url=src_url or None,
                 source_name=name[:300],
@@ -2152,9 +2159,27 @@ async def create_doc_from_file(
             )
             s.add(row)
         else:
-            # 同一个文件重新上传 = 用新解析结果替换旧的，而不是越追加越长。
+            # 同一个文件重新上传：默认用新解析结果替换旧的，而不是越追加越长 ——
             # 用户重传通常正是因为上次解析得不理想。
-            row.html = html
+            #
+            # ★ 但**人手工改过的正文不能覆盖**（2026-10-16 用户要求"上传的文件人工都要
+            # 可以手动修改"）：用户可能已经把那份有损正文补全、加了批注，一次重传就抹掉
+            # 等于白干，而且界面上不会有任何提示。判断依据是**解析产物指纹**，不是 origin
+            # —— 首次上传写进去的 origin 就是 "human"，用它判断等于永远为真。
+            _old = row.html or ""
+            _edited = (
+                bool(_old.strip())
+                and bool(row.html_parse_hash)
+                and _sha256(_old.encode("utf-8")).hexdigest()[:32] != row.html_parse_hash
+            )
+            if _edited:
+                warnings.append(
+                    "这份文档的正文你已经手工改过，这次**没有**用新解析结果覆盖它（原件已更新）。"
+                    "要按新解析重来，请先把正文清空再传一次。"
+                )
+            else:
+                row.html = html
+                row.html_parse_hash = parse_hash
             row.ai_editable = editable
             row.origin = "human"
             # 重传就连原件一起换掉（用户重传往往就是要换一版文件）。

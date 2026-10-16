@@ -171,6 +171,53 @@ def test_reading_a_doc_without_an_original_says_so(client):
     assert "没有存原件" in out.get("note", "")
 
 
+# ---------------------------------------------------------------------------
+# 3) 人：上传来的文档要能**手工改**
+# ---------------------------------------------------------------------------
+def test_uploaded_doc_can_be_edited_by_hand(client):
+    """上传来的文档必须能被人改（2026-10-16 用户要求「人工都要可以手动修改」）。
+
+    守的重点不是"接口返回 200"，而是**改到的是同一份**：同一份资料重复上传会出现
+    多条 kind=spec_source，写入如果按 kind 找第一行，就会改串到别的资料上去 ——
+    那种错用户很难发现（两份都还在，只是内容换了位）。
+    """
+    pid = _pid(client)
+    a = _upload(client, pid, "甲资料.md", "# 甲\n\n甲的一行。\n".encode("utf-8")).json()["doc"]
+    b = _upload(client, pid, "乙资料.md", "# 乙\n\n乙的一行。\n".encode("utf-8")).json()["doc"]
+    assert a["id"] != b["id"]
+
+    r = client.put(
+        f"/api/projects/{pid}/docs",
+        json={
+            "id": b["id"],
+            "kind": "spec_source",
+            "title": "乙资料.md",
+            "html": "<h2>乙资料.md</h2><p>我手工加的批注。</p>",
+        },
+    )
+    assert r.status_code == 200, r.text
+
+    docs = {d["id"]: d for d in client.get(f"/api/projects/{pid}/docs").json()["docs"]}
+    assert "我手工加的批注" in docs[b["id"]]["html"], "改的不是点的那一份"
+    assert "我手工加的批注" not in docs[a["id"]]["html"], "改串到另一份资料上去了"
+    assert "甲的一行" in docs[a["id"]]["html"], "甲那份不该被动过"
+    # 改完标记成 human —— 界面据此区分"AI 生成未过目"和"人改过"
+    assert docs[b["id"]]["origin"] == "human"
+
+
+def test_editing_an_uploaded_doc_keeps_its_original(client):
+    """手工改正文**不能**把原件弄丢 —— 原件是"原文到底怎么写的"的权威。"""
+    pid = _pid(client)
+    doc = _upload(client, pid, "规范.md", "# 规范\n\n原文。\n".encode("utf-8")).json()["doc"]
+    client.put(
+        f"/api/projects/{pid}/docs",
+        json={"id": doc["id"], "kind": "spec_source", "title": "规范.md", "html": "<p>改过</p>"},
+    )
+    after = {d["id"]: d for d in client.get(f"/api/projects/{pid}/docs").json()["docs"]}[doc["id"]]
+    assert after["source_url"], "改一次正文就把原件信息丢了"
+    assert after["source_name"] == "规范.md"
+
+
 def test_read_doc_source_needs_an_identifier(client):
     """不给 doc_id/title 要直接告诉模型怎么拿 —— 而不是抛异常。"""
     from app import assistant
@@ -178,3 +225,45 @@ def test_read_doc_source_needs_an_identifier(client):
     out = asyncio.run(assistant._read_doc_source(_pid(client), {}))
     assert "error" in out
     assert "read_project_docs" in str(out)
+
+
+def test_reupload_does_not_clobber_hand_edits(client):
+    """重传同一个文件**不能**把人手工改过的正文覆盖掉（2026-10-16）。
+
+    用户可能已经把那份有损正文补全、加了批注；把文件重传一遍就抹掉等于白干，
+    而且界面上不会有任何提示 —— 这是"人工可以手动修改"这条要求下面最容易被忽略的坑。
+    """
+    pid = _pid(client)
+    fname = "规范.md"
+    doc = _upload(client, pid, fname, "# 规范\n\n原文。\n".encode("utf-8")).json()["doc"]
+
+    # 人手工补了一行
+    client.put(
+        f"/api/projects/{pid}/docs",
+        json={
+            "id": doc["id"],
+            "kind": "spec_source",
+            "title": fname,
+            "html": "<h2>规范.md</h2><p>原文。</p><p>我补的一行。</p>",
+        },
+    )
+
+    r = _upload(client, pid, fname, "# 规范\n\n原文。\n".encode("utf-8"))
+    assert r.status_code == 200, r.text
+    assert any("手工改过" in w for w in r.json()["warnings"]), "覆盖了人工修改却没告诉用户"
+    after = {d["id"]: d for d in client.get(f"/api/projects/{pid}/docs").json()["docs"]}[doc["id"]]
+    assert "我补的一行" in after["html"], "人工修改被静默覆盖了"
+
+
+def test_reupload_still_replaces_when_nobody_edited(client):
+    """没人改过的文档仍然被新解析结果替换 —— 这是重传的本意，别一起改掉。"""
+    pid = _pid(client)
+    fname = "规范.md"
+    doc = _upload(client, pid, fname, "# 旧\n\n旧原文。\n".encode("utf-8")).json()["doc"]
+    r = _upload(client, pid, fname, "# 新\n\n新原文。\n".encode("utf-8"))
+    assert r.status_code == 200, r.text
+    assert not r.json()["warnings"], r.json()["warnings"]
+    after = {d["id"]: d for d in client.get(f"/api/projects/{pid}/docs").json()["docs"]}[doc["id"]]
+    assert "新原文" in after["html"]
+    assert "旧原文" not in after["html"]
+

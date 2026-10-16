@@ -1890,6 +1890,11 @@ def _doc_row(r) -> dict:
         # 助手侧由 `_write_project_doc` 强制 —— 界面上的开关只是提示，
         # 真正的门在服务端（否则绕过界面就能改）。
         "ai_editable": bool(getattr(r, "ai_editable", True)),
+        # 上传的原件（2026-10-16）。有 source_url 才显示「原件」入口 ——
+        # 这一列上线前导入的文档没有原件，界面不该给它画一个点不开的按钮。
+        "source_url": getattr(r, "source_url", None) or "",
+        "source_name": getattr(r, "source_name", None) or "",
+        "source_bytes": getattr(r, "source_bytes", None) or 0,
         "updated_at": r.updated_at.isoformat() if r.updated_at else None,
     }
 
@@ -2087,6 +2092,37 @@ async def create_doc_from_file(
     else:
         html = sanitize(f"<h2>{_escape(name)}</h2>{text_body}")
 
+    # ★ 存一份**原件**（2026-10-16 用户要求「我想全部看到原件」）。
+    #
+    # 解析出来的正文是**有损**的：PDF 丢版面、docx 丢标题层级、图片和表格都不在里面。
+    # 所以原件必须留下 —— 它是"格式到底对不对"的唯一权威，也是用户想"看回原版"的退路。
+    # 存进 artifacts 之后：人从界面上打开看；服务端靠 source_key 把它读回来喂给助手。
+    #
+    # 存失败**不让上传失败**：正文已经解析好了，最坏情况只是这一份"没有原件可看"，
+    # 但必须在 warnings 里说出来 —— 静默降级会让用户以为原件在，等到要看时才发现不在。
+    from app import storage
+
+    import os as _os
+    import tempfile as _tempfile
+    import uuid as _uuid
+
+    warnings = list(res.warnings or [])
+    src_key = src_url = ""
+    src_bytes = 0
+    _ext = _os.path.splitext(name)[1].lower()[:12]
+    try:
+        src_key = f"docs/{pid}/original/{_uuid.uuid4().hex[:12]}{_ext}"
+        with _tempfile.TemporaryDirectory(prefix="tp_docsrc_") as _td:
+            _p = _os.path.join(_td, "up" + _ext)
+            with open(_p, "wb") as _f:
+                _f.write(data)
+            src_url = await storage.upload(_p, src_key)
+        src_bytes = len(data)
+    except Exception as _exc:  # noqa: BLE001 — 原件存不下不该拖垮正文导入
+        src_key = src_url = ""
+        src_bytes = 0
+        warnings.append(f"原件没能保存（{type(_exc).__name__}）：这一份只能看解析出的正文。")
+
     async with db_session() as s:
         row = (
             await s.execute(
@@ -2109,6 +2145,10 @@ async def create_doc_from_file(
                 html=html,
                 origin="human",
                 ai_editable=editable,
+                source_key=src_key or None,
+                source_url=src_url or None,
+                source_name=name[:300],
+                source_bytes=src_bytes or None,
             )
             s.add(row)
         else:
@@ -2117,6 +2157,12 @@ async def create_doc_from_file(
             row.html = html
             row.ai_editable = editable
             row.origin = "human"
+            # 重传就连原件一起换掉（用户重传往往就是要换一版文件）。
+            if src_key:
+                row.source_key = src_key
+                row.source_url = src_url
+                row.source_name = name[:300]
+                row.source_bytes = src_bytes
         row.updated_at = _utcnow()
         await s.flush()
         out = _doc_row(row)
@@ -2127,7 +2173,7 @@ async def create_doc_from_file(
         "doc": out,
         "chars": len(text),
         "truncated": bool(res.truncated),
-        "warnings": list(res.warnings or []),
+        "warnings": warnings,
     }
 
 

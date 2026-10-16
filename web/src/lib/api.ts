@@ -871,6 +871,11 @@ export interface ProjectDoc {
    *  false 时助手**不能写**这份文档（读不受影响 —— 它永远能读全部）。
    *  服务端强制，界面上的开关只是提示。 */
   ai_editable: boolean;
+  /** ★ 上传的**原件**（2026-10-16）。非空才能显示「原件」入口。
+   *  解析出来的正文是有损的（PDF 丢版面、docx 丢标题层级），原件才是格式的权威。 */
+  source_url: string;
+  source_name: string;
+  source_bytes: number;
   updated_at: string | null;
 }
 

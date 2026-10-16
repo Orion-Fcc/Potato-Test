@@ -1,4 +1,4 @@
-import { FileText, GitBranch, Loader2, Lock, Plus, Save, Sparkles, Trash2, Unlock, Upload, Wand2 } from "lucide-react";
+import { ExternalLink, FileText, GitBranch, Loader2, Lock, Plus, Save, Sparkles, Trash2, Unlock, Upload, Wand2 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useParams } from "react-router-dom";
@@ -9,6 +9,13 @@ import { InsightsPanel } from "../components/InsightsPanel";
 import { MermaidPreview } from "../components/MermaidPreview";
 import { Empty, PageSkeleton } from "../components/feedback";
 import { useErrorToast, useToast } from "../components/toast";
+
+/** 原件大小。两位有效数字就够 —— 用户要的是"这是多大一份文件"，不是精确字节。 */
+function fmtBytes(n: number): string {
+  if (n >= 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
+  if (n >= 1024) return `${Math.round(n / 1024)} KB`;
+  return `${n} B`;
+}
 
 /** 人工确认过的通过率面板。
  *
@@ -222,6 +229,9 @@ export function DocsPage() {
     setUploading(true);
     const done: string[] = [];
     const bad: string[] = [];
+    // 解析警告/原件没存下这类"降级"要单独收（2026-10-16）——静默降级会让用户
+    // 以为原件在，等真要核对格式时才发现没有。
+    const warn: string[] = [];
     let lastDoc: ProjectDoc | null = null;
     for (const f of files) {
       try {
@@ -231,6 +241,7 @@ export function DocsPage() {
         try {
           const d = await api.docFromFile(pid, f, true);
           lastDoc = d.doc;
+          if (d.warnings?.length) warn.push(`${r.filename}：${d.warnings.join("；")}`);
         } catch (e) {
           bad.push(`${r.filename}：${t("已进知识库，但存成文档失败")}（${e instanceof Error ? e.message : String(e)}）`);
         }
@@ -241,6 +252,7 @@ export function DocsPage() {
     setUploading(false);
     if (fileRef.current) fileRef.current.value = "";
     if (done.length) toast("success", `${t("已上传")}：${done.join("、")}`);
+    if (warn.length) toast("info", warn.join("；"));
     if (bad.length) fail(new Error(bad.join("；")));
     await load();
     if (lastDoc) setActive(lastDoc);
@@ -532,6 +544,30 @@ export function DocsPage() {
                   <Badge status="passed">
                     {t("正文引用了 {{n}} 个原文条目", { n: active.sources.length })}
                   </Badge>
+                )}
+
+                {/* ★ 「原件」（2026-10-16 用户要求「我想全部看到原件」）。
+                    只有上传来的文档才有。解析出的正文是**有损**的 —— PDF 丢版面、
+                    docx 丢标题层级、长文档还会被正文上限截断；原件才是"格式到底对不对"
+                    的唯一权威。浏览器能直接渲染 PDF/图片，其余类型会下载。 */}
+                {active.source_url && (
+                  <a
+                    href={active.source_url}
+                    target="_blank"
+                    rel="noreferrer"
+                    title={t("打开上传时的原件{{name}}", {
+                      name: active.source_name ? "：" + active.source_name : "",
+                    })}
+                    className="flex items-center gap-1.5 rounded-lg border border-[var(--line)] px-2.5 py-1.5 text-[12px] text-ink-700 outline-none transition-colors hover:border-brand-200 hover:text-brand-700"
+                  >
+                    <ExternalLink className="h-3.5 w-3.5" />
+                    {t("原件")}
+                    {active.source_bytes > 0 && (
+                      <span className="text-[11px] tabular-nums text-ink-400">
+                        {fmtBytes(active.source_bytes)}
+                      </span>
+                    )}
+                  </a>
                 )}
 
                 {/* ★ 「只有我能改」开关（2026-10-12 用户要求）。

@@ -37,3 +37,33 @@ def _upload_sync(local_path: str, key: str) -> str:
 
 async def upload(local_path: str, key: str) -> str:
     return await asyncio.to_thread(_upload_sync, local_path, key)
+
+
+def _read_sync(key: str) -> bytes | None:
+    """把存过的文件**读回来**。读不到返回 None（不是异常）——
+    调用方（助手读原件）要能区分"没有原件"和"读取炸了"，而前者是正常状态。"""
+    s = get_settings()
+    if not s.s3_endpoint:
+        p = os.path.join(s.artifact_dir, key)
+        if not os.path.isfile(p):
+            return None
+        with open(p, "rb") as f:
+            return f.read()
+
+    import boto3
+
+    client = boto3.client(
+        "s3",
+        endpoint_url=s.s3_endpoint,
+        aws_access_key_id=s.s3_access_key,
+        aws_secret_access_key=s.s3_secret_key,
+        region_name=s.s3_region,
+    )
+    try:
+        return client.get_object(Bucket=s.s3_bucket, Key=key)["Body"].read()
+    except Exception:  # noqa: BLE001 — 缺失/权限/网络都当作"读不到"
+        return None
+
+
+async def read_bytes(key: str) -> bytes | None:
+    return await asyncio.to_thread(_read_sync, key)

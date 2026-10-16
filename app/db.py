@@ -149,6 +149,12 @@ _ADDITIVE_COLUMNS: tuple[tuple[str, str, str], ...] = (
     # 都是可空列，存量行 = NULL，行为不变（项目仍平铺、知识块仍只属于它自己）。
     ("project", "group_id", "INTEGER"),
     ("knowledge_chunk", "group_id", "INTEGER"),
+    # 2026-10-16 上传文档的**原件**（见 models.ProjectDoc.source_*）。
+    # 四条都可空：上线前导入的文档没有原件，界面按"没有原件"显示即可。
+    ("project_doc", "source_key", "VARCHAR(400)"),
+    ("project_doc", "source_url", "VARCHAR(1000)"),
+    ("project_doc", "source_name", "VARCHAR(300)"),
+    ("project_doc", "source_bytes", "INTEGER"),
 )
 
 # 后加的**索引**（`_add_missing_columns` 只加列，索引得单独建）。

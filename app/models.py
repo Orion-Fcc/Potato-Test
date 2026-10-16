@@ -233,6 +233,20 @@ class ProjectDoc(Base):
     ai_editable: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=True, server_default="1"
     )
+    # ★ 上传的原件（2026-10-16 用户要求「我想全部看到原件」）。
+    #
+    # 之前上传只留**解析出的文本**，原件直接丢 —— 于是 PDF 的版面、docx 的标题层级、
+    # 图片、表格全都不可逆地没了，用户连"看回原件"的退路都没有。
+    # 现在把原件存进 artifacts（storage.upload），并记下这几样：
+    #   source_key   —— 存储键。服务端靠它把原件**读回来**（让助手也能看原件）。
+    #   source_url   —— 浏览器可打开的地址（本地模式 = /artifacts/<key>）。
+    #   source_name  —— 原始文件名（含扩展名），用来告诉用户"这是原件"。
+    #   source_bytes —— 原件大小，界面上显示。
+    # 全部可空：这一列上线前导入的文档没有原件，不是错误状态。
+    source_key: Mapped[str | None] = mapped_column(String(400), nullable=True)
+    source_url: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    source_name: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    source_bytes: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 

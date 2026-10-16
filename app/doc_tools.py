@@ -89,7 +89,14 @@ def clamp(text: str, cap: int) -> tuple[str, bool]:
     return t[:cap], True
 
 
-def summarize_doc_row(kind: str, title: str, html: str) -> dict:
+def summarize_doc_row(
+    kind: str,
+    title: str,
+    html: str,
+    doc_id: int | None = None,
+    source_name: str = "",
+    source_bytes: int = 0,
+) -> dict:
     """一份文档的索引信息（不含正文）—— 先让模型知道有哪些文档。"""
     plain = html_to_readable(html)
     return {
@@ -99,6 +106,12 @@ def summarize_doc_row(kind: str, title: str, html: str) -> dict:
         "readable_chars": len(plain),
         "has_diagram": 'class="tp-mermaid"' in (html or ""),
         "empty": not (html or "").strip(),
+        # 上传的原件（2026-10-16）。**索引里就要报出来**：否则模型不知道"还有一份原文"，
+        # 遇到正文里缺表格/丢层级时只会说"文档里没写"，而不是去读原件。
+        "doc_id": doc_id,
+        "has_original": bool(source_name),
+        "original_name": source_name,
+        "original_bytes": source_bytes,
     }
 
 

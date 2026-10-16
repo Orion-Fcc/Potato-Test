@@ -150,7 +150,11 @@ def _system_prompt(catalog: str, project_name: str = "Potato Test", pid: int = 0
         "「照总览给我补用例」这类**整体性**问题时先读它；"
         "search_knowledge 是关键词检索，搜回来的是零散片段，回答不了整体问题。\n"
         "6c) ★**往项目文档里写**：write_project_doc 能把内容写进「项目总览 / 需求分析 / "
-        "流程图」，写完用户在「项目文档」页能直接看到并接着编辑。"
+        "流程图」，写完用户在「项目文档」页能直接看到并接着编辑。\n"
+        "6d) ★**读上传的原件**：read_project_docs 的索引里 has_original=true 说明这份文档是"
+        "用户**上传来的**，里面的 readable 只是**解析产物**（PDF 丢版面、表格被压平、"
+        "长文档还会被文档正文的上限截断）。要核对原文、或正文里明显缺表格/缺层级时，"
+        "用 read_doc_source 读原件。注意 PDF 的原件也只能取文字层 —— 精确版面让用户自己点「原件」看。\n"
         "注意和 generate_document 的分工：后者产出**可下载的报告文件**，"
         "前者写进**项目说明书本身**。用户说「写进总览 / 加到项目文档里」时用后者。\n"
         "7) **文件工具**：list_files（看目录/确认路径）/ import_file_to_knowledge"
@@ -709,6 +713,39 @@ def _tools() -> list[dict]:
                         "max_chars": {
                             "type": "integer",
                             "description": "单份文档最多返回多少字符，默认 60000。超出会被截断并说明。",
+                        },
+                    },
+                    "required": [],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "read_doc_source",
+                "description": (
+                    "读**上传的原件** —— 用户传进来那份文件本身，"
+                    "而不是文档页里那份解析过、还可能被人编辑过的正文。"
+                    "\n\n★ 什么时候用它：read_project_docs 的索引里 has_original=true，"
+                    "而正文里缺表格 / 标题层级 / 字段对照（解析产物常见的有损）时；"
+                    "或用户问「原件里到底怎么写的」。"
+                    "\n注意：PDF 只能取到文字层，版面 / 表格形状 / 图片**还原不了** ——"
+                    "需要精确版面时，直接让用户点「原件」自己看。"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "doc_id": {
+                            "type": "integer",
+                            "description": "文档 id（read_project_docs 的索引里给了）。",
+                        },
+                        "title": {
+                            "type": "string",
+                            "description": "没有 doc_id 时按标题找。",
+                        },
+                        "max_chars": {
+                            "type": "integer",
+                            "description": "最多返回多少字符，默认 60000。",
                         },
                     },
                     "required": [],
@@ -1533,6 +1570,8 @@ async def _run_tool(name: str, args: dict, pid: int, ctx: dict | None = None) ->
         return await _list_documents(pid)
     if name == "read_project_docs":
         return await _read_project_docs(pid, args)
+    if name == "read_doc_source":
+        return await _read_doc_source(pid, args)
     if name == "write_project_doc":
         return await _write_project_doc(pid, args, ctx)
     if name == "list_tools":
@@ -2241,12 +2280,26 @@ async def _read_project_docs(pid: int, args: dict) -> dict:
             ),
         }
 
-    index = [summarize_doc_row(r.kind, r.title, r.html) for r in rows]
+    index = [
+        summarize_doc_row(
+            r.kind,
+            r.title,
+            r.html,
+            doc_id=r.id,
+            source_name=getattr(r, "source_name", "") or "",
+            source_bytes=getattr(r, "source_bytes", 0) or 0,
+        )
+        for r in rows
+    ]
     if not kind:
         return {
             "count": len(index),
             "docs": index,
-            "note": "带上 kind 再调一次就能读到某一份的正文。",
+            "note": (
+                "带上 kind 再调一次就能读到某一份的正文。"
+                "★ 索引里 has_original=true 的文档是**上传来的**，正文是解析产物（有损）；"
+                "要看原文本来怎么写（表格 / 标题层级 / 版面），用 read_doc_source 读它的原件。"
+            ),
         }
 
     want = next((r for r in rows if r.kind == kind), None)
@@ -2268,6 +2321,117 @@ async def _read_project_docs(pid: int, args: dict) -> dict:
         out["note"] = f"正文过长，只返回了前 {cap} 字符（完整 {len(want.html or '')} 字符）。"
     if not text.strip():
         out["note"] = "这份文档是空的。"
+    # 上传来的文档要点明"正文是有损的、原件还在"（2026-10-16）——
+    # 不点明的话模型会把解析产物当成原文，表格丢了也只会说"文档里没写"。
+    if getattr(want, "source_name", ""):
+        out["has_original"] = True
+        out["original_name"] = want.source_name
+        out["doc_id"] = want.id
+        _hint = (
+            f"这份文档是上传来的（原件 {want.source_name}），readable 是**解析产物**，"
+            "表格 / 标题层级 / 版面都可能已经丢了。要看原文用 read_doc_source。"
+        )
+        out["note"] = (str(out.get("note", "")) + " " + _hint).strip()
+    return out
+
+
+async def _read_doc_source(pid: int, args: dict) -> dict:
+    """读**上传的原件**（2026-10-16 用户要求「让 AI 也看原件」）。
+
+    ## 为什么不能只读 `ProjectDoc.html`
+
+    那份正文是 `docparse` 拍出来的**有损文本**：PDF 丢版面、docx 丢标题层级，
+    表格被压成一段文字。原件才是"原文到底怎么写的"的权威 —— 术语表、字段对照表、
+    版本记录这类**靠表格承载**的信息，在正文里经常已经不成形了。
+
+    这里把原件从 artifacts 读回来、**重新解析**再交给模型（docx 现在按标题层级还原，
+    见 `_from_docx`）。读不到就**明说没有原件**，不拿正文冒充。
+    """
+    from sqlalchemy import select
+
+    from app import docparse, storage
+    from app.db import db_session
+    from app.doc_tools import clamp
+    from app.models import ProjectDoc
+
+    doc_id = args.get("doc_id")
+    title = str(args.get("title") or "").strip()
+    cap = int(args.get("max_chars") or 60000)
+    cap = max(2000, min(cap, 200000))
+
+    if not doc_id and not title:
+        return {"error": "要给 doc_id（或 title）。先调 read_project_docs 看有哪些文档。"}
+
+    async with db_session() as s:
+        q = select(ProjectDoc).where(ProjectDoc.project_id == pid)
+        if doc_id:
+            try:
+                q = q.where(ProjectDoc.id == int(doc_id))
+            except (TypeError, ValueError):
+                return {"error": f"doc_id 不是数字：{doc_id!r}"}
+        else:
+            q = q.where(ProjectDoc.title == title[:200])
+        row = (await s.execute(q)).scalars().first()
+        if row is None:
+            return {"error": "找不到这份文档。", "hint": "先调 read_project_docs 拿 doc_id。"}
+        # ★ 出 session 前把用得到的字段取出来 —— expire_on_commit 之外，ORM 行在
+        # session 关闭后访问属性也不保险。
+        keep = {
+            "id": row.id,
+            "title": row.title,
+            "kind": row.kind,
+            "key": getattr(row, "source_key", None) or "",
+            "name": getattr(row, "source_name", None) or "",
+            "bytes": getattr(row, "source_bytes", None) or 0,
+        }
+
+    if not keep["key"]:
+        return {
+            "doc_id": keep["id"],
+            "title": keep["title"],
+            "has_original": False,
+            "note": (
+                "这份文档**没有存原件**（要么是这一功能上线前导入的，要么当时保存失败）。"
+                "只能用 read_project_docs 读解析出的正文。"
+            ),
+        }
+
+    data = await storage.read_bytes(keep["key"])
+    if not data:
+        return {
+            "doc_id": keep["id"],
+            "has_original": True,
+            "original_name": keep["name"],
+            "error": "原件在存储里找不到了（读回为空）。",
+        }
+    try:
+        res = docparse.extract(keep["name"] or keep["title"], data)
+    except Exception as exc:  # noqa: BLE001
+        return {"error": f"原件解析失败：{type(exc).__name__}: {exc}"}
+
+    text, cut = clamp(res.text or "", cap)
+    out: dict = {
+        "doc_id": keep["id"],
+        "title": keep["title"],
+        "has_original": True,
+        "original_name": keep["name"],
+        "original_bytes": keep["bytes"],
+        "format": res.fmt,
+        # 原文而不是"文档页里那份可能被编辑过的正文"——这个区别必须让模型知道。
+        "source_text": text,
+        "chars": len(res.text or ""),
+        "truncated": cut,
+        "note": "这是**原件**解析出来的原文，不是文档页里那份可能被人改过的正文。",
+    }
+    if cut:
+        out["note"] += f" 原文过长，只返回前 {cap} 字符（完整 {len(res.text or '')} 字符）。"
+    if res.fmt == "pdf":
+        out["note"] += (
+            " 注意：PDF 只能取到文字层，版面/表格形状/图片**没有**被还原 —— "
+            "需要精确版面时请让用户直接看原件。"
+        )
+    if not text.strip():
+        out["note"] += " 原件里没解析出文字（可能是扫描件，需要 OCR）。"
     return out
 
 

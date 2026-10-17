@@ -30,6 +30,24 @@ dependencies = [
     # you get an app that imports fine but cannot start a run.
     "browser-use[video]==0.13.10",
     "playwright==1.63.0",
+    # --- 文档解析（上传需规 / 资料）---
+    # ★ 2026-10-17 补：这些是 app/docparse.py **直接 import** 的，之前一个都没声明 ——
+    #   本机能跑只是因为开发时零散装过；**全新 clone 装完，上传 docx/pdf 会直接 ImportError**。
+    "python-docx>=1.1",         # docx（段落 + 表格）
+    "pypdf>=4.0",               # PDF 文字层
+    "beautifulsoup4>=4.12",     # html
+    "lxml>=5.0",                # BeautifulSoup 的解析器
+    "markdownify>=0.11",        # html → markdown
+    # --- OCR：扫描件 / 截图（2026-10-17 用户要求「上 OCR」）---
+    # ★ 必须是 `rapidocr`（3.x）而不是老包名 `rapidocr-onnxruntime` ——
+    #   后者 `requires_python = <3.13`，而本项目跑在 3.13 上，pip 会疯狂回溯旧版本后失败。
+    # 纯 pip 包、自带中英文模型、不需要用户另装 Tesseract，也能直接打进桌面版安装包。
+    # PyMuPDF 只负责把"没有文字层的 PDF 页"渲染成图。
+    # 没装这两样也能跑 —— 扫描件会退回"建议转成 md"的提示，不会让上传失败。
+    "pymupdf>=1.24",
+    "rapidocr>=3.0",
+    "pillow>=10.0",
+    "numpy>=1.26",
 ]
 
 # ---------------------------------------------------------------------------

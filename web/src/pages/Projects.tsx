@@ -667,7 +667,7 @@ export function Projects() {
                 ref={kbFileRef}
                 type="file"
                 multiple
-                accept=".md,.txt,.json,.csv,.docx,.pdf,.xlsx,.html,.rtf"
+                accept=".md,.txt,.json,.csv,.docx,.pdf,.xlsx,.html,.rtf,.png,.jpg,.jpeg"
                 className="hidden"
                 onChange={(e) => onKbUpload(e.target.files)}
               />

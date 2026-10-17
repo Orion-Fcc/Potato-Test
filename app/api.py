@@ -1860,11 +1860,14 @@ async def knowledge_formats(pid: int, request: Request) -> dict:
     # docparse 里 Office/PDF/HTML/RTF 走的是各自的解析分支，不在 _TEXT_EXTS 里
     office_exts = sorted({".docx", ".docm", ".pdf", ".xlsx", ".xlsm", ".xltx", ".html", ".htm", ".xhtml", ".rtf"})
     legacy = sorted(docparse._LEGACY_BINARY)
+    # 图片走 OCR（2026-10-17），单独一组：界面可以据此说明"识别出来的可能有错字"
+    image_exts = sorted(docparse._IMAGE_EXTS)
     return {
         "text": text_exts,
         "office": office_exts,
+        "image": image_exts,
         "legacy_unsupported": legacy,
-        "accept": ",".join(text_exts + office_exts),
+        "accept": ",".join(text_exts + office_exts + image_exts),
         "label": docparse.SUPPORTED_EXT_LABEL,
     }
 

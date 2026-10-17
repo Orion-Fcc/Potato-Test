@@ -72,6 +72,16 @@ def main() -> int:
         # pywebview 的 Windows 后端（WebView2）
         "--collect-all",
         "webview",
+        # OCR（2026-10-17）：模型文件是数据，静态分析看不到 —— 不 collect-all 的话
+        # 装到别人机器上会"能跑但 OCR 报找不到模型"
+        "--collect-all",
+        "rapidocr",
+        "--collect-all",
+        "onnxruntime",
+        "--collect-all",
+        "pymupdf",
+        "--hidden-import",
+        "cv2",
         # uvicorn 按字符串选实现
         "--hidden-import",
         "uvicorn.logging",

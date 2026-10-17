@@ -64,8 +64,12 @@ def test_docx_keeps_document_order():
     assert i1 < it < i3, res.text[:400]
 
 
-def test_scanned_pdf_page_is_reported_with_advice():
-    """没有文字层的页要**点名**并给建议 —— 这才是"AI 读不到"的真实场景。"""
+def test_scanned_pdf_page_is_reported_with_advice(monkeypatch):
+    """没有文字层的页要**点名**并给建议 —— 这才是"AI 读不到"的真实场景。
+
+    这里把 OCR 关掉（monkeypatch `_get_ocr` → None），测的是"**没装 OCR 时**的降级路径"：
+    它必须给出"建议转 md"，而不是静默少读。装了 OCR 的路径由下面图片那条覆盖。
+    """
     from pypdf import PdfWriter
 
     w = PdfWriter()
@@ -73,12 +77,25 @@ def test_scanned_pdf_page_is_reported_with_advice():
     buf = io.BytesIO()
     w.write(buf)
 
+    monkeypatch.setattr(docparse, "_get_ocr", lambda: None)
     warns: list[str] = []
-    docparse._from_pdf(buf.getvalue(), warns)  # 直接测抽取器：全空页会被上层当作"无文字"
+    docparse._from_pdf(buf.getvalue(), warns)
     assert warns, "扫描页一声不响 —— 用户会以为 AI 读到了"
     joined = " ".join(warns)
     assert "没有文字层" in joined
     assert "md" in joined, "只说了读不到，没给可执行的建议"
+
+
+def test_broken_pdf_does_not_crash(monkeypatch):
+    """★ 坏 PDF（打不开 / 不是 PDF）不能把整份上传搞挂。
+
+    真踩过：`fitz.open` 抛 FileDataError 时没人兜，整个 extract 直接冒泡 ——
+    用户看到的是 500，而不是"这份读不了"。
+    """
+    warns: list[str] = []
+    out = docparse._ocr_pdf_pages(b"%PDF-1.4\nthis is not really a pdf", [0], warns)
+    assert out == {}
+    assert any("打不开" in w or "没装 OCR" in w for w in warns), warns
 
 
 def test_big_file_with_little_text_is_flagged():
@@ -121,3 +138,48 @@ def test_warnings_are_written_for_humans():
     assert warns
     assert "没读到任何文字" in warns[0]
     assert "md" in warns[0]
+
+
+# ---------------------------------------------------------------------------
+# OCR（2026-10-17 用户要求「上 OCR」）
+#
+# 扫描版 PDF / 截图没有文字层，pypdf 读出来是空的 —— 对 AI 来说那几页等于不存在。
+# ---------------------------------------------------------------------------
+def test_ocr_absent_degrades_with_advice():
+    """没装 OCR 组件时：**给建议**，绝不让上传失败。
+
+    这条比"OCR 能用"更重要 —— 缺依赖导致上传 500 是用户最不能接受的失败方式。
+    """
+    w: list[str] = []
+    out = docparse._ocr_pdf_pages(b"%PDF-1.4\n", [0], w)
+    assert out == {}
+    if docparse._get_ocr() is None:
+        assert any("没装 OCR 组件" in x for x in w), w
+
+
+def test_ocr_reads_text_from_an_image():
+    """★ 图片（截图/扫描页）能通过 OCR 读出文字。"""
+    # 包名可能两种：3.x 叫 rapidocr（支持 py3.13），1.x 叫 rapidocr_onnxruntime（<3.13）
+    if docparse._get_ocr() is None:
+        pytest.skip("这台机器没装 OCR 组件")
+    from PIL import Image, ImageDraw, ImageFont
+
+    font = None
+    for p in (
+        "C:/Windows/Fonts/arial.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    ):
+        if pathlib.Path(p).is_file():
+            font = ImageFont.truetype(p, 44)
+            break
+    if font is None:
+        pytest.skip("没有可用的 TTF 字体")
+
+    img = Image.new("RGB", (640, 160), "white")
+    ImageDraw.Draw(img).text((30, 50), "HELLO 12345", fill="black", font=font)
+    buf = io.BytesIO()
+    img.save(buf, "PNG")
+
+    res = docparse.extract("截图.png", buf.getvalue())
+    assert res.fmt == "image"
+    assert "HELLO" in res.text.upper(), res.text

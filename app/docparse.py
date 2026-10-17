@@ -5,9 +5,9 @@ the requirement spec instead of copy-pasting it: Word, PDF, Excel, HTML, RTF and
 every plain-text-ish format.
 
 Design constraints:
-  * Only the libraries the base image already ships (python-docx, pypdf,
-    openpyxl, beautifulsoup4/lxml, markdownify) — nothing new to install, so no
-    base-image rebuild.
+  * 解析库（python-docx / pypdf / openpyxl / beautifulsoup4+lxml / markdownify）都声明在
+    `pyproject.toml` 里（2026-10-17 补齐 —— 之前漏声明，全新 clone 会 ImportError）。
+    另外 OCR（rapidocr + pymupdf）用来兜住**没有文字层**的扫描件，缺了会自动降级。
   * Chinese specs are usually GB18030-encoded, not UTF-8: decode with a fallback
     chain rather than trusting the first codec.
   * Never raise for a "weird but readable" file — sniff the bytes instead.
@@ -20,6 +20,7 @@ the API can answer 400 with one clear message.
 
 from __future__ import annotations
 
+import importlib
 import io
 import re
 from dataclasses import dataclass, field
@@ -60,7 +61,131 @@ _TEXT_EXTS = {
 }
 _LEGACY_BINARY = {".doc": "Word 97-2003 (.doc)", ".xls": "Excel 97-2003 (.xls)", ".ppt": "PowerPoint 97-2003 (.ppt)"}
 
-SUPPORTED_EXT_LABEL = "md, txt, json, csv, docx, pdf, xlsx, html, rtf"
+SUPPORTED_EXT_LABEL = "md, txt, json, csv, docx, pdf, xlsx, html, rtf, png, jpg"
+
+# ---- OCR（2026-10-17）-----------------------------------------------------
+#
+# 为什么要有它：扫描版 PDF / 截图**没有文字层**，pypdf 读出来是空的 —— 对用户来说
+# 就是"AI 什么都没看到"，界面上却显示上传成功。用户明确要求「上 OCR」。
+#
+# 选型：RapidOCR（onnxruntime）而不是 Tesseract ——
+#   * 纯 pip 包、自带中英文模型，不需要用户另装一个 exe，也不会卡在管理员权限上；
+#   * 能直接打进桌面版安装包。
+# 代价：多一百多 MB 依赖、每页多 1~3 秒。所以**只对没有文字层的页**用 ——
+# 有文字层的 PDF 完全不受影响，不会变慢。
+#
+# 没装 OCR 组件时 `_get_ocr()` 返回 None，上层退回"建议转成 md"的告警 ——
+# 绝不因为缺依赖让上传失败。
+_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
+_OCR_DPI = 200  # 200 够认字；再往上只是更慢，识别率提升很小
+
+_ocr_engine: object | None = None
+
+
+def _get_ocr():
+    """懒加载 OCR 引擎。没装 / 模型坏了都返回 None（调用方据此降级，不抛异常）。
+
+    ★ 两个包名都要试（2026-10-17 实测）：
+      * `rapidocr`（3.x）—— 支持 Python 3.13，**现在用的是它**；
+      * `rapidocr_onnxruntime`（1.x）—— 老包名，但**只支持 <3.13**
+        （这台机是 3.13.14，所以当初 pip 装了 25 分钟一直在回溯旧版本，最后必然失败）。
+    """
+    global _ocr_engine
+    if _ocr_engine is None:
+        for mod in ("rapidocr", "rapidocr_onnxruntime"):
+            try:
+                m = importlib.import_module(mod)
+                _ocr_engine = m.RapidOCR()
+                break
+            except Exception:  # noqa: BLE001
+                continue
+        else:
+            _ocr_engine = False
+    return _ocr_engine or None
+
+
+def _ocr_image_bytes(png: bytes) -> str:
+    """识别一张图里的文字（按行拼接）。没有引擎或识别失败都返回空串。"""
+    engine = _get_ocr()
+    if engine is None:
+        return ""
+    try:
+        import numpy as np
+        from PIL import Image
+
+        arr = np.array(Image.open(io.BytesIO(png)).convert("RGB"))
+        out = engine(arr)  # type: ignore[misc]
+    except Exception:  # noqa: BLE001
+        return ""
+
+    # 两种返回形状（上面两个包名各一种）：
+    #   rapidocr 3.x            → RapidOCROutput，文本在 `.txts`
+    #   rapidocr_onnxruntime 1.x → ([[box, text, score], ...], elapsed)
+    txts = getattr(out, "txts", None)
+    if txts:
+        return "\n".join(str(t) for t in txts if t)
+    if isinstance(out, tuple) and out and isinstance(out[0], list):
+        return "\n".join(str(row[1]) for row in out[0] if len(row) > 1 and row[1])
+    return ""
+
+
+def _ocr_pdf_pages(data: bytes, pages: list[int], w: list[str]) -> dict[int, str]:
+    """把没有文字层的页渲染成图再 OCR。返回 {页码(1-based): 文本}。"""
+    out: dict[int, str] = {}
+    if _get_ocr() is None:
+        w.append(
+            f"有 {len(pages)} 页没有文字层（扫描件），而这台机器没装 OCR 组件 —— "
+            "AI 读不到这几页。建议转成 .md 再传，或点「原件」自己看。"
+        )
+        return out
+    try:
+        import fitz  # PyMuPDF：这里只用来渲染页面
+    except Exception:  # noqa: BLE001
+        w.append(f"有 {len(pages)} 页没有文字层（扫描件），缺少渲染组件，AI 读不到这几页。")
+        return out
+
+    doc = None
+    try:
+        doc = fitz.open(stream=data, filetype="pdf")
+    except Exception as exc:  # noqa: BLE001 — 坏 PDF 不该让整份上传失败
+        w.append(
+            f"有 {len(pages)} 页没有文字层，而且这份 PDF 打不开去渲染（{type(exc).__name__}）—— "
+            "AI 读不到这几页。建议转成 .md 再传，或点「原件」自己看。"
+        )
+        return out
+    try:
+        for pno in pages:
+            try:
+                pix = doc[pno].get_pixmap(dpi=_OCR_DPI)
+                txt = _ocr_image_bytes(pix.tobytes("png")).strip()
+            except Exception as exc:  # noqa: BLE001 — 单页失败不该拖垮整份
+                w.append(f"第 {pno + 1} 页 OCR 失败（{type(exc).__name__}）")
+                continue
+            if txt:
+                out[pno + 1] = txt
+    finally:
+        doc.close()
+
+    if out:
+        w.append(
+            f"有 {len(out)} 页是图片/扫描件，已用 OCR 识别出文字 —— 可能有少量错字，"
+            "关键处请点「原件」对照。"
+        )
+    missing = len(pages) - len(out)
+    if missing:
+        w.append(f"还有 {missing} 页 OCR 也没读出文字，建议把这几页转成 .md 再传。")
+    return out
+
+
+def _from_image(data: bytes, w: list[str]) -> str:
+    """图片（截图/扫描图）走 OCR。"""
+    txt = _ocr_image_bytes(data).strip()
+    if not txt:
+        w.append(
+            "这张图里没识别出文字（可能是纯图形，或这台机器没装 OCR 组件）。"
+            "如果图里有内容要用，建议把文字另存成 .md 再传。"
+        )
+    return txt
 
 
 class UnsupportedDocument(ValueError):
@@ -182,26 +307,33 @@ def _from_pdf(data: bytes, w: list[str]) -> str:
     if reader.is_encrypted:
         try:
             reader.decrypt("")
-        except Exception as e:  # noqa: BLE001 — surface as a warning, try anyway
+        except Exception as exc:  # noqa: BLE001 — surface as a warning, try anyway
             w.append(f"这份 PDF 是加密的（{type(exc).__name__}），可能只能读到部分文字")
-    pages: list[str] = []
-    empty = 0
+
+    found: list[tuple[int, str, str]] = []  # (页码, 来源, 文本)
+    no_layer: list[int] = []  # 没有文字层的页（0-based，PyMuPDF 用）
     for i, page in enumerate(reader.pages, 1):
         try:
             t = (page.extract_text() or "").strip()
-        except Exception as e:  # noqa: BLE001 — one bad page shouldn't kill the import
+        except Exception as exc:  # noqa: BLE001 — one bad page shouldn't kill the import
             w.append(f"第 {i} 页读不出来（{type(exc).__name__}）")
             continue
         if t:
-            pages.append(f"## 第 {i} 页\n{t}")
+            found.append((i, "text", t))
         else:
-            empty += 1
-    if empty:
-        w.append(
-            f"有 {empty} 页**没有文字层**（扫描件/图片页），AI 读不到这几页的内容。"
-            "建议把它们另存成 .md 再传，或点「原件」自己核对。"
-        )
-    return "\n\n".join(pages)
+            no_layer.append(i - 1)
+
+    # ★ 没有文字层的页交给 OCR（2026-10-17）。不做这一步，这几页对 AI 就等于不存在 ——
+    # 扫描版 PDF 在真实需规里非常常见。有文字层的页不受影响，不会变慢。
+    if no_layer:
+        for pno, txt in _ocr_pdf_pages(data, no_layer, w).items():
+            found.append((pno, "ocr", txt))
+
+    found.sort(key=lambda x: x[0])
+    return "\n\n".join(
+        f"## 第 {n} 页" + ("（OCR 识别）" if src == "ocr" else "") + f"\n{t}"
+        for n, src, t in found
+    )
 
 
 def _from_xlsx(data: bytes, w: list[str]) -> str:
@@ -384,6 +516,9 @@ def extract(filename: str, data: bytes) -> ExtractResult:
     # 4) RTF
     elif ext == ".rtf" or data[:5] == b"{\\rtf":
         text, fmt = _from_rtf(data), "rtf"
+    # 4.5) 图片 → OCR（2026-10-17）。截图/扫描图在需规里很常见。
+    elif ext in _IMAGE_EXTS or data[:8].startswith(b"\x89PNG") or data[:3] == b"\xff\xd8\xff":
+        text, fmt = _from_image(data, warnings), "image"
     # 5) plain text (and anything else we can decode)
     elif ext in _TEXT_EXTS or ext == "" or b"\x00" not in data[:8192]:
         text, fmt = _decode(data), ext.lstrip(".") or "text"

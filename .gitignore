@@ -28,6 +28,12 @@ auth.json
 *.timestamp-*.mjs
 
 web/node_modules/
+
+# 清库前的本地快照（2026-10-17）。可能含原件/截图，**绝不进仓库**。
+backups/
+# 桌面版打包产物（PyInstaller）：从源码生成，不进仓库。
+build/
+dist_desktop/
 web/tsconfig.tsbuildinfo
 
 # web/dist IS committed on purpose (2026-10-06).

@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import logging
 import os
+import secrets
 import socket
 import subprocess
 import sys
@@ -204,8 +205,18 @@ def main() -> int:
         if (cand / "index.html").is_file():
             s.web_dist = str(cand)
 
-    url = f"http://127.0.0.1:{port}/"
-    log.info("启动服务 %s（数据库 %s）", url, s.database_url)
+    # ★ 桌面版的窗口是**唯一入口**（2026-10-17 用户要求「系统里面也不需要网页版」）：
+    # 每次启动生成一次性令牌，只有带着它的窗口能访问；浏览器直接开这个端口会被
+    # `app/desktop_gate.py` 拦成 403。令牌不落盘、不写日志，关掉应用就作废。
+    #
+    # 为什么不能干脆不起服务：窗口就是用 WebView2 加载这个服务上的界面 ——
+    # 服务是"渲染管道"，不是"网页版入口"。删掉它窗口就白了。
+    token = secrets.token_urlsafe(24)
+    os.environ["POTATO_DESKTOP_TOKEN"] = token
+
+    display_url = f"http://127.0.0.1:{port}/"  # 日志里只写这个，别把令牌写进文件
+    url = f"{display_url}?__t={token}"
+    log.info("启动服务 %s（数据库 %s）", display_url, s.database_url)
 
     server = uvicorn.Server(
         uvicorn.Config(
@@ -223,7 +234,7 @@ def main() -> int:
     # 用途是"验证桌面入口的启动链路"（端口选择 / 配置加载 / SPA 挂载），
     # 在没有图形界面的环境（CI、远程会话）里也能跑。
     if os.environ.get("POTATO_DESKTOP_HEADLESS") == "1":
-        log.info("HEADLESS：服务已就绪于 %s，15 秒后退出自检", url)
+        log.info("HEADLESS：服务已就绪于 %s，15 秒后退出自检", display_url)
         time.sleep(15)
         server.should_exit = True
         t.join(timeout=10)

@@ -1142,6 +1142,22 @@ export interface GroupKnowledgeFile {
   at: string;
 }
 
+/** 应用更新的检查结果（GET /api/app/update）。 */
+export type AppUpdateInfo = {
+  current: string;
+  latest: string | null;
+  has_update: boolean;
+  notes: string;
+  page_url: string;
+  download_url: string | null;
+  asset_name: string | null;
+  /** 只有桌面版是 true —— 网页版跑在服务器上，不能"就地更新"用户机器上的程序。 */
+  install_supported: boolean;
+  checked_at: string;
+  /** 查不到时的温和提示（断网 / 还没发过 Release），不是错误。 */
+  error: string | null;
+};
+
 export const api = {
   listProjects: (o?: Opts) => req<Project[]>("/projects", o),
   /** 单个项目详情。形状与 listProjects 的每一项逐字段一致（后端共用同一个 helper）。 */
@@ -1659,6 +1675,15 @@ export const api = {
     }),
   setLlmSettings: (b: LlmSettingsIn) =>
     req<LlmStatus>("/admin/settings/llm", { method: "PUT", body: JSON.stringify(b) }),
+  // ---- 应用更新（2026-10-17）--------------------------------------------
+  /** 查最新版本。后端缓存 10 分钟，`force` 用于"再检查一次"。 */
+  getAppUpdate: (force = false) => req<AppUpdateInfo>(`/app/update${force ? "?force=true" : ""}`),
+  /** 下载并静默安装更新（仅桌面版；网页版后端会明确拒绝）。 */
+  installAppUpdate: (url: string) =>
+    req<{ started: boolean; installer: string; message: string }>("/app/update/install", {
+      method: "POST",
+      body: JSON.stringify({ url }),
+    }),
   // ★ 池为空时这里回一条从 .env 读出来的**回显**条目（seeded=true），而不是空列表 ——
   // 空列表会让界面显示"没有配置"，而实际上平台正在用 .env 那一套跑。
   getLlmPool: () =>

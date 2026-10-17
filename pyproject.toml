@@ -3,7 +3,7 @@ packages = ["app"]  # only app/ is the package; web/alembic/artifacts are not
 
 [project]
 name = "potato"
-version = "0.1.0"
+version = "1.0.0"
 description = "Potato Test — agentic E2E test platform: NL test cases executed in a real browser, recorded, judged."
 requires-python = ">=3.11"
 dependencies = [

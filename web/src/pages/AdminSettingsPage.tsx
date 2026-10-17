@@ -6,6 +6,7 @@ import { api, type FeishuStatus, type LlmPoolEntry, type LlmPremiumStatus, type 
 import { useAuth } from "../lib/auth";
 import { Button, Card, Checkbox, Field, Input, Select } from "../components/ui";
 import { useToast, useErrorToast } from "../components/toast";
+import { AppUpdateCard } from "../components/AppUpdateCard";
 
 // 协议取值与后端 app/llm_protocol.py 的 normalize_provider 对齐。
 // auto = 自动识别（先看地址线索，再依次小请求探测），绝大多数国产网关是 OpenAI 兼容。
@@ -1057,6 +1058,7 @@ export function AdminSettingsPage() {
         </p>
       </Card>
       )}
+      <AppUpdateCard />
     </div>
   );
 }

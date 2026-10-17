@@ -5542,3 +5542,49 @@ async def _redirect_artifact(rid: int, field: str, request: Request) -> Redirect
         if not url:
             raise HTTPException(404, f"no {field}")
         return RedirectResponse(url)
+
+
+# ---- 应用更新（2026-10-17）--------------------------------------------------
+# 检查：任何模式都能用（网页版也想知道自己落后没）。
+# 安装：**只有桌面版** —— 网页版跑在服务器上，既读不到用户磁盘也不该往用户机器装东西。
+# 安全边界全在 app/updater.py（下载白名单 + 只看本仓库 Release）。
+
+
+@router.get("/app/update")
+async def app_update(force: bool = False) -> dict:
+    """查最新版本。`force=true` 跳过 10 分钟缓存（用户点了"再检查一次"）。"""
+    from app import updater
+
+    return await updater.check(force=force)
+
+
+@router.post("/app/update/install")
+async def app_update_install(body: dict) -> dict:
+    """下载更新包并静默安装。**仅桌面版**。"""
+    import tempfile
+    from pathlib import Path
+
+    from app import updater
+
+    if not updater.install_supported():
+        raise HTTPException(400, "只有桌面版能一键更新：网页版跑在服务器上，改不了本机的程序")
+
+    url = str((body or {}).get("url") or "").strip()
+    if not url:
+        raise HTTPException(400, "缺少更新包地址")
+    try:
+        updater.validate_download_url(url)  # 白名单：放行 = 允许在用户机器上执行它
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+    try:
+        path = await updater.download_installer(url, Path(tempfile.gettempdir()) / "potato-update")
+    except Exception as exc:  # noqa: BLE001 — 下载失败要说清原因，别让用户以为点空了
+        raise HTTPException(502, f"下载更新包失败：{exc}") from exc
+
+    updater.launch_installer(path)  # 延迟 6 秒：留给应用退出
+    return {
+        "started": True,
+        "installer": str(path),
+        "message": "更新包已下载，应用即将退出并自动安装",
+    }

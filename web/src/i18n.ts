@@ -1433,6 +1433,22 @@ const zh: Record<string, string> = {
   "…": "…",
   "这个项目有多少条用例？": "这个项目有多少条用例？",
   "最近一次运行通过率多少？有哪些失败？": "最近一次运行通过率多少？有哪些失败？",
+  // ---- 应用更新（2026-10-17）------------------------------------------------
+  Version: "版本",
+  "Current version": "当前版本",
+  "Check for updates": "检查更新",
+  "New version available": "有新版本可用",
+  "You're on the latest version.": "已是最新版本。",
+  "Download and install": "下载并安装",
+  "Downloading…": "下载中…",
+  "Open the release page": "打开发布页",
+  "Release notes": "更新说明",
+  "The app will close and install the update automatically.": "应用将退出并自动安装更新。",
+  "Only the desktop app can update in place. For the web version, ask the person who runs the server.":
+    "只有桌面版能就地更新；网页版请找部署这台服务的人。",
+  "Updates are downloaded from this project's GitHub releases and installed in place; your data is kept.":
+    "更新包从本项目的 GitHub Release 下载后就地安装，你的数据会保留。",
+
 };
 
 // 只在本文件里读写（init 与 setLang），故不导出。

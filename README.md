@@ -40,6 +40,10 @@ Agent 自己想清楚该点哪里；裁判读截图和动作记录下结论，**
 > 自己打安装包：`scripts\build_desktop.py` 生成程序目录 →
 > `ISCC.exe installer\potato.iss` 编译出安装包（需要装一次 Inno Setup）。
 
+**应用内更新**：设置页底部「版本 → 检查更新」，查到新版直接「下载并安装」——
+应用退出后静默覆盖安装，数据不动。更新源自本仓库的 GitHub Release，
+发布用 `python scripts\release.py --publish`（会校验三处版本号一致再上传安装包）。
+
 ### 一键部署（推荐，先看这里）
 
 把下面整段复制进终端就行。它会拉代码、建虚拟环境、装依赖、备好浏览器、生成 `.env`，

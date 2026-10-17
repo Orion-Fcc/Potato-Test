@@ -1329,6 +1329,35 @@ export const api = {
       method: "PUT",
       body: JSON.stringify({ text }),
     }),
+  /** 上传文件进大系统的**共享**需规（2026-10-17）。
+   *  服务端解析后**追加**到共享那份（不是替换 —— 那是 PUT 的事），
+   *  并把合并后的全文回传，界面直接拿它刷新编辑框。 */
+  uploadGroupKnowledge: async (gid: number, files: File[]) => {
+    const fd = new FormData();
+    for (const f of files) fd.append("files", f);
+    const res = await fetch(`/api/project-groups/${gid}/knowledge/upload`, {
+      method: "POST",
+      body: fd,
+    });
+    if (!res.ok) {
+      const raw = await res.text();
+      let msg = raw;
+      try {
+        msg = (JSON.parse(raw) as { detail?: string }).detail ?? raw;
+      } catch {
+        /* not JSON — keep raw */
+      }
+      throw new Error(msg);
+    }
+    return res.json() as Promise<{
+      ok: boolean;
+      added: { filename: string; chars: number; format: string; bytes: number }[];
+      warnings: string[];
+      text: string;
+      chars: number;
+      chunks: number;
+    }>;
+  },
   // Workspace-scoped persistent browser state (cookies/localStorage/sessionStorage/
   // IndexedDB kept between cases and runs, isolated per project).
   getBrowserState: (pid: number, o?: Opts) =>

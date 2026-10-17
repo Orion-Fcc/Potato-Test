@@ -3,10 +3,12 @@ import {
   ChevronDown,
   ChevronRight,
   FolderOpen,
+  Loader2,
   MoreHorizontal,
   Pencil,
   Plus,
   Trash2,
+  Upload,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -118,6 +120,10 @@ export function Projects() {
   // 大系统的三个弹窗：新建/改名、编辑共享需规、删除确认。
   const [groupDraft, setGroupDraft] = useState<{ id: number | null; name: string } | null>(null);
   const [kbEdit, setKbEdit] = useState<{ id: number; name: string; text: string } | null>(null);
+  // 共享需规的文件上传（2026-10-17）：解析在服务端做（和项目文档同一套 docparse），
+  // 这里只管把文件递过去、把回传的全文贴回编辑框。
+  const [kbUploading, setKbUploading] = useState(false);
+  const kbFileRef = useRef<HTMLInputElement>(null);
   const [confirmDelGroup, setConfirmDelGroup] = useState<ProjectGroup | null>(null);
 
   const load = useMemo(
@@ -252,6 +258,33 @@ export function Projects() {
       toast("success", t("已保存共享需规：{{c}} 字", { c: r.chars }));
     } catch (e) {
       fail(e);
+    }
+  };
+
+  /**
+   * 上传文件进共享需规（2026-10-17 用户要求「共享需规也要以上传的形式」）。
+   *
+   * 服务端解析后**追加**到共享那份，并把合并后的全文回传 —— 这里直接用回传的文本
+   * 刷新编辑框，不去前端自己拼接（分隔符/编码的坑不值得重造一遍）。
+   * 附带的 warnings 要原样显示：某份读不了必须点名，否则用户以为传进去了。
+   */
+  const onKbUpload = async (list: FileList | null) => {
+    const files = Array.from(list ?? []);
+    if (!kbEdit || !files.length) return;
+    setKbUploading(true);
+    try {
+      const r = await api.uploadGroupKnowledge(kbEdit.id, files);
+      setKbEdit((cur) => (cur ? { ...cur, text: r.text } : cur));
+      if (r.added.length) {
+        toast("success", t("已追加 {{n}} 份资料（共 {{c}} 字）", { n: r.added.length, c: r.chars }));
+      }
+      if (r.warnings?.length) toast("info", r.warnings.join("；"));
+      loadGroups();
+    } catch (e) {
+      fail(e);
+    } finally {
+      setKbUploading(false);
+      if (kbFileRef.current) kbFileRef.current.value = "";
     }
   };
 
@@ -592,9 +625,40 @@ export function Projects() {
             </h2>
             <p className="mb-3 text-[12px] leading-relaxed text-ink-500">
               {t(
-                "粘贴这个系统级的需规/资料。**它下面的每个项目**检索时都会带上它 —— 传一次，各模块共用。",
+                "粘贴这个系统级的需规/资料，或者直接上传文件。**它下面的每个项目**检索时都会带上它 —— 传一次，各模块共用。",
               )}
             </p>
+            {/* 上传入口（2026-10-17 用户要求「共享需规也要以上传的形式」）。
+                走服务端解析，和「项目文档」那边是同一套格式支持；上传是**追加**，
+                不会覆盖已经在里面的内容（要整体替换直接改下面的文本再保存）。 */}
+            <div className="mb-2 flex flex-wrap items-center gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={kbUploading}
+                onClick={() => kbFileRef.current?.click()}
+              >
+                {kbUploading ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <Upload className="h-3.5 w-3.5" />
+                )}
+                {kbUploading ? t("读取中…") : t("上传文件")}
+              </Button>
+              <span className="text-[11.5px] leading-relaxed text-ink-400">
+                {t(
+                  "支持 md / txt / json / csv / docx / pdf / xlsx / html / rtf；上传的内容会**追加**到下面，不会覆盖已有内容。",
+                )}
+              </span>
+              <input
+                ref={kbFileRef}
+                type="file"
+                multiple
+                accept=".md,.txt,.json,.csv,.docx,.pdf,.xlsx,.html,.rtf"
+                className="hidden"
+                onChange={(e) => onKbUpload(e.target.files)}
+              />
+            </div>
             <textarea
               value={kbEdit.text}
               onChange={(e) => setKbEdit({ ...kbEdit, text: e.target.value })}

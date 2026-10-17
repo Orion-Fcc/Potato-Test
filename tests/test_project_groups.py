@@ -170,3 +170,69 @@ def test_replacing_group_knowledge_does_not_touch_project_own_text(client):
     shared = asyncio.run(knowledge.search(pid, "系统级"))
     assert own["hits"], "项目自己的资料被共享那份挤掉了"
     assert shared["hits"]
+
+
+# ---------------------------------------------------------------------------
+# 上传：共享需规也要能"传文件"（2026-10-17 用户要求
+# 「大系统的共享需规也要以上传的形式，也要可以上传」）
+#
+# 之前这条路只能**粘贴文本**（PUT 收 {text}）。这里守四件事：
+#   1. 文件能进来，而且标出**来源文件**（人工核对时要知道这段来自哪份）；
+#   2. 上传是**追加** —— 第二份不能把第一份冲掉（共享需规是累积的系统级资料）；
+#   3. 先手写再上传，手写的内容要留着；
+#   4. 坏文件要**点名报出来**，同时传的好文件照常入库。
+# ---------------------------------------------------------------------------
+def _upload_kb(client, gid: int, *files: tuple[str, bytes]):
+    return client.post(
+        f"/api/project-groups/{gid}/knowledge/upload",
+        files=[("files", (n, d, "application/octet-stream")) for n, d in files],
+    )
+
+
+def test_group_knowledge_accepts_uploaded_files(client):
+    gid = _group(client, "上传测试大系统")
+    r = _upload_kb(client, gid, ("系统级规则.md", "# 系统级规则\n\n统一用 JWT 鉴权。\n".encode("utf-8")))
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ok"] is True
+    assert [a["filename"] for a in body["added"]] == ["系统级规则.md"]
+    assert "JWT" in body["text"]
+    assert "## 系统级规则.md" in body["text"], "没标出来源文件，人工核对时不知道这段来自哪份"
+    assert body["chunks"] >= 1
+
+
+def test_uploading_appends_and_does_not_replace(client):
+    """★ 共享需规是**累积**的系统级资料：第二份不能把第一份冲掉。"""
+    gid = _group(client, "追加测试大系统")
+    _upload_kb(client, gid, ("甲.md", "# 甲\n\n甲的规则。\n".encode("utf-8")))
+    r = _upload_kb(client, gid, ("乙.md", "# 乙\n\n乙的规则。\n".encode("utf-8")))
+    assert r.status_code == 200, r.text
+    text = r.json()["text"]
+    assert "甲的规则" in text and "乙的规则" in text, text
+    # 存进去的就是回传的那份（不是只改了内存）
+    assert client.get(f"/api/project-groups/{gid}/knowledge").json()["text"] == text
+
+
+def test_upload_keeps_handwritten_text(client):
+    """先手写、再上传 —— 手写的部分不能被上传覆盖。"""
+    gid = _group(client, "手写保留大系统")
+    client.put(f"/api/project-groups/{gid}/knowledge", json={"text": "# 手写\n\n人手写的规则。"})
+    r = _upload_kb(client, gid, ("附加.md", "# 附加\n\n上传的规则。\n".encode("utf-8")))
+    text = r.json()["text"]
+    assert "人手写的规则" in text and "上传的规则" in text
+
+
+def test_bad_file_is_reported_and_skipped(client):
+    """一份读不了的文件要**点名报出来**，同时传的好文件照常入库。"""
+    gid = _group(client, "坏文件大系统")
+    r = _upload_kb(
+        client,
+        gid,
+        ("坏的.doc", b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1 not really"),
+        ("好的.md", "# 好的\n\n能读的那份。\n".encode("utf-8")),
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert [a["filename"] for a in body["added"]] == ["好的.md"]
+    assert any("坏的.doc" in w for w in body["warnings"]), "坏文件被静默忽略了"
+    assert "能读的那份" in body["text"]

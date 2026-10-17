@@ -1395,6 +1395,90 @@ async def set_group_knowledge(gid: int, body: KnowledgeIn) -> dict:
         return {"ok": True, **res}
 
 
+@router.post("/project-groups/{gid}/knowledge/upload")
+async def upload_group_knowledge(gid: int, files: list[UploadFile] = File(...)) -> dict:
+    """把文件上传进大系统的**共享**需规（2026-10-17 用户要求「共享需规也要以上传的形式」）。
+
+    和「项目文档」那边的上传走**同一套解析**（`docparse`：md / txt / json / csv / docx /
+    pdf / xlsx / html / rtf），区别只有落点 —— 这里进的是大系统共享那份，
+    它下面每个项目检索时都会带上。
+
+    ## 为什么是**追加**而不是替换
+
+    共享需规是一份**累积**的系统级资料（几个模块的说明书都往里放）。上传一份就把前面的
+    替换掉，等于把之前传的全抹了。要整体换掉继续用 `PUT`（粘贴编辑那条路）。
+
+    ## 为什么不行就明说
+
+    单个文件读不了（格式不支持、扫描件没文字层）不该让整批失败 —— 其余照常入库，
+    但**必须**在 warnings 里点名是哪一份、为什么，否则用户会以为传进去了。
+    """
+    from app import docparse, knowledge
+    from app.models import _utcnow
+
+    done: list[dict] = []
+    warnings: list[str] = []
+
+    async with db_session() as s:
+        await _group_or_404(s, gid)
+        existing = await knowledge.get_group_text(s, gid)
+        blocks = [existing.strip()] if existing.strip() else []
+
+        for f in files:
+            name = (f.filename or "").strip() or "上传的资料"
+            try:
+                data = await _read_upload_capped(f, docparse.MAX_UPLOAD_BYTES)
+            except HTTPException as exc:
+                warnings.append(f"「{name}」太大或读取失败：{exc.detail}")
+                continue
+            try:
+                res = docparse.extract(name, data)
+            except docparse.UnsupportedDocument as exc:
+                warnings.append(f"「{name}」读不了：{exc}")
+                continue
+            except Exception as exc:  # noqa: BLE001 — 一份坏文件不该拖垮整批
+                warnings.append(f"「{name}」读不了：{type(exc).__name__}: {exc}")
+                continue
+            text = (res.text or "").strip()
+            if not text:
+                warnings.append(f"「{name}」解析出来是空的（扫描件需要 OCR），已跳过。")
+                continue
+            blocks.append(f"## {name}\n{text}")
+            warnings.extend(f"「{name}」：{w}" for w in (res.warnings or []))
+            done.append(
+                {"filename": name, "chars": len(text), "format": res.fmt, "bytes": len(data)}
+            )
+
+        if not done:
+            st = await knowledge.group_stats(s, gid)
+            return {
+                "ok": False,
+                "added": [],
+                "warnings": warnings,
+                "text": existing,
+                "chars": st["chars"],
+                "chunks": st["chunks"],
+            }
+
+        g = await _group_or_404(s, gid)
+        res2 = await knowledge.replace_group_knowledge(
+            s, gid, "\n\n".join(blocks), source="大系统共享"
+        )
+        g.updated_at = _utcnow()
+        await s.flush()
+        # 回读合并后的全文给界面 —— 用户刚追加完就该看到它，而不是等下一次刷新。
+        text = await knowledge.get_group_text(s, gid)
+
+    return {
+        "ok": True,
+        "added": done,
+        "warnings": warnings,
+        "text": text,
+        "chars": res2.get("chars", len(text)),
+        "chunks": res2.get("chunks", 0),
+    }
+
+
 @router.get("/projects/{pid}/roles")
 async def get_roles(pid: int, request: Request) -> dict:
     await _project_access(request, pid, "viewer")

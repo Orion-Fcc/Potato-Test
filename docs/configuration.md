@@ -7,8 +7,8 @@ Defaults shown are the code defaults from `app/config.py`.
 
 | Variable | Default | Notes |
 |---|---|---|
-| `DATABASE_URL` | `sqlite+aiosqlite:///./potato-test.db` | SQLite for dev; use `postgresql+asyncpg://user:pass@host:5432/potato-test` in production. docker-compose wires this to the bundled Postgres automatically. |
-| `POSTGRES_PASSWORD` | `potato-test` | Only used by docker-compose to provision the bundled `db` service and build `DATABASE_URL`. |
+| `DATABASE_URL` | `sqlite+aiosqlite:///./potato-test.db` | 默认 SQLite 单文件即可（桌面版就是这种）。换 Postgres 就填 `postgresql+asyncpg://user:pass@host:5432/potato-test`（2026-10-17 起不再提供 docker-compose 编排）。 |
+| `POSTGRES_PASSWORD` | `potato-test` | 原先只给已移除的 docker-compose 用；现在直连 Postgres 时无需这个变量。 |
 
 ## Optional integrations
 
@@ -217,7 +217,7 @@ Two scopes are needed, and a version must be **published** for either to take ef
 | Variable | Default | Notes |
 |---|---|---|
 | `FEISHU_APP_ID` / `FEISHU_APP_SECRET` | *(empty)* | Empty ⇒ bot disabled. |
-| `FEISHU_WORKER_IN_PROCESS` | `true` | Run the bot **inside the API process** so it starts and stops with the server. Set `false` if something else already runs one: the bundled `docker-compose` `feishu` service (WebSocket transport), or a standalone `python -m app.feishu_poll`. All three take the same kernel-level single-instance lock, so the extras bow out on their own instead of answering twice. |
+| `FEISHU_WORKER_IN_PROCESS` | `true` | Run the bot **inside the API process** so it starts and stops with the server. Set `false` if something else already runs one: a standalone `python -m app.feishu_poll`（Docker 编排已于 2026-10-17 移除）。 All three take the same kernel-level single-instance lock, so the extras bow out on their own instead of answering twice. |
 | `FEISHU_POLL_INTERVAL_SEC` | `8` | Poll interval — also the worst-case latency before the bot answers. After a failure the worker backs off by doubling, capped at 60 s (was 300 s: a transient blip then looked like a dead bot for five minutes). |
 | `FEISHU_IGNORE_PROXY` | `true` | Ignore `HTTP(S)_PROXY` when calling `open.feishu.cn`. Set `false` only if Feishu is reachable solely through a proxy. |
 | `FEISHU_VERIFICATION_TOKEN` | *(empty)* | Event-subscription verification token; only used by the HTTP-webhook transport. |
@@ -233,7 +233,7 @@ WebSocket transport (`python -m app.feishu_ws`, which docker-compose uses) needs
 
 | Variable | Default | Notes |
 |---|---|---|
-| `WEB_DIST` | *(empty)* | Path to the built frontend, served by the API at `/`. The Docker image sets `/app/web_dist`. **Left empty, `run_server.py` auto-detects `./web/dist`** — which ships in the repo, so a fresh clone serves the UI with no configuration and no Node install. Only set it explicitly to point somewhere else. |
+| `WEB_DIST` | *(empty)* | Path to the built frontend, served by the API at `/`. （2026-10-17 起不再有 Docker 镜像。） **Left empty, `run_server.py` auto-detects `./web/dist`** — which ships in the repo, so a fresh clone serves the UI with no configuration and no Node install. Only set it explicitly to point somewhere else. |
 
 ---
 

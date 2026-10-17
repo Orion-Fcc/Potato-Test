@@ -189,14 +189,13 @@ cd web && pnpm install && pnpm build     # 产出 web/dist；npm 也可以
 tail -f logs/feishu_poll.log
 ```
 
-- 「已有轮询实例在运行（PID …）」—— 说明另有一个机器人在跑（可能是 Docker 里的
-  `feishu` 服务，或你自己起的 `python -m app.feishu_poll`）。一条消息只该被回一次，
-  所以后来者会主动退出，这是**正常行为**，不是故障。
+- 「已有轮询实例在运行（PID …）」—— 说明另有一个机器人在跑（比如你自己起的
+  `python -m app.feishu_poll`）。一条消息只该被回一次，所以后来者会主动退出，
+  这是**正常行为**，不是故障。
 - 「拉取群消息失败（… ConnectError/ReadTimeout）」—— 网络抖动。机器人会退避重试，
   最多安静 60 秒就会恢复。持续失败则检查出网/代理（`FEISHU_IGNORE_PROXY`）。
 
-Docker 部署请设 `FEISHU_WORKER_IN_PROCESS=false` —— `docker-compose.yml` 里已经有独立的
-`feishu` 服务走 WebSocket 长连接，两边同时在线会把同一条消息回两次。
+（2026-10-17 起不再有 Docker 部署 —— 本产品只发桌面版，机器人默认随应用一起起停。）
 
 ---
 
@@ -228,7 +227,7 @@ Docker 部署请设 `FEISHU_WORKER_IN_PROCESS=false` —— `docker-compose.yml`
 | 飞书机器人 | 想在飞书群里触发运行、收结果卡片 | `ENABLE_FEISHU=true` |
 | GitLab 缺陷双向同步 | 缺陷要同步到 GitLab Issue | `ENABLE_GITLAB=true` |
 | Celery + Redis 队列 | 多机部署或需要任务持久化 | 设 `REDIS_URL`（留空就用进程内队列） |
-| Docker 部署 | 部署到服务器 | 见 `docs/deployment.md` |
+| ~~Docker / 服务器部署~~ | **已移除**（2026-10-17）：本产品只发桌面版，见 `docs/desktop-build.md` | — |
 
 换句话说：**默认配置就是为「一个人在一台机器上本地用」准备的**，不需要登录、不需要数据库服务、不需要 Redis。
 

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import logging
 import os
+import secrets
 import sys
 from pathlib import Path
 
@@ -195,6 +196,23 @@ def main() -> int:
     # log_config=None：保留上面配置的根 logger，否则 uvicorn 会用自己的配置覆盖掉文件输出。
     # 监听地址写死 127.0.0.1，不开放局域网：见 app/config.py 里的说明。
     host = "127.0.0.1"
+
+    # ★ 令牌（2026-10-17 用户要求「把网页版全部删除，只要软件版本」）。
+    # 这条路径起的是"服务"，不设令牌的话它就是一个能被浏览器裸打开的常驻网页版。
+    # 令牌**只打到前台控制台**、不写日志文件 —— 于是：
+    #   * 前台调试（python run_server.py）：控制台里有一次性地址，能用；
+    #   * 后台常驻（pythonw，没有 stdout）：令牌无处可查，**没人能用浏览器打开**。
+    # 桌面版由 desktop.py 自己设这个变量，窗口带着它加载。
+    if not os.environ.get("POTATO_DESKTOP_TOKEN"):
+        tok = secrets.token_urlsafe(24)
+        os.environ["POTATO_DESKTOP_TOKEN"] = tok
+        if sys.stdout is not None:
+            print(
+                f"\n本次访问地址（含一次性令牌，重启即失效）：\n"
+                f"  http://{host}:{port}/?__t={tok}\n",
+                flush=True,
+            )
+
     log.info("已启动，仅本机可访问：http://%s:%s", host, port)
 
     # 只在真的配了对外地址时才打这一行，避免把内网地址写进日志。

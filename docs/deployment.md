@@ -99,6 +99,35 @@ Videos/screenshots/history live in the shared `artifacts` volume (`ARTIFACT_DIR`
 served by the API at `/artifacts/…`. Point `S3_ENDPOINT` at any S3-compatible
 store to upload instead (see [configuration.md](configuration.md#artifact-storage)).
 
+## 桌面版（Windows，一个人本机用就用这个）
+
+不需要 Docker、不需要服务器。打一次包、装一次即可：
+
+```bat
+:: 1) 打程序目录（PyInstaller，约 2-3 分钟；产物 dist_desktop\PotatoTest\）
+.venv\Scripts\python scripts\build_desktop.py
+
+:: 2) 编译安装包（需要装一次 Inno Setup）
+::    装到默认位置时：
+"C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\potato.iss
+::    只装了当前用户时（不需要管理员）：
+"%LOCALAPPDATA%\InnoSetup6\ISCC.exe" installer\potato.iss
+:: 产物：dist_desktop\installer\PotatoTest-Setup-1.0.0.exe
+```
+
+安装包**不含任何数据** —— 没有 `potato.db` / `artifacts` / `profiles` / `.env`，
+装完首次启动自动建空库。装到 `%LOCALAPPDATA%\Programs\PotatoTest`（per-user，不需要管理员），
+安装时可选桌面快捷方式与开机自启。
+
+> ★ **别装到 `Program Files`**：数据库、上传的原件、浏览器 profile 都落在程序目录旁边，
+> 那边对普通用户不可写 —— 症状是"能打开、一保存就报错"，而且错误只在日志里。
+> `.iss` 里加了安装前的目录可写检查，就是为了拦住这种装法。
+
+`desktop.py` 是桌面版入口：同一进程里起 uvicorn，再开一个原生窗口
+（pywebview → Edge WebView2；没装 pywebview 时退化为 Edge 的 `--app` 窗口）。
+端口默认 18081，被占用会自动换一个。**网页版和桌面版是同一套服务**，
+同一台机器用浏览器打开就是全功能，不需要额外部署。
+
 ## Running without Docker
 
 有一条命令做完的版本（幂等，重复跑只补缺的部分）：

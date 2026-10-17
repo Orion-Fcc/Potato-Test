@@ -47,7 +47,9 @@ UninstallDisplayIcon={app}\{#AppExe}
 AppComments=不含任何项目/用例数据，首次启动自动建库。
 
 [Languages]
-Name: "chinesesimplified"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
+; Inno 官方安装包**不含中文**，这份 .isl 是官方仓库里的非官方翻译，已随 installer/ 一起放进来。
+; 用相对路径引用（相对本 .iss 所在目录），这样换机器/换编译器目录都不用改。
+Name: "chinesesimplified"; MessagesFile: "ChineseSimplified.isl"
 
 [Tasks]
 ; ★ 用户要求：桌面快捷方式要能选（默认不勾）

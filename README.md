@@ -25,6 +25,21 @@ Agent 自己想清楚该点哪里；裁判读截图和动作记录下结论，**
 
 ## 快速开始
 
+### 桌面版（Windows，双击安装）
+
+不想碰命令行就用这个：`PotatoTest-Setup-1.0.0.exe` 双击安装 ——
+装到**当前用户目录**（`%LOCALAPPDATA%\Programs\PotatoTest`，不需要管理员），
+**包里不带任何数据**，装完第一次打开就是空库。
+
+安装时可选：桌面快捷方式（**默认不勾**）、开机自启。
+
+> 桌面版和网页版是**同一套服务**：桌面版只是把它装进一个原生窗口（Windows 的 Edge WebView2）。
+> 数据库、上传的原件、浏览器 profile 都落在程序目录旁边 —— 所以别装到 `Program Files`
+> （那边不可写，会出现"能打开、一保存就报错"）。用默认目录就行。
+>
+> 自己打安装包：`scripts\build_desktop.py` 生成程序目录 →
+> `ISCC.exe installer\potato.iss` 编译出安装包（需要装一次 Inno Setup）。
+
 ### 一键部署（推荐，先看这里）
 
 把下面整段复制进终端就行。它会拉代码、建虚拟环境、装依赖、备好浏览器、生成 `.env`，
@@ -53,7 +68,7 @@ cd ~/Potato-Test && ./scripts/deploy.sh
 - **路径里有空格没关系。** `D:\agent_study\Potato Test` 就是验证过的部署位置，
   所有脚本里的路径都加过引号。
 - **换端口**：`PORT=9000 ./scripts/deploy.sh`（Windows 改 `scripts\deploy.bat` 开头的 `set "PORT="`）。
-- **默认端口 18081**，与桌面启动器 `PotatoTest.bat` 一致。
+- **默认端口 18081**，与桌面版的默认端口一致（被占用时桌面版会自动换一个空闲端口）。
 - **启动前会提醒你填 `GATEWAY_API_KEY`。** 它是空的，测试执行和 AI 判定都跑不了 ——
   这是唯一一个必须自己填的东西（网关地址/模型同样在 `.env` 里）。
 
@@ -100,7 +115,7 @@ python run_server.py 18081
 
 ### 说明
 
-- **端口固定 18081**（2026-10-05 起，写在 `PotatoTest.bat` 的 `PORT=`）。要改改那里，别改脚本。
+- **默认端口 18081**（2026-10-05 起）。桌面版被占用时会自动换端口；手动跑 `run_server.py <port>` 时以参数为准。
 - **`run_server.py` 负责把日志写进 `logs/potato.log`。** 它同时支持 `python`（前台）和
   `pythonw`（后台无窗口）两种启动方式，所以后台跑也有日志可查
 - **`pip install -e .` 只装本地使用所需的依赖。** Postgres / Redis / Celery / S3 / 飞书
@@ -188,6 +203,11 @@ Docker 部署请设 `FEISHU_WORKER_IN_PROCESS=false` —— `docker-compose.yml`
 - **自带模型** —— 任何 OpenAI 兼容接口都能接，界面里随时改，不用重新部署
 - **运行与报告** —— 并发执行带全局浏览器额度上限，实时进度，支持「只重跑失败的」，支持运行间对比
 - **环境与账号** —— 每个项目可配多套环境（测试/预发…）和多个登录账号；会话会被捕获复用，用例不需要每次重新登录
+- **资料与文档** —— 上传需规/资料（md / txt / json / csv / docx / pdf / xlsx / html / rtf）后，
+  同一份文件既进知识库（给 AI 检索）又存成「项目文档」（给人看、给人改）；**原件会保留**，
+  随时能打开原格式的文件核对；正文可以像 Word 一样手工编辑，**重传同一文件不会覆盖你改过的正文**
+- **大系统共享需规** —— 若干小模块挂在一个"大系统"下共用一份系统级资料；支持直接上传文件，
+  传过的原件可回溯（避免每个模块各传一遍同一份需求）
 - **缺陷看板** —— 内置，失败的用例可以直接转成缺陷单
 - **中英双语界面**
 
@@ -226,6 +246,9 @@ Docker 部署请设 `FEISHU_WORKER_IN_PROCESS=false` —— `docker-compose.yml`
       # 可选集成：gitlab_*.py / feishu*.py / celery_app.py
     web/            React + Vite + Tailwind 前端
     run_server.py   启动入口：配置日志 + 拉起 uvicorn（前台或后台都用它）
+    desktop.py      桌面版入口：同一进程里起服务 + 开一个原生窗口（pywebview → Edge --app → 浏览器）
+    scripts/        部署 / 体检 / 打包（build_desktop.py 打桌面版程序目录）
+    installer/      Inno Setup 安装包脚本 + 中文语言包（不含数据、可选桌面快捷方式）
     docs/           使用说明（USAGE.md）与部署、配置手册
     tests/          pytest 测试（纯逻辑，不需要浏览器）
 

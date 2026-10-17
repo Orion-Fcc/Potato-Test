@@ -1964,7 +1964,7 @@ async def execute_case(spec: CaseSpec, on_step=None, should_abort=None) -> Resul
     # 不设置默认值 —— 用户若想看升级提示，自己在 .env 里显式设 true 即可。
     if s.browser_version_check is False:
         os.environ["BROWSER_USE_VERSION_CHECK"] = "false"
-    # 阶段计时。日志级别默认是 WARNING（见 run_server.py），所以这些数据最后会用**一条
+    # 阶段计时。日志级别默认是 WARNING（见 desktop.py 的日志配置），所以这些数据最后会用**一条
     # WARNING** 汇总输出 —— 否则"每用例 170 多秒固定开销"在 INFO 里根本不可见。
     # 背景：对 13 个已完成用例做线性回归得到「固定开销 ≈171s/用例、每步 ≈16.6s」，
     # 在浏览器用例只能串行跑的前提下，固定开销无法靠并发摊薄，必须逐项拆开看。

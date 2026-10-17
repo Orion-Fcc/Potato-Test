@@ -37,7 +37,7 @@ def _app() -> FastAPI:
 
 
 def test_no_token_env_means_dev_mode(monkeypatch):
-    """开发时（run_server.py）没设令牌 —— 绝不能拦，否则本地调试就废了。"""
+    """没设令牌就不拦 —— 测试环境靠这条跑（否则每个 TestClient 都要先握手）。"""
     monkeypatch.delenv(ENV_TOKEN, raising=False)
     c = TestClient(_app())
     assert c.get("/").status_code == 200

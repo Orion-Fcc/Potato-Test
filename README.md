@@ -25,127 +25,42 @@ Agent 自己想清楚该点哪里；裁判读截图和动作记录下结论，**
 
 ## 快速开始
 
-### 桌面版（Windows，双击安装）
+### 装安装包（推荐）
 
-不想碰命令行就用这个：`PotatoTest-Setup-1.0.0.exe` 双击安装 ——
-装到**当前用户目录**（`%LOCALAPPDATA%\Programs\PotatoTest`，不需要管理员），
-**包里不带任何数据**，装完第一次打开就是空库。
+`PotatoTest-Setup-1.0.0.exe` 双击安装 —— 装到 `%LOCALAPPDATA%\Programs\PotatoTest`
+（per-user，**不需要管理员**），**包里不带任何数据**，装完第一次打开就是空库。
+安装时可选桌面快捷方式（默认不勾）、开机自启。
 
-安装时可选：桌面快捷方式（**默认不勾**）、开机自启。
+装完从**开始菜单打开**：窗口里就是界面 —— 没有地址要记，也没有浏览器。
 
-> 桌面版和网页版是**同一套服务**：桌面版只是把它装进一个原生窗口（Windows 的 Edge WebView2）。
-> 数据库、上传的原件、浏览器 profile 都落在程序目录旁边 —— 所以别装到 `Program Files`
-> （那边不可写，会出现"能打开、一保存就报错"）。用默认目录就行。
->
-> 自己打安装包：`scripts\build_desktop.py` 生成程序目录 →
-> `ISCC.exe installer\potato.iss` 编译出安装包（需要装一次 Inno Setup）。
+> 数据库、上传的原件、浏览器 profile 都落在**程序目录旁边**，所以**别装到 `Program Files`**
+> （那边对普通用户不可写，会出现"能打开、一保存就报错"，而且错误只在日志里）。用默认目录就行。
 
-**应用内更新**：设置页底部「版本 → 检查更新」，查到新版直接「下载并安装」——
-应用退出后静默覆盖安装，数据不动。更新源自本仓库的 GitHub Release，
-发布用 `python scripts\release.py --publish`（会校验三处版本号一致再上传安装包）。
+**应用内更新**：设置页底部「版本 → 检查更新」。更新源是本仓库的 GitHub Release，
+发布用 `python scripts\release.py --publish`（会先校验三处版本号一致）。
 
-### 一键部署（推荐，先看这里）
+### 从源码跑（开发用）
 
-把下面整段复制进终端就行。它会拉代码、建虚拟环境、装依赖、备好浏览器、生成 `.env`，
-然后启动服务 —— 中间不需要任何手工操作。
-
-> 浏览器：优先直接用你本机已装的 Edge/Chrome（更快，也更接近真人环境）；
-> 都没有时才装 Playwright 自带的 Chromium 作为兜底。
-
-Windows（cmd 或 PowerShell）：
+需要 Python ≥ 3.11：
 
 ```bat
-git clone https://github.com/Orion-Fcc/Potato-Test.git "%USERPROFILE%\Potato-Test"
-cd /d "%USERPROFILE%\Potato-Test" && scripts\deploy.bat
-```
-
-macOS / Linux：
-
-```bash
-git clone https://github.com/Orion-Fcc/Potato-Test.git ~/Potato-Test
-cd ~/Potato-Test && ./scripts/deploy.sh
-```
-
-几点说明：
-
-- **脚本是幂等的。** 重复运行只会补齐缺失的部分，不会覆盖你已有的 `.env` 或数据库。
-- **路径里有空格没关系。** `D:\agent_study\Potato Test` 就是验证过的部署位置，
-  所有脚本里的路径都加过引号。
-- **换端口**：`PORT=9000 ./scripts/deploy.sh`（Windows 改 `scripts\deploy.bat` 开头的 `set "PORT="`）。
-- **默认端口 18081**，与桌面版的默认端口一致（被占用时桌面版会自动换一个空闲端口）。
-- **启动前会提醒你填 `GATEWAY_API_KEY`。** 它是空的，测试执行和 AI 判定都跑不了 ——
-  这是唯一一个必须自己填的东西（网关地址/模型同样在 `.env` 里）。
-
-如果同事的机器上装不了 Python，或者你想手工控制每一步，看下面的分步做法。
-
-### Windows
-
-装好 Python ≥ 3.11 后，在项目目录里执行一次（首次约 5-10 分钟，`browser-use` 依赖树较大）：
-
-```bat
+git clone https://github.com/Orion-Fcc/Potato-Test.git
+cd Potato-Test
 python -m venv .venv
-.venv\Scripts\python -m pip install -e .
-.venv\Scripts\python -m playwright install chromium
-copy .env.example .env
+.venv\Scripts\pip install -e .
+.venv\Scripts\python desktop.py
 ```
 
-之后启动服务：
+首次装依赖约 5-10 分钟（`browser-use` 依赖树 + OCR 模型较大）。
+`web/dist`（界面构建产物）**随仓库发布**，所以不需要 Node / pnpm。
 
-```bat
-:: 前台运行（能看到日志，关掉窗口即停止）
-.venv\Scripts\python run_server.py 18081
+要改界面时：`cd web && pnpm install && pnpm build`，产物仍落在 `web/dist`。
 
-:: 或者后台常驻（无窗口，关掉终端也不停）
-start "" .venv\Scripts\pythonw run_server.py 18081
-```
+### 自己打包 / 发布
 
-后台方式启动后，停止用：
-
-```bat
-taskkill /F /FI "IMAGENAME eq pythonw.exe"
-```
-
-然后打开界面。**日常入口是桌面版**（双击 `PotatoTest.exe`，窗口里就是界面，不用管地址）；
-从源码这样手动起的服务，才需要临时用浏览器访问 <http://127.0.0.1:18081/>（那只是调试路径）。
-
-### macOS / Linux
-
-```bash
-python3 -m venv .venv && source .venv/bin/activate
-pip install -e .
-playwright install chromium
-cp .env.example .env
-python run_server.py 18081
-```
-
-### 说明
-
-- **默认端口 18081**（2026-10-05 起）。桌面版被占用时会自动换端口；手动跑 `run_server.py <port>` 时以参数为准。
-- **`run_server.py` 负责把日志写进 `logs/potato.log`。** 它同时支持 `python`（前台）和
-  `pythonw`（后台无窗口）两种启动方式，所以后台跑也有日志可查
-- **`pip install -e .` 只装本地使用所需的依赖。** Postgres / Redis / Celery / S3 / 飞书
-  这些默认关闭的集成放在 extras 里，需要时再装，例如 `pip install -e ".[feishu]"`
-  （服务端部署用 `pip install -e ".[all]"`）
-- 相对路径（`./potato.db`、`./profiles`、`./artifacts`）都锚定在项目根目录，
-  前端构建产物 `web/dist` 会被自动识别，所以从哪个目录启动都行
-
-### 前端
-
-**构建产物 `web/dist` 随仓库一起发布**，所以克隆下来直接就有界面，不需要装 Node。
-`run_server.py` 在 `WEB_DIST` 没配置时会自动使用它，零配置。
-
-改界面的人要重新构建，并且**把新的 `web/dist` 和源码放在同一个提交里**：
-
-```bash
-cd web && pnpm install && pnpm build     # 产出 web/dist；npm 也可以
-```
-
-否则随仓库发布的界面会悄悄落后于代码 —— 而看界面的人不会知道。
-`scripts/deploy.*` 在检测到 Node 时会自动重建，所以开发者本机不会用到旧包。
-
-开发期要热更新则改用 `pnpm dev`（Vite 会把 `/api` 和 `/artifacts` 代理到后端）。
-
-（`pip install -e .` 会按 `pyproject.toml` 装齐全部依赖。注意 `browser-use` 和 `playwright` 的版本是**锁死**的，别随手升级——它们的接口在版本间会变。）
+见 [docs/desktop-build.md](docs/desktop-build.md)：
+`scripts\build_desktop.py` 打程序目录 → `ISCC.exe installer\potato.iss` 编译安装包 →
+`scripts\release.py --publish` 发 Release（应用内更新靠它）。
 
 ---
 
@@ -249,7 +164,7 @@ tail -f logs/feishu_poll.log
       excel.py      Excel 用例导入导出
       # 可选集成：gitlab_*.py / feishu*.py / celery_app.py
     web/            React + Vite + Tailwind 前端
-    run_server.py   启动入口：配置日志 + 拉起 uvicorn（前台或后台都用它）
+    desktop.py      桌面版入口：同进程起服务 + 开窗口（唯一入口）
     desktop.py      桌面版入口：同一进程里起服务 + 开一个原生窗口（pywebview → Edge --app → 浏览器）
     scripts/        部署 / 体检 / 打包（build_desktop.py 打桌面版程序目录）
     installer/      Inno Setup 安装包脚本 + 中文语言包（不含数据、可选桌面快捷方式）
@@ -280,12 +195,12 @@ tail -f logs/feishu_poll.log
 ## 常见问题
 
 **关掉窗口服务就断了？**
-如果你用 `python run_server.py`（前台）启动，是的，关窗口就停。
-想让它常驻就用后台方式：`start "" .venv\Scripts\pythonw run_server.py 18081`，
+桌面版就是"关窗口即停"，没有后台常驻这回事。
+如果确实想让它常驻，用 `start "" .venv\Scripts\pythonw desktop.py`（窗口会自己开），
 关掉终端也不会停，日志照样写进 `logs/potato.log`。
 
 **提示端口被占用？**
-换一个端口就行，端口是启动参数：`run_server.py 19000`。
+桌面版被占用时会自动换一个空闲端口；要固定就设环境变量 `POTATO_DESKTOP_PORT=19000`。
 
 **点「运行」报 `No module named 'browser_use'`？**
 依赖没装全。执行 `.venv\Scripts\python -m pip install -e .` 补齐。

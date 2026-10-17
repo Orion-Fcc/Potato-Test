@@ -17,8 +17,8 @@
 
 ## 什么时候不启用
 
-没设 `POTATO_DESKTOP_TOKEN` 就不拦 —— 开发时 `run_server.py` 照旧能直接用浏览器调试。
-只有 `desktop.py` 会设这个变量，也就是**只有桌面版会开启闸门**。
+没设 `POTATO_DESKTOP_TOKEN` 就不拦 —— 这是给**测试**用的（TestClient 不需要握手）。
+`desktop.py` 是唯一会设这个变量的入口，也就是**只有桌面版会开启闸门**。
 """
 
 from __future__ import annotations

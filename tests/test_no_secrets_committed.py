@@ -360,5 +360,5 @@ def test_the_guard_exempts_only_itself() -> None:
         "scripts/check_secrets.py",
         "tests/test_no_secrets_committed.py",
     }
-    for path in ("app/config.py", "scripts/deploy.sh", "docs/USAGE.md", ".env"):
+    for path in ("app/config.py", "desktop.py", "docs/USAGE.md", ".env"):
         assert path not in mod.SELF_EXEMPT, f"{path} 不该被豁免"

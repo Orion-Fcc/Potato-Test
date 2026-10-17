@@ -233,7 +233,7 @@ WebSocket transport (`python -m app.feishu_ws`, which docker-compose uses) needs
 
 | Variable | Default | Notes |
 |---|---|---|
-| `WEB_DIST` | *(empty)* | Path to the built frontend, served by the API at `/`. （2026-10-17 起不再有 Docker 镜像。） **Left empty, `run_server.py` auto-detects `./web/dist`** — which ships in the repo, so a fresh clone serves the UI with no configuration and no Node install. Only set it explicitly to point somewhere else. |
+| `WEB_DIST` | *(empty)* | Path to the built frontend, served by the API at `/`. （2026-10-17 起不再有 Docker 镜像。） **Left empty, the app auto-detects `./web/dist`** — which ships in the repo, so a fresh clone serves the UI with no configuration and no Node install. Only set it explicitly to point somewhere else. |
 
 ---
 

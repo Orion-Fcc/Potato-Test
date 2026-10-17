@@ -214,7 +214,7 @@ def create_app() -> FastAPI:
     # ★ 桌面版闸门（2026-10-17）：只有带启动令牌的窗口能访问。
     # 必须在所有 router/mount **之后**、且是**最后**一个 add_middleware ——
     # Starlette 把最后加的放在最外层，这样才能连静态资源和 SPA 兜底一起罩住。
-    # 没设 POTATO_DESKTOP_TOKEN 时它什么都不做（源码跑 run_server.py 不受影响）。
+    # 没设 POTATO_DESKTOP_TOKEN 时它什么都不做（测试 / 源码起服务不受影响）。
     from app import desktop_gate
 
     desktop_gate.install(app)

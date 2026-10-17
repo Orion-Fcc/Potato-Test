@@ -22,7 +22,7 @@
 ## 三个必须处理的坑（都踩过）
 
 * **工作目录**：从桌面/开始菜单双击时 cwd 不是项目根，`.env` 和相对路径的数据库都会找不到 ——
-  症状是"能启动但配置全丢"（详见 `run_server.py` 里同一段注释）。所以导入 `app` 之前先 chdir。
+  症状是"能启动但配置全丢"（踩过：双击启动时配置全丢，看起来像数据库被清空了）。所以导入 `app` 之前先 chdir。
 * **端口**：写死 18081 会和已经开着的网页版实例打架，启动失败却只写进日志。默认自动换空闲端口。
 * **退出**：关窗口必须停掉 uvicorn 与浏览器复用池，否则进程留在后台继续占着 profile。
 """
@@ -68,7 +68,7 @@ def _bundled_web_dist() -> Path | None:
 
 def _setup_logging() -> logging.Logger:
     # pythonw 下 sys.stdout 是 None，无条件加 StreamHandler 会直接抛异常
-    # （run_server.py:43 有同一处处理）。
+    # （pythonw 下没有控制台，加 StreamHandler 会直接抛异常）。
     log_path = _root_dir() / "logs" / LOG_NAME
     log_path.parent.mkdir(parents=True, exist_ok=True)
     handlers: list[logging.Handler] = [logging.FileHandler(log_path, encoding="utf-8")]
@@ -186,7 +186,7 @@ def main() -> int:
         os.environ.setdefault("ARTIFACT_DIR", str(root / "artifacts"))
         os.environ.setdefault("PROFILE_DIR", str(root / "profiles"))
 
-    # 与 run_server.py 保持一致：关掉 browser_use 的匿名遥测（它抢连接还拖慢启动）。
+    # 关掉 browser_use 的匿名遥测（它会往 eu.i.posthog.com POST，在代理环境里只会超时重试，拖慢启动）。
     os.environ.setdefault("ANONYMIZED_TELEMETRY", "false")
     os.environ.setdefault("BROWSER_USE_CLOUD_SYNC", "false")
 
@@ -246,7 +246,7 @@ def main() -> int:
         log.info("窗口已关闭，正在停止服务")
         server.should_exit = True
         t.join(timeout=15)
-        # 复用池里的浏览器要收掉，否则变孤儿、继续占 profiles（同 run_server.py:55）。
+        # 复用池里的浏览器要收掉，否则变孤儿、继续占 profiles（它们会继续占住 profiles 下的目录，下次启动就是"浏览器启动失败"）。
         try:
             import asyncio
 

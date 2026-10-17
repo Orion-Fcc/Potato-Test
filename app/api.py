@@ -1375,10 +1375,16 @@ async def get_group_knowledge(gid: int) -> dict:
     from app import knowledge
 
     async with db_session() as s:
-        await _group_or_404(s, gid)
+        g = await _group_or_404(s, gid)
         text = await knowledge.get_group_text(s, gid)
         st = await knowledge.group_stats(s, gid)
-        return {"text": text, "chars": st["chars"], "chunks": st["chunks"]}
+        # 上传过的原件清单（2026-10-17）+ 正文。界面据此列「原件」入口。
+        return {
+            "text": text,
+            "chars": st["chars"],
+            "chunks": st["chunks"],
+            "files": list(getattr(g, "knowledge_files", None) or []),
+        }
 
 
 @router.put("/project-groups/{gid}/knowledge")
@@ -1413,11 +1419,16 @@ async def upload_group_knowledge(gid: int, files: list[UploadFile] = File(...)) 
     单个文件读不了（格式不支持、扫描件没文字层）不该让整批失败 —— 其余照常入库，
     但**必须**在 warnings 里点名是哪一份、为什么，否则用户会以为传进去了。
     """
-    from app import docparse, knowledge
+    from app import docparse, knowledge, storage
     from app.models import _utcnow
+
+    import os as _os
+    import tempfile as _tempfile
+    import uuid as _uuid
 
     done: list[dict] = []
     warnings: list[str] = []
+    files_meta: list[dict] = []
 
     async with db_session() as s:
         await _group_or_404(s, gid)
@@ -1448,6 +1459,32 @@ async def upload_group_knowledge(gid: int, files: list[UploadFile] = File(...)) 
             done.append(
                 {"filename": name, "chars": len(text), "format": res.fmt, "bytes": len(data)}
             )
+            # ★ 原件也留一份（2026-10-17 用户要求「同时也要可以查看到原格式的文件」）。
+            # 存不下**不让这次上传失败**（正文已经并进去了），但必须在 warnings 里说出来 ——
+            # 否则用户以为能打开原件，点的时候才发现没有。
+            _entry = {
+                "name": name,
+                "bytes": len(data),
+                "chars": len(text),
+                "format": res.fmt,
+                "url": "",
+                "key": "",
+                "at": _utcnow().isoformat(),
+            }
+            try:
+                _ext = _os.path.splitext(name)[1].lower()[:12]
+                _key = f"groups/{gid}/knowledge/{_uuid.uuid4().hex[:12]}{_ext}"
+                with _tempfile.TemporaryDirectory(prefix="tp_gkb_") as _td:
+                    _p = _os.path.join(_td, "up" + _ext)
+                    with open(_p, "wb") as _fh:
+                        _fh.write(data)
+                    _entry["url"] = await storage.upload(_p, _key)
+                _entry["key"] = _key
+            except Exception as _exc:  # noqa: BLE001
+                warnings.append(
+                    f"「{name}」的原件没能保存（{type(_exc).__name__}）：只能看解析出的正文。"
+                )
+            files_meta.append(_entry)
 
         if not done:
             st = await knowledge.group_stats(s, gid)
@@ -1464,16 +1501,21 @@ async def upload_group_knowledge(gid: int, files: list[UploadFile] = File(...)) 
         res2 = await knowledge.replace_group_knowledge(
             s, gid, "\n\n".join(blocks), source="大系统共享"
         )
+        # ★ 必须**重新赋值**，不能原地 append —— SQLAlchemy 的 JSON 列不追踪容器内部变更，
+        #   原地改的话 flush 时认为"没变"，清单会静默丢失（而文件其实已经存进 artifacts 了）。
+        g.knowledge_files = list(g.knowledge_files or []) + files_meta
         g.updated_at = _utcnow()
         await s.flush()
         # 回读合并后的全文给界面 —— 用户刚追加完就该看到它，而不是等下一次刷新。
         text = await knowledge.get_group_text(s, gid)
+        files_out = list(g.knowledge_files or [])
 
     return {
         "ok": True,
         "added": done,
         "warnings": warnings,
         "text": text,
+        "files": files_out,
         "chars": res2.get("chars", len(text)),
         "chunks": res2.get("chunks", 0),
     }

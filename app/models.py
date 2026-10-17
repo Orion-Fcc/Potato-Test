@@ -50,6 +50,13 @@ class ProjectGroup(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     name: Mapped[str] = mapped_column(String(200), nullable=False)
+    # ★ 传进「共享需规」的那些**原件**清单（2026-10-17 用户要求「同时也要可以查看到原格式的文件」）。
+    #
+    # 共享需规本身是一整份合并后的文本（`KnowledgeChunk.group_id`），**没有**"每份文件一行"的落点，
+    # 所以原件清单挂在这里。每项：{name, url, key, bytes, chars, format, at}。
+    # 说明：清单是**溯源用的**，不是"删掉就等于删掉内容"—— 正文仍以合并后的文本为准，
+    # 要删内容直接改文本；这里只回答"这些规则最初来自哪几份文件"。
+    knowledge_files: Mapped[list] = mapped_column(JSON, default=list)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 

@@ -1126,6 +1126,22 @@ export interface ApiProbeResult {
   method?: string;
 }
 
+/** 大系统「共享需规」里上传过的**原件**（2026-10-17）。
+ *
+ *  共享需规是一份合并后的文本，没有 per-file 的文档行，所以原件清单单独挂在 group 上。
+ *  `url` 为空 = 当时原件没存下来（例如存储写失败）—— 界面上不给点不开的链接。
+ *  清单是**溯源用**的：删掉它不等于删掉正文，正文以合并后的文本为准。
+ */
+export interface GroupKnowledgeFile {
+  name: string;
+  bytes: number;
+  chars: number;
+  format: string;
+  url: string;
+  key: string;
+  at: string;
+}
+
 export const api = {
   listProjects: (o?: Opts) => req<Project[]>("/projects", o),
   /** 单个项目详情。形状与 listProjects 的每一项逐字段一致（后端共用同一个 helper）。 */
@@ -1323,7 +1339,10 @@ export const api = {
   deleteProjectGroup: (gid: number) =>
     req<{ deleted: boolean }>(`/project-groups/${gid}`, { method: "DELETE" }),
   getGroupKnowledge: (gid: number, o?: Opts) =>
-    req<{ text: string; chars: number; chunks: number }>(`/project-groups/${gid}/knowledge`, o),
+    req<{ text: string; chars: number; chunks: number; files: GroupKnowledgeFile[] }>(
+      `/project-groups/${gid}/knowledge`,
+      o,
+    ),
   setGroupKnowledge: (gid: number, text: string) =>
     req<{ ok: boolean; chunks: number; chars: number }>(`/project-groups/${gid}/knowledge`, {
       method: "PUT",
@@ -1354,6 +1373,7 @@ export const api = {
       added: { filename: string; chars: number; format: string; bytes: number }[];
       warnings: string[];
       text: string;
+      files: GroupKnowledgeFile[];
       chars: number;
       chunks: number;
     }>;

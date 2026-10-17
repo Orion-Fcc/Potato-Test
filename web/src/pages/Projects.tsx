@@ -2,6 +2,7 @@ import {
   ArrowRight,
   ChevronDown,
   ChevronRight,
+  FileText,
   FolderOpen,
   Loader2,
   MoreHorizontal,
@@ -13,13 +14,20 @@ import {
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Link } from "react-router-dom";
-import { api, relTime, type Project, type ProjectGroup } from "../lib/api";
+import { api, relTime, type GroupKnowledgeFile, type Project, type ProjectGroup } from "../lib/api";
 import { pct, rateTone } from "../lib/metrics";
 import { useAbortSignal, useCollapsedGroups, useDebounced } from "../lib/hooks";
 import { Badge, Button, Card, Field, Input, PageHeader } from "../components/ui";
 import { Modal } from "../components/Modal";
 import { NewProjectWizard } from "../components/NewProjectWizard";
 import { useToast, useErrorToast } from "../components/toast";
+
+/** 原件大小。两位有效数字就够 —— 用户要的是"这是多大一份文件"。 */
+function fmtBytes(n: number): string {
+  if (n >= 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
+  if (n >= 1024) return `${Math.round(n / 1024)} KB`;
+  return `${n} B`;
+}
 
 /** Edit-only draft. Creating a project goes through NewProjectWizard. */
 type Draft = { id: number; name: string; base_url: string; group_id: number | null };
@@ -119,7 +127,12 @@ export function Projects() {
   const [confirmDel, setConfirmDel] = useState<Project | null>(null);
   // 大系统的三个弹窗：新建/改名、编辑共享需规、删除确认。
   const [groupDraft, setGroupDraft] = useState<{ id: number | null; name: string } | null>(null);
-  const [kbEdit, setKbEdit] = useState<{ id: number; name: string; text: string } | null>(null);
+  const [kbEdit, setKbEdit] = useState<{
+    id: number;
+    name: string;
+    text: string;
+    files: GroupKnowledgeFile[];
+  } | null>(null);
   // 共享需规的文件上传（2026-10-17）：解析在服务端做（和项目文档同一套 docparse），
   // 这里只管把文件递过去、把回传的全文贴回编辑框。
   const [kbUploading, setKbUploading] = useState(false);
@@ -244,7 +257,7 @@ export function Projects() {
   const openKb = async (g: ProjectGroup) => {
     try {
       const r = await api.getGroupKnowledge(g.id);
-      setKbEdit({ id: g.id, name: g.name, text: r.text });
+      setKbEdit({ id: g.id, name: g.name, text: r.text, files: r.files ?? [] });
     } catch (e) {
       fail(e);
     }
@@ -274,7 +287,7 @@ export function Projects() {
     setKbUploading(true);
     try {
       const r = await api.uploadGroupKnowledge(kbEdit.id, files);
-      setKbEdit((cur) => (cur ? { ...cur, text: r.text } : cur));
+      setKbEdit((cur) => (cur ? { ...cur, text: r.text, files: r.files ?? cur.files } : cur));
       if (r.added.length) {
         toast("success", t("已追加 {{n}} 份资料（共 {{c}} 字）", { n: r.added.length, c: r.chars }));
       }
@@ -659,6 +672,47 @@ export function Projects() {
                 onChange={(e) => onKbUpload(e.target.files)}
               />
             </div>
+
+            {/* 上传过的**原件**（2026-10-17 用户要求「同时也要可以查看到原格式的文件」）。
+                解析出的文本是有损的（PDF 丢版面、表格被压平），原件是"格式到底对不对"的权威。
+                清单只做溯源：删它不等于删正文，正文仍以合并后的文本为准。 */}
+            {kbEdit.files.length > 0 && (
+              <div className="mb-3 rounded-[var(--radius)] border border-[var(--line)] bg-[var(--panel2)] px-2.5 py-2">
+                <div className="mb-1.5 text-[11.5px] font-medium text-ink-500">
+                  {t("上传过的原件（{{n}} 份）", { n: kbEdit.files.length })}
+                </div>
+                <ul className="space-y-1">
+                  {kbEdit.files.map((f, i) => (
+                    <li key={`${f.key || f.name}-${i}`} className="flex items-center gap-2 text-[12px]">
+                      <FileText className="h-3.5 w-3.5 shrink-0 text-ink-400" />
+                      <span className="min-w-0 flex-1 truncate text-ink-700" title={f.name}>
+                        {f.name}
+                      </span>
+                      <span className="shrink-0 tabular-nums text-[11px] text-ink-400">
+                        {fmtBytes(f.bytes)}
+                      </span>
+                      {f.url ? (
+                        <a
+                          href={f.url}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="shrink-0 rounded px-1.5 py-0.5 text-[11.5px] font-medium text-brand-700 outline-none transition-colors hover:bg-brand-50"
+                        >
+                          {t("原件")}
+                        </a>
+                      ) : (
+                        <span
+                          className="shrink-0 text-[11px] text-ink-400"
+                          title={t("这份的原件当时没存下来，只能看解析后的正文")}
+                        >
+                          {t("无原件")}
+                        </span>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
             <textarea
               value={kbEdit.text}
               onChange={(e) => setKbEdit({ ...kbEdit, text: e.target.value })}

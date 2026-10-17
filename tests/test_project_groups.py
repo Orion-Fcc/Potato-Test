@@ -23,8 +23,18 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 
 @pytest.fixture()
-def client():
-    """TestClient + 本测试专属临时库（理由见 docs/PROJECT_ISOLATION.md 第七节）。"""
+def client(tmp_path, monkeypatch):
+    """TestClient + 本测试专属临时库（理由见 docs/PROJECT_ISOLATION.md 第七节）。
+
+    artifact 目录也要隔离（2026-10-17）：共享需规上传会把**原件**写进 artifacts，
+    跑测试不该往项目的 ./artifacts 里丢文件。
+    """
+    monkeypatch.setenv("ARTIFACT_DIR", str(tmp_path / "artifacts"))
+    monkeypatch.setenv("S3_ENDPOINT", "")  # 强制走本地盘，别让测试依赖对象存储
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+
     from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
     from sqlalchemy.pool import NullPool
 
@@ -57,6 +67,7 @@ def client():
 
     asyncio.run(eng.dispose())
     dbmod._engine, dbmod._Session = prev_engine, prev_session
+    get_settings.cache_clear()
     if os.path.exists(tmp):
         try:
             os.remove(tmp)
@@ -236,3 +247,37 @@ def test_bad_file_is_reported_and_skipped(client):
     assert [a["filename"] for a in body["added"]] == ["好的.md"]
     assert any("坏的.doc" in w for w in body["warnings"]), "坏文件被静默忽略了"
     assert "能读的那份" in body["text"]
+
+
+# ---------------------------------------------------------------------------
+# 原件：上传到共享需规的文件，**原格式的文件也要能打开看**（2026-10-17）
+#
+# 解析出来的正文是有损的（PDF 丢版面、表格被压平），所以原件必须留着 ——
+# 它是"格式到底对不对"的唯一权威，也是用户想"看回原版"的退路。
+# ---------------------------------------------------------------------------
+def test_uploaded_files_keep_their_original(client):
+    from app import storage
+
+    gid = _group(client, "原件保留大系统")
+    payload = "# 系统级\n\n| 字段 | 含义 |\n| --- | --- |\n| a | 甲 |\n".encode("utf-8")
+    body = _upload_kb(client, gid, ("系统级.md", payload)).json()
+
+    assert len(body["files"]) == 1, body["files"]
+    f = body["files"][0]
+    assert f["name"] == "系统级.md"
+    assert f["bytes"] == len(payload)
+    assert f["url"], "原件存了却没给可打开的地址"
+    # 存进去的字节要能**原样读回来** —— 打开原件看到的就是这份
+    assert asyncio.run(storage.read_bytes(f["key"])) == payload
+
+    # 重新打开弹窗（GET）时清单还在 —— 这是"回头还能查看"的前提
+    again = client.get(f"/api/project-groups/{gid}/knowledge").json()
+    assert [x["name"] for x in again["files"]] == ["系统级.md"]
+
+
+def test_uploaded_originals_accumulate(client):
+    """传两次 → 清单里两份都在（和正文一样是累积的）。"""
+    gid = _group(client, "原件累积大系统")
+    _upload_kb(client, gid, ("甲.md", "# 甲\n\n甲。\n".encode("utf-8")))
+    body = _upload_kb(client, gid, ("乙.md", "# 乙\n\n乙。\n".encode("utf-8"))).json()
+    assert [f["name"] for f in body["files"]] == ["甲.md", "乙.md"]

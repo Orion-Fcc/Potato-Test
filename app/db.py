@@ -158,6 +158,9 @@ _ADDITIVE_COLUMNS: tuple[tuple[str, str, str], ...] = (
     # 上次解析产物的指纹（见 models.ProjectDoc.html_parse_hash）——
     # 重传时用来判断"正文是不是已经被人工改过"，别把人的改动覆盖掉。
     ("project_doc", "html_parse_hash", "VARCHAR(64)"),
+    # 大系统「共享需规」上传过的**原件**清单（2026-10-17）——
+    # 共享需规是一份合并文本，没有 per-file 的文档行，原件清单挂在 group 上。
+    ("project_group", "knowledge_files", "JSON"),
 )
 
 # 后加的**索引**（`_add_missing_columns` 只加列，索引得单独建）。

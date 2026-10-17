@@ -105,7 +105,8 @@ start "" .venv\Scripts\pythonw run_server.py 18081
 taskkill /F /FI "IMAGENAME eq pythonw.exe"
 ```
 
-然后打开 <http://127.0.0.1:18081/>（端口固定 18081）。
+然后打开界面。**日常入口是桌面版**（双击 `PotatoTest.exe`，窗口里就是界面，不用管地址）；
+从源码这样手动起的服务，才需要临时用浏览器访问 <http://127.0.0.1:18081/>（那只是调试路径）。
 
 ### macOS / Linux
 
@@ -150,7 +151,7 @@ cd web && pnpm install && pnpm build     # 产出 web/dist；npm 也可以
 
 ## 第一次使用要配什么
 
-1. 打开 <http://127.0.0.1:18081/>（端口固定 18081）
+1. 打开**桌面版**（双击 `PotatoTest.exe`，窗口里就是界面）
 2. 进 **系统设置 → LLM 模型**，填 Base URL / API Key / 模型名，点 **测试连通性** 确认能通
    （这一步别跳过。配错了后面每次运行都会失败，而报错看起来像用例问题）
 3. 新建项目，填被测系统的地址

@@ -153,6 +153,9 @@ _ADDITIVE_COLUMNS: tuple[tuple[str, str, str], ...] = (
     # 四条都可空：上线前导入的文档没有原件，界面按"没有原件"显示即可。
     ("project_doc", "source_key", "VARCHAR(400)"),
     ("project_doc", "source_url", "VARCHAR(1000)"),
+    # 向量列（2026-10-19）：SQLite 的 ALTER 只支持加可空列，正好够用。
+    ("knowledge_chunk", "embedding", "TEXT"),
+    ("knowledge_chunk", "embed_model", "VARCHAR(60)"),
     ("project_doc", "source_name", "VARCHAR(300)"),
     ("project_doc", "source_bytes", "INTEGER"),
     # 上次解析产物的指纹（见 models.ProjectDoc.html_parse_hash）——

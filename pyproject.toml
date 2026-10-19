@@ -44,6 +44,9 @@ dependencies = [
     # 纯 pip 包、自带中英文模型、不需要用户另装 Tesseract，也能直接打进桌面版安装包。
     # PyMuPDF 只负责把"没有文字层的 PDF 页"渲染成图。
     # 没装这两样也能跑 —— 扫描件会退回"建议转成 md"的提示，不会让上传失败。
+    # 向量检索（2026-10-19）：bge-small-zh-v1.5 的 tokenizer 走这个库，
+    # 不用 transformers（那会把 torch 拖进来，200MB+）。
+    "tokenizers>=0.20",
     "pymupdf>=1.24",
     "rapidocr>=3.0",
     "pillow>=10.0",

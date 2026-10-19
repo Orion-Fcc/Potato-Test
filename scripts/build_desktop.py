@@ -33,7 +33,25 @@ WORK = ROOT / "build" / "desktop"
 NAME = "PotatoTest"
 
 
+def _assert_embedding_model() -> None:
+    """★ 向量模型必须在场（2026-10-19）。
+
+    为什么这里硬失败：`app/embeddings.available()` 设计成"模型缺失就静默退回关键词" ——
+    对运行期是对的（不能让检索整个挂掉），但对**打包**是灾难：会出一个"看起来正常、
+    实际检索质量退回关键词"的安装包，没有报错，只能靠人工发现。
+    """
+    d = ROOT / "app" / "embedding_models" / "bge-small-zh-v1.5"
+    missing = [f for f in (d / "tokenizer.json", d / "onnx" / "model_quantized.onnx") if not f.is_file()]
+    if missing:
+        raise SystemExit(
+            "缺少向量模型文件，拒绝打包：\n  " + "\n  ".join(str(m) for m in missing)
+            + "\n（见 app/embeddings.py 文件头；从 hf-mirror 拉 Xenova/bge-small-zh-v1.5 的 "
+            "tokenizer.json + onnx/model_quantized.onnx）"
+        )
+
+
 def main() -> int:
+    _assert_embedding_model()  # 先查模型，别白跑 4 分钟打包
     dist = ROOT / "web" / "dist"
     if not (dist / "index.html").is_file():
         print("!! web/dist 不存在 —— 先 `cd web && pnpm build`")
@@ -72,6 +90,11 @@ def main() -> int:
         # pywebview 的 Windows 后端（WebView2）
         "--collect-all",
         "webview",
+        # 向量模型（2026-10-19）：bge-small-zh-v1.5 的 ONNX 文件是**数据**，
+        # PyInstaller 静态分析看不见 —— 不加 --add-data 的话，装出来的应用
+        # `embeddings.available()` 永远 False，检索会静默退回关键词（不报错，很难发现）。
+        "--add-data",
+        f"{ROOT / 'app' / 'embedding_models'}{os.pathsep}app/embedding_models",
         # OCR（2026-10-17）：模型文件是数据，静态分析看不到 —— 不 collect-all 的话
         # 装到别人机器上会"能跑但 OCR 报找不到模型"
         "--collect-all",

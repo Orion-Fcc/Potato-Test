@@ -12,7 +12,17 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import unquote
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Response, UploadFile
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Request,
+    Response,
+    UploadFile,
+)
 from fastapi.responses import RedirectResponse, StreamingResponse
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import IntegrityError
@@ -1886,11 +1896,27 @@ async def get_project_knowledge(pid: int, request: Request) -> dict:
         await _get_project_or_404(s, pid)
         text = await knowledge.get_all_text(s, pid)
         st = await knowledge.stats(s, pid)
-    return {"text": text, "chars": st["chars"], **st}
+        emb = await knowledge.embed_stats(s, pid)
+    return {"text": text, "chars": st["chars"], **st, "embed": emb}
+
+
+@router.post("/projects/{pid}/knowledge/embed")
+async def embed_project_knowledge(pid: int, request: Request, force: bool = False) -> dict:
+    """补算/重算知识块的向量（2026-10-19）。
+
+    `force=true` 全量重算（换模型、怀疑向量坏了时用）；默认只补缺失的部分。
+    前台同步执行 —— 单项目通常 1~3 秒，用户点完想立刻看到结果。
+    """
+    await _project_access(request, pid, "editor")
+    from app import knowledge
+
+    return await knowledge.embed_project(pid, force=force)
 
 
 @router.put("/projects/{pid}/knowledge")
-async def set_project_knowledge(pid: int, body: KnowledgeIn, request: Request) -> dict:
+async def set_project_knowledge(
+    pid: int, body: KnowledgeIn, request: Request, background: BackgroundTasks
+) -> dict:
     """Replace the project's spec/knowledge text (paste or upload the requirement doc).
 
     Stored as chunks, not one row: retrieval cost then depends on the query, not on
@@ -1902,6 +1928,9 @@ async def set_project_knowledge(pid: int, body: KnowledgeIn, request: Request) -
     async with db_session() as s:
         await _get_project_or_404(s, pid)
         res = await knowledge.replace_knowledge(s, pid, body.text or "", source="paste")
+    # 向量化放后台：一份 46 万字的需规有上千块，卡在请求里会让用户以为上传失败。
+    # 失败/模型缺失都只是"没向量"，检索自动退回关键词 —— 不影响上传本身。
+    background.add_task(knowledge.embed_project, pid)
     return res
 
 

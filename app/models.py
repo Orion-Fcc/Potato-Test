@@ -781,6 +781,12 @@ class KnowledgeChunk(Base):
     chars: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     # Provenance for re-upload/dedup: source filename when it came from a file.
     source: Mapped[str] = mapped_column(String(400), nullable=False, default="")
+    # 向量（2026-10-19）。JSON 数组，512 维 float，圆到 6 位小数（见 app/embeddings.dumps）。
+    # 用 Text 而不是 BLOB：可读、可 diff、SQLite 里检索速度没差别（我们在 Python 里点积）。
+    # NULL = 还没算过（老数据/刚导入），检索时自动跳过并退回关键词。
+    embedding: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 算这条向量用的模型标识。换模型或换精度后旧向量不可混用 —— 靠这一列识别并重算。
+    embed_model: Mapped[str] = mapped_column(String(60), nullable=False, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
     __table_args__ = (Index("ix_knowledge_chunk_proj_idx", "project_id", "chunk_index"),)

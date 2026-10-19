@@ -19,6 +19,7 @@ no longer scales with document size — see `search` for how that is bounded.
 
 from __future__ import annotations
 
+from app import embeddings
 import logging
 import re
 from dataclasses import dataclass
@@ -247,6 +248,28 @@ async def stats(session, project_id: int) -> dict:
 # ---- 「大系统」共享知识（2026-10-13）---------------------------------------------
 
 
+async def embed_stats(session, project_id: int) -> dict:
+    """向量化进度（2026-10-19）。界面据此决定要不要显示「补算向量」。"""
+    scope = await effective_condition(session, project_id)
+    total = (await session.execute(select(func.count(KnowledgeChunk.id)).where(scope))).scalar_one()
+    done = (
+        await session.execute(
+            select(func.count(KnowledgeChunk.id)).where(
+                scope,
+                KnowledgeChunk.embedding.isnot(None),
+                KnowledgeChunk.embed_model == embeddings.MODEL_TAG,
+            )
+        )
+    ).scalar_one()
+    return {
+        "embedded": int(done),
+        "total": int(total),
+        "model": embeddings.MODEL_TAG,
+        "available": embeddings.available(),
+        "pending": int(total) - int(done),
+    }
+
+
 async def effective_condition(session, project_id: int):
     """「这个项目能用的知识块」的 SQL 条件：**自己的 + 所属大系统共享的**。
 
@@ -355,80 +378,169 @@ def _score(text_low: str, terms: list[str], heading_low: str) -> int:
     return score
 
 
-async def search(project_id: int, query: str, limit: int = SEARCH_LIMIT) -> dict:
-    """Best-matching chunks for `query`.
+VEC_MIN_COS = 0.50  # 向量的最低可用相似度：低于这个基本是"语义上不相关"（实测噪声区）
 
-    Bounded work: the DB narrows to rows containing at least one term (LIKE), and
-    scoring only ever touches those rows. This is what makes a 20 MB spec as cheap to
-    search as a 20 KB one — the previous implementation walked every paragraph in
-    Python on every call.
+
+async def embed_project(project_id: int, force: bool = False) -> dict:
+    """给项目的知识块算向量（2026-10-19）。
+
+    `force=False` 只补没算过 / 模型换过的块 —— 重传一份需规只会给新增块做增量，不重算全部。
     """
-    terms = _terms(query)
-    if not terms:
-        return {
-            "query": query,
-            "matched_blocks": 0,
-            "total_blocks": 0,
-            "hits": [],
-            "note": "查询为空。",
-        }
+    if not embeddings.available():
+        return {"ok": False, "reason": "向量模型不可用（缺模型文件或 onnxruntime）", "embedded": 0}
 
     async with db_session() as s:
-        # 作用域 = 项目自己的块 + 所属大系统（若有）的共享块，见 effective_condition。
         scope = await effective_condition(s, project_id)
-        total = (
-            await s.execute(select(func.count(KnowledgeChunk.id)).where(scope))
-        ).scalar_one()
-
-        # Prefilter in SQL. ilike on each term with OR — broad on purpose, because
-        # scoring decides the ranking; this only keeps the candidate set small enough
-        # that a huge document does not turn into a huge Python loop.
-        cond = None
-        for t in terms[:12]:  # cap the OR-chain; a 50-word query is not a query
-            like = f"%{t}%"
-            c = KnowledgeChunk.text.ilike(like) | KnowledgeChunk.heading.ilike(like)
-            cond = c if cond is None else (cond | c)
-        if cond is None:
-            return {"query": query, "matched_blocks": 0, "total_blocks": int(total), "hits": []}
-
-        rows = (
-            (
-                await s.execute(
-                    select(KnowledgeChunk)
-                    .where(scope, cond)
-                    .order_by(KnowledgeChunk.chunk_index)
-                    .limit(2_000)  # hard stop; scoring below re-ranks what fits
-                )
+        total = (await s.execute(select(func.count(KnowledgeChunk.id)).where(scope))).scalar_one()
+        q = select(KnowledgeChunk).where(scope)
+        if not force:
+            q = q.where(
+                (KnowledgeChunk.embedding.is_(None))
+                | (KnowledgeChunk.embed_model.is_(None))
+                | (KnowledgeChunk.embed_model != embeddings.MODEL_TAG)
             )
-            .scalars()
-            .all()
-        )
+        rows = (await s.execute(q.order_by(KnowledgeChunk.chunk_index))).scalars().all()
+        pending = [(r.id, (r.heading + "\n" + r.text) if r.heading else r.text) for r in rows]
 
-    scored: list[tuple[int, KnowledgeChunk]] = []
-    for r in rows:
+    if not pending:
+        return {"ok": True, "embedded": 0, "total": int(total), "model": embeddings.MODEL_TAG,
+                "note": "所有块都已经是当前模型的向量"}
+
+    vecs = embeddings.embed_documents([t for _, t in pending])
+    if vecs is None:
+        return {"ok": False, "reason": "推理失败，本次没有写入向量", "embedded": 0, "total": int(total)}
+
+    async with db_session() as s:
+        for (cid, _), v in zip(pending, vecs):
+            row = await s.get(KnowledgeChunk, cid)
+            if row is not None:
+                row.embedding = embeddings.dumps(v)
+                row.embed_model = embeddings.MODEL_TAG
+    return {"ok": True, "embedded": len(pending), "total": int(total), "model": embeddings.MODEL_TAG}
+
+
+async def search(project_id: int, query: str, limit: int = SEARCH_LIMIT) -> dict:
+    """Best-matching chunks for `query` —— 向量 + 关键词**混合**检索（2026-10-19）。
+
+    两路各取所长：
+      * **向量**：能命中"换了说法"的问题（「场地费」→「教学场地收费标准」），关键词做不到；
+      * **关键词**：精确词（字段名、表名、错误码）向量反而容易漏，靠它兜底。
+
+    合并：向量（余弦 ≥ VEC_MIN_COS）优先，再用关键词结果补满 limit，按块 id 去重。
+    模型不可用 / 这个项目还没算向量 → **完全退回原来的关键词检索**，行为不变。
+    """
+    q = (query or "").strip()
+    terms = _terms(query)
+    qvec = embeddings.embed_query(q) if q else None
+
+    async with db_session() as s:
+        scope = await effective_condition(s, project_id)
+        total = (await s.execute(select(func.count(KnowledgeChunk.id)).where(scope))).scalar_one()
+
+        rows_vec: list[KnowledgeChunk] = []
+        if qvec is not None:
+            rows_vec = (
+                (
+                    await s.execute(
+                        select(KnowledgeChunk)
+                        .where(scope, KnowledgeChunk.embedding.isnot(None))
+                        .order_by(KnowledgeChunk.chunk_index)
+                        .limit(5_000)  # 单项目上限；超过这个规模该换成专用向量库了
+                    )
+                )
+                .scalars()
+                .all()
+            )
+
+        rows_kw: list[KnowledgeChunk] = []
+        if terms:
+            cond = None
+            for t in terms[:12]:
+                like = f"%{t}%"
+                c = KnowledgeChunk.text.ilike(like) | KnowledgeChunk.heading.ilike(like)
+                cond = c if cond is None else (cond | c)
+            if cond is not None:
+                rows_kw = (
+                    (
+                        await s.execute(
+                            select(KnowledgeChunk)
+                            .where(scope, cond)
+                            .order_by(KnowledgeChunk.chunk_index)
+                            .limit(2_000)
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+
+    # 向量排序（都已 L2 归一化 → 点积就是余弦）
+    vec_scored: list[tuple[float, KnowledgeChunk]] = []
+    if qvec:
+        for r in rows_vec:
+            v = embeddings.loads(r.embedding or "")
+            if not v or len(v) != len(qvec):
+                continue
+            cos = sum(a * b for a, b in zip(qvec, v))
+            if cos >= VEC_MIN_COS:
+                vec_scored.append((cos, r))
+        vec_scored.sort(key=lambda x: -x[0])
+
+    # 关键词排序（原逻辑不动）
+    kw_scored: list[tuple[int, KnowledgeChunk]] = []
+    for r in rows_kw:
         sc = _score(r.text.lower(), terms, (r.heading or "").lower())
         if sc:
-            scored.append((sc, r))
-    scored.sort(key=lambda x: (-x[0], x[1].chunk_index))
+            kw_scored.append((sc, r))
+    kw_scored.sort(key=lambda x: (-x[0], x[1].chunk_index))
 
-    hits = [
-        {
-            "line": r.line_no,
-            "heading": r.heading,
-            "text": r.text[:CHUNK_SNIPPET_CHARS],
-        }
-        for _, r in scored[:limit]
-    ]
+    # 合并：**两路各留配额**，再互相补位。
+    # 早期版本是"向量填满、剩多少给关键词"，实测发现的坑：向量命中多时关键词一个名额都没有，
+    # 而精确词（字段名/错误码）恰恰只有关键词能命中。所以按 2:1 预留，谁不够对方补。
+    def _hit(r, via: str, score=None) -> dict:
+        h = {"line": r.line_no, "heading": r.heading, "text": r.text[:CHUNK_SNIPPET_CHARS], "via": via}
+        if score is not None:
+            h["score"] = score
+        return h
+
+    vec_quota = max(1, limit - max(1, limit // 3))
+    picked: list[dict] = []
+    seen: set[int] = set()
+    for cos, r in vec_scored[:vec_quota]:
+        if r.id in seen:
+            continue
+        seen.add(r.id)
+        picked.append(_hit(r, "vector", round(cos, 3)))
+    for _sc, r in kw_scored:
+        if len(picked) >= limit:
+            break
+        if r.id in seen:
+            continue
+        seen.add(r.id)
+        picked.append(_hit(r, "keyword"))
+    for cos, r in vec_scored:  # 关键词不够，向量补满
+        if len(picked) >= limit:
+            break
+        if r.id in seen:
+            continue
+        seen.add(r.id)
+        picked.append(_hit(r, "vector", round(cos, 3)))
+    for _sc, r in kw_scored:  # 还差就再用关键词补（两边都少见的极端情况）
+        if len(picked) >= limit:
+            break
+        if r.id in seen:
+            continue
+        seen.add(r.id)
+        picked.append(_hit(r, "keyword"))
+
+    mode = "vector" if vec_scored else ("keyword" if kw_scored else "none")
     return {
         "query": query,
-        "matched_blocks": len(scored),
+        "mode": mode,
+        "matched_blocks": len(vec_scored) + len(kw_scored),
         "total_blocks": int(total),
-        "hits": hits,
-        "note": "命中为空说明资料里没有；不要臆造。" if not hits else "按相关度返回的片段。",
+        "hits": picked,
+        "note": "命中为空说明资料里没有；不要臆造。" if not picked else "按相关度返回的片段。",
     }
-
-
-# ---- legacy migration ------------------------------------------------------
 
 
 async def backfill_from_settings(session, project_ids: list[int]) -> int:

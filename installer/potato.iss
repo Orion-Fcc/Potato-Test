@@ -53,13 +53,16 @@ DefaultDirName={localappdata}\Programs\PotatoTest
 DisableDirPage=no
 ; per-user 安装：不需要管理员，目录也可写
 PrivilegesRequired=lowest
-; ★★ 输出目录**不能含空格**（2026-10-17 实测）。
-; 走 `D://agent_study//Potato Test\dist_desktop\installer` 这种带空格的路径编出来的包，
-; 双击运行时引导程序会在解压阶段就被拒：
-;     安装程序无法创建目录 "C://...//Temp//is-XXXX.tmp"。错误 5: 拒绝访问。
-; 换成无空格路径（C://tmp//build）编同一个 .iss、同一个载荷，装得干干净净（10924 行日志）。
-; 项目目录本身带空格时，请把这一行改成 {%TEMP}\potato-build 之类再编译，
-; 或者编完立刻把包**拷到无空格目录**再分发/测试。
+; ★★ 装机失败的真实规律（2026-10-19 补齐对照后修正）：
+; **安装包程序本身必须放在 C 盘运行**。实测（同一份 exe，SHA 一致）：
+;   C://tmp//build//…        → ✅ 装成功（10924 行日志）
+;   C://Users//16132//…      → ✅ 装成功
+;   D://agent_study//…       → ❌ 引导阶段就退出（exit 1，连安装日志都写不出来）
+;   D://（根）、D://inst-test → ❌ 同上
+; 装到哪个盘无所谓：`/DIR=D://agent_study//_probe_install`（C 盘的包 → D 盘目标）✅ 成功。
+; → 所以：**测安装包、给用户分发时，都从 C 盘（比如 Downloads）跑**；
+;   编译产物的输出目录本身不影响（它只决定写到哪）。
+; （早先以为是"路径含空格"，那是被这几个变量混在一起误导了 —— 空格**未单独验证**。）
 OutputDir=..\dist_desktop\installer
 OutputBaseFilename=PotatoTest-Setup-{#AppVer}
 Compression=lzma2/max

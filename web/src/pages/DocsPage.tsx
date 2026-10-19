@@ -5,6 +5,7 @@ import { useParams } from "react-router-dom";
 import { api, type KnowledgeFormats, type ProjectDoc, type VerifiedCoverage } from "../lib/api";
 import { Badge, Button, Card, Input, PageHeader } from "../components/ui";
 import { RichTextEditor } from "../components/RichTextEditor";
+import { SourceViewer } from "../components/SourceViewer";
 import { InsightsPanel } from "../components/InsightsPanel";
 import { MermaidPreview } from "../components/MermaidPreview";
 import { Empty, PageSkeleton } from "../components/feedback";
@@ -153,6 +154,9 @@ export function DocsPage() {
   const [html, setHtml] = useState("");
   const [title, setTitle] = useState("");
   const [dirty, setDirty] = useState(false);
+  // 正文 / 原件 的显示模式（2026-10-19）。切文档时回到「正文」——
+  // 否则用户切到另一份文档会看到一个空白/错位的原件，以为坏了。
+  const [viewMode, setViewMode] = useState<"text" | "source">("text");
   const [saving, setSaving] = useState(false);
   const [generating, setGenerating] = useState(false);
   // 「通读全文」开关（2026-10-13 用户要求）：默认关（快，只检索相关片段）。
@@ -180,6 +184,10 @@ export function DocsPage() {
       fail(e);
     }
   }, [pid, fail]);
+
+  useEffect(() => {
+    setViewMode("text");
+  }, [active?.id, active?.kind]);
 
   useEffect(() => {
     load();
@@ -550,24 +558,38 @@ export function DocsPage() {
                     只有上传来的文档才有。解析出的正文是**有损**的 —— PDF 丢版面、
                     docx 丢标题层级、长文档还会被正文上限截断；原件才是"格式到底对不对"
                     的唯一权威。浏览器能直接渲染 PDF/图片，其余类型会下载。 */}
+                {/* ★ 「原件」改成**页内切换**（2026-10-19 用户反馈「依旧看不到原格式」）。
+                    原来是 target=_blank 的链接 —— 桌面版窗口是 WebView2，点它不开新窗口，
+                    于是用户永远只看到解析出来的正文。现在点它直接把原件渲染在下面，
+                    再点一次回「正文」。 */}
                 {active.source_url && (
-                  <a
-                    href={active.source_url}
-                    target="_blank"
-                    rel="noreferrer"
-                    title={t("打开上传时的原件{{name}}", {
-                      name: active.source_name ? "：" + active.source_name : "",
-                    })}
-                    className="flex items-center gap-1.5 rounded-lg border border-[var(--line)] px-2.5 py-1.5 text-[12px] text-ink-700 outline-none transition-colors hover:border-brand-200 hover:text-brand-700"
-                  >
-                    <ExternalLink className="h-3.5 w-3.5" />
-                    {t("原件")}
-                    {active.source_bytes > 0 && (
-                      <span className="text-[11px] tabular-nums text-ink-400">
-                        {fmtBytes(active.source_bytes)}
-                      </span>
-                    )}
-                  </a>
+                  <div className="flex items-center gap-1 rounded-lg border border-[var(--line)] p-0.5">
+                    <button
+                      onClick={() => setViewMode("text")}
+                      className={
+                        "rounded-md px-2 py-1 text-[12px] outline-none transition-colors " +
+                        (viewMode === "text" ? "bg-[var(--panel2)] text-ink-900" : "text-ink-500 hover:text-ink-700")
+                      }
+                    >
+                      {t("正文")}
+                    </button>
+                    <button
+                      onClick={() => setViewMode("source")}
+                      title={t("看上传时的原件（PDF / 图片 / 文本可以在这里直接看）")}
+                      className={
+                        "flex items-center gap-1 rounded-md px-2 py-1 text-[12px] outline-none transition-colors " +
+                        (viewMode === "source" ? "bg-[var(--panel2)] text-ink-900" : "text-ink-500 hover:text-ink-700")
+                      }
+                    >
+                      <ExternalLink className="h-3.5 w-3.5" />
+                      {t("原件")}
+                      {active.source_bytes > 0 && (
+                        <span className="text-[11px] tabular-nums text-ink-400">
+                          {fmtBytes(active.source_bytes)}
+                        </span>
+                      )}
+                    </button>
+                  </div>
                 )}
 
                 {/* ★ 「只有我能改」开关（2026-10-12 用户要求）。
@@ -649,15 +671,19 @@ export function DocsPage() {
                   放上面：切过去第一眼就是图，源码在下面等着改。 */}
               <MermaidPreview html={html} />
 
-              <RichTextEditor
-                value={html}
-                onChange={(v) => {
-                  setHtml(v);
-                  setDirty(true);
-                }}
-                onUploadImage={async (f) => (await api.uploadDocImage(pid, f)).url}
-                placeholder={t("在这里写项目说明，或点上面的「AI 分析与生成」让它先起草…")}
-              />
+              {viewMode === "source" && active.source_url ? (
+                <SourceViewer doc={active} />
+              ) : (
+                <RichTextEditor
+                  value={html}
+                  onChange={(v) => {
+                    setHtml(v);
+                    setDirty(true);
+                  }}
+                  onUploadImage={async (f) => (await api.uploadDocImage(pid, f)).url}
+                  placeholder={t("在这里写项目说明，或点上面的「AI 分析与生成」让它先起草…")}
+                />
+              )}
             </>
           )}
         </div>

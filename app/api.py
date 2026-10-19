@@ -2038,6 +2038,31 @@ def _sanitize_doc_html(html: str) -> str:
     return doc_sanitize.sanitize(html or "")
 
 
+def _doc_html_from_parsed(data: bytes, res) -> str:
+    """把 `docparse` 的解析结果转成文档正文 HTML（上传 / 重新排版共用）。
+
+    HTML 原件保留原始结构；其它格式交给 `doc_text_html` 按段落/标题/列表/表格
+    排版。2026-10-19 之前这里是"每行一个 `<p>`"，PDF 的折行于是变成一段一段。
+    """
+    from app.doc_sanitize import sanitize
+    from app.doc_text_html import text_to_doc_html
+
+    text = (res.text or "").strip()
+    if res.fmt == "html":
+        from bs4 import BeautifulSoup
+
+        raw = str(BeautifulSoup(data, "lxml"))
+        # 放宽上限（见 _DOC_HTML_MAX_CHARS）：默认 40 万会把自包含网页的图片/正文截掉。
+        html = sanitize(raw, max_chars=_DOC_HTML_MAX_CHARS)
+        if html:
+            return html
+        # 净化失败关闭 → 回落到文本版。`docparse` 对 HTML 走的是 markdownify，
+        # 所以按 Markdown 排版才对得上。
+        return sanitize(text_to_doc_html(text, "md"))
+    # 文件名已经是页面顶部的标题（`title` 输入框），正文不再重复一份 `<h2>{name}</h2>`。
+    return sanitize(text_to_doc_html(text, res.fmt))
+
+
 def _doc_row(r) -> dict:
     return {
         "id": r.id,
@@ -2208,7 +2233,6 @@ async def create_doc_from_file(
     """
     await _project_access(request, pid, "editor")
     from app import docparse
-    from app.doc_sanitize import sanitize
     from app.models import ProjectDoc, _utcnow
 
     name = (file.filename or "").strip() or "上传的文档"
@@ -2233,24 +2257,13 @@ async def create_doc_from_file(
     # （HTML 走 markdownify 变成 markdown）。而文档正文要给人**看**。原来两条路都用
     # `res.text`，于是 HTML 的图片 / 表格 / 样式全没了 —— 正文只剩一段被转义的文本。
     #
-    # 分流：知识库继续用 `res.text`（检索要纯文本）；文档正文对 HTML **用原文件**
-    # （过一遍净化，脚本 / iframe 仍被 strip）。非 HTML（docx/pdf/xlsx/rtf/md/txt）没有
-    # HTML 结构可保，仍按纯文本逐段成 <p>（猜 markdown 会把正文弄乱）。
-    from html import escape as _escape
-
-    paras = [p.strip() for p in text.split("\n") if p.strip()]
-    text_body = "".join(f"<p>{_escape(p)}</p>" for p in paras[:20000])
-
-    if res.fmt == "html":
-        from bs4 import BeautifulSoup
-
-        raw = str(BeautifulSoup(data, "lxml"))
-        # 放宽上限（见 _DOC_HTML_MAX_CHARS）：默认 40 万会把自包含网页的图片/正文截掉。
-        html = sanitize(raw, max_chars=_DOC_HTML_MAX_CHARS)
-        if not html:  # 净化失败关闭 → 回落到文本版，别存一份空文档
-            html = sanitize(f"<h2>{_escape(name)}</h2>{text_body}")
-    else:
-        html = sanitize(f"<h2>{_escape(name)}</h2>{text_body}")
+    # 知识库继续用 `res.text`（检索要纯文本）；文档正文交给共用的排版函数 ——
+    # HTML 保留原结构，其它格式按段落/标题/列表/表格排。
+    #
+    # ★ 2026-10-19 修：原来这里是 `text.split("\n")` 每行一个 `<p>`。PDF 的解析
+    # 结果是"一个视觉行一个换行"，于是正文变成每行一段、句子被拆碎，标题和表格
+    # 也原样显示成 `## 第 1 页` / `字段 | 含义` —— 用户反馈「文字排布有很大的问题」。
+    html = _doc_html_from_parsed(data, res)
 
     # 解析产物的指纹（2026-10-16）：重传时用它判断"正文是不是已经被人改过"，
     # 别把人工修改静默覆盖掉。见 models.ProjectDoc.html_parse_hash。
@@ -2359,6 +2372,86 @@ async def create_doc_from_file(
         "chars": len(text),
         "truncated": bool(res.truncated),
         "warnings": warnings,
+    }
+
+
+@router.post("/projects/{pid}/docs/{doc_id}/reparse")
+async def reparse_project_doc(
+    pid: int, doc_id: int, request: Request, body: dict | None = None
+) -> dict:
+    """用**原件**重新解析并排版正文（2026-10-19）。
+
+    ## 为什么需要它
+
+    上传时的排版逻辑修好了（见 `_doc_html_from_parsed`），但**已经上传过的文档**
+    正文是旧逻辑写进库里的（每行一个 `<p>`）。用户不该为了排版升级重新找一遍
+    文件、再上传一次 —— 原件本来就存着（`source_key`），直接重新解析即可。
+
+    ## 为什么可能拒绝
+
+    文档正文允许人工修改。重新解析会用原件重写正文，如果这份文档在解析之后
+    被人改过（`html_parse_hash` 对不上），默认不覆盖 —— 先返回 `reason="edited"`，
+    由界面确认后再带 `force=true` 重试。不能静默吞掉用户的编辑。
+    """
+    await _project_access(request, pid, "editor")
+    from hashlib import sha256 as _sha256
+
+    from app import docparse, storage
+    from app.models import ProjectDoc, _utcnow
+
+    force = bool((body or {}).get("force"))
+
+    async with db_session() as s:
+        row = await s.get(ProjectDoc, doc_id)
+        if row is None or row.project_id != pid:
+            raise HTTPException(404, "document not found")
+        if not row.source_key:
+            raise HTTPException(400, "这份文档没有保存原件，无法重新解析 —— 请重新上传原文件。")
+        key = row.source_key
+        name = row.source_name or row.title or "上传的文档"
+        old = row.html or ""
+        old_hash = row.html_parse_hash or ""
+        edited = bool(old.strip() and old_hash) and _sha256(old.encode("utf-8")).hexdigest()[:32] != old_hash
+
+    if edited and not force:
+        return {
+            "ok": False,
+            "reason": "edited",
+            "message": "这份文档的正文在解析后被人改过；重新排版会覆盖这些修改。",
+        }
+
+    data = await storage.read_bytes(key)
+    if not data:
+        raise HTTPException(404, "原件已经找不到了（存储里没有这份文件），请重新上传。")
+    try:
+        res = docparse.extract(name, data)
+    except docparse.UnsupportedDocument as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(400, f"读不了「{name}」：{type(exc).__name__}: {exc}") from exc
+
+    html = _doc_html_from_parsed(data, res)
+    # 和上传路径同样失败关闭：宁可报错，也不能把一份读空的正文写进库里 ——
+    # 那等于用一次点击把用户原来的文档清空。
+    if not html.strip():
+        raise HTTPException(400, "重新解析后没有可用的正文，已保留原正文。")
+    new_hash = _sha256(html.encode("utf-8")).hexdigest()[:32]
+
+    async with db_session() as s:
+        row = await s.get(ProjectDoc, doc_id)
+        if row is None or row.project_id != pid:
+            raise HTTPException(404, "document not found")
+        row.html = html
+        row.html_parse_hash = new_hash
+        row.updated_at = _utcnow()
+        await s.flush()
+        out = _doc_row(row)
+
+    return {
+        "ok": True,
+        "doc": out,
+        "chars": len(res.text or ""),
+        "warnings": list(res.warnings or []),
     }
 
 
@@ -5641,7 +5734,11 @@ def _app_root() -> Path:
 
 def _move_storage(root: Path, dest: Path) -> None:
     """把现有的 artifacts / profiles 搬到新位置。同盘是秒级改名，跨盘是复制。"""
+    import logging
     import shutil
+
+    # api.py 没有模块级 logger（见 `_probe_headers`），就地取一个。
+    log = logging.getLogger("potato-test.api")
 
     for name in ("artifacts", "profiles"):
         src = root / name

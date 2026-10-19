@@ -28,9 +28,37 @@ import re
 
 _esc_re = re.compile(r"[&<>]")
 
+# CJK 字符与全角标点：换行处判断"接回去要不要补空格"。
+# 中文是排版折行，补空格反而会在句子中间多出一个空隙；英文才需要空格。
+_CJK = re.compile(r"[　-〿㐀-䶿一-鿿豈-﫿＀-￯]")
+
 
 def _esc(s: str) -> str:
     return _esc_re.sub(lambda m: {"&": "&amp;", "<": "&lt;", ">": "&gt;"}[m.group(0)], s)
+
+
+def join_wrapped_lines(parts: list[str]) -> str:
+    """把被排版折行切断的几行接回一个段落（2026-10-19）。
+
+    Markdown 的软换行在中文里很常见（从 PDF / Word 粘过来的文本尤其如此），
+    原来的 `" ".join` 会在每个折行处插一个空格，读起来是"一句话中间有空格"。
+    """
+    text = ""
+    for raw in parts:
+        p = raw.strip()
+        if not p:
+            continue
+        if not text:
+            text = p
+            continue
+        a, b = text[-1], p[0]
+        if a == "-" and b.islower():
+            text = text[:-1] + p
+        elif _CJK.match(a) or _CJK.match(b):
+            text += p
+        else:
+            text += " " + p
+    return text
 
 
 def _inline(s: str) -> str:
@@ -71,7 +99,7 @@ def markdown_to_html(md: str) -> str:
     n = len(lines)
 
     def flush_para(buf: list[str]) -> None:
-        text = " ".join(x.strip() for x in buf if x.strip())
+        text = join_wrapped_lines(buf)
         if text:
             out.append(f"<p>{_inline(text)}</p>")
 

@@ -149,7 +149,7 @@ export function RichTextEditor({
       attributes: {
         // 富文本编辑区的最小高度与排版。用 class 而不是内联样式，
         // 这样它和只读渲染共用同一套 `.tp-prose` 排版（见 index.css）。
-        class: "tp-prose min-h-[420px] px-4 py-3 outline-none",
+        class: "tp-prose min-h-[420px] px-5 py-4 outline-none",
         "data-placeholder": placeholder ?? "",
       },
     },
@@ -223,7 +223,11 @@ export function RichTextEditor({
           if (f) insertImage(f);
         }}
       />
-      <div className="max-h-[62vh] overflow-y-auto border-t border-[var(--line)]">
+      {/* ★ 不在编辑器内部再套一个 62vh 的滚动窗口（2026-10-19）。
+       * 原来正文只能在一个约 500px 高的小框里滚，页面本身又会滚 ——
+       * 读长文档时鼠标要判断"现在滚的是哪一层"，而且一屏只能看到十几行。
+       * 现在让编辑器随内容自然长高，由页面统一滚动。 */}
+      <div className="border-t border-[var(--line)]">
         <EditorContent editor={editor} />
       </div>
       <div className="flex flex-wrap items-center gap-2 border-t border-[var(--line)] px-3 py-1.5 text-[11px] text-ink-400">

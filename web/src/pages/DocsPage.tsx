@@ -1,4 +1,4 @@
-import { ExternalLink, FileText, GitBranch, Loader2, Lock, Plus, Save, Sparkles, Trash2, Unlock, Upload, Wand2 } from "lucide-react";
+import { ExternalLink, FileText, GitBranch, Loader2, Lock, Plus, RefreshCw, Save, Sparkles, Trash2, Unlock, Upload, Wand2 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useParams } from "react-router-dom";
@@ -159,6 +159,9 @@ export function DocsPage() {
   const [viewMode, setViewMode] = useState<"text" | "source">("text");
   const [saving, setSaving] = useState(false);
   const [generating, setGenerating] = useState(false);
+  // 「重新排版」（2026-10-19）：旧文档的正文是旧的"每行一个 <p>"排版，
+  // 原件还在，直接按新逻辑重排即可，不必让用户重新找文件上传。
+  const [reparsing, setReparsing] = useState(false);
   // 「通读全文」开关（2026-10-13 用户要求）：默认关（快，只检索相关片段）。
   const [fullRead, setFullRead] = useState(false);
   // 后端给的支持格式（用于上传处的 accept，避免和 docparse 的真实支持集合漂移）。
@@ -283,6 +286,48 @@ export function DocsPage() {
       fail(e);
     } finally {
       setSaving(false);
+    }
+  };
+
+  /** 用原件重新解析正文（2026-10-19）。
+   *
+   *  默认不覆盖人工修改：后端发现 `html_parse_hash` 对不上会返回
+   *  `reason="edited"`，这里问一句再带 `force=true` 重试。
+   */
+  const reparse = async (force = false) => {
+    if (!active) return;
+    setReparsing(true);
+    try {
+      const r = await api.reparseDoc(pid, active.id, force);
+      if (!r.ok) {
+        if (r.reason === "edited") {
+          const ok = window.confirm(
+            t("这份文档的正文你手工改过，重新排版会用原件覆盖这些修改。继续吗？"),
+          );
+          if (ok) {
+            await reparse(true);
+            return;
+          }
+        } else if (r.message) {
+          toast("info", r.message);
+        }
+        return;
+      }
+      if (r.doc) {
+        setActive(r.doc);
+        setHtml(r.doc.html);
+        setTitle(r.doc.title);
+        setDirty(false);
+        // 重排后直接看新正文：停在「原件」视图会让用户以为点了没反应。
+        setViewMode("text");
+      }
+      toast("success", t("已按原件重新排版"));
+      if (r.warnings?.length) toast("info", r.warnings.join("；"));
+      await load();
+    } catch (e) {
+      fail(e);
+    } finally {
+      setReparsing(false);
     }
   };
 
@@ -590,6 +635,26 @@ export function DocsPage() {
                       )}
                     </button>
                   </div>
+                )}
+
+                {/* ★ 旧文档重排（2026-10-19）。上传时的排版逻辑修好了，但已经
+                    写进库里的正文不会自己变 —— 原件还在，点一下按新逻辑重写即可。
+                    正文被人手工改过时后端会拒绝，确认后再覆盖。 */}
+                {active.source_url && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => reparse()}
+                    disabled={reparsing}
+                    title={t("用上传时的原件重新解析正文，并按新的段落/标题/表格排版重写")}
+                  >
+                    {reparsing ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <RefreshCw className="h-3.5 w-3.5" />
+                    )}
+                    {t("重新排版")}
+                  </Button>
                 )}
 
                 {/* ★ 「只有我能改」开关（2026-10-12 用户要求）。

@@ -307,26 +307,38 @@ button, a, input, textarea, [role="button"] {
  * 用户能产出的那些标签（p/h2/h3/ul/ol/table/img/blockquote/span[style]）。
  */
 .tp-prose {
-  font-size: 14px;
-  line-height: 1.75;
+  /* ★ 正文阅读版心（2026-10-19）。
+   *
+   * 原来是整栏铺满：1280 的页面里正文行宽约 900px，15px 字号下一行能排
+   * 60 多个汉字 —— 眼睛从行尾回到行首时很容易串行，长文档读起来非常累。
+   * 46rem（约 736px）落在中文长文舒服的 45~50 字/行。
+   * 用 margin-inline:auto 居中，而不是把编辑器缩窄：工具栏仍可用整栏宽度，
+   * 正文形成一条稳定的阅读版心；列多的表格在版心内横向滚动。 */
+  max-width: 46rem;
+  margin-inline: auto;
+  font-size: 15px;
+  line-height: 1.8;
   color: var(--ink-700);
   word-break: break-word;
 }
-.tp-prose > * + * { margin-top: 0.6em; }
-.tp-prose h1 { font-size: 1.6em; font-weight: 700; margin-top: 1em; }
+.tp-prose > * + * { margin-top: 0.8em; }
+.tp-prose h1 { font-size: 1.55em; font-weight: 700; margin-top: 1.4em; }
 .tp-prose h2 {
-  font-size: 1.28em;
+  font-size: 1.3em;
   font-weight: 650;
-  margin-top: 1.2em;
-  padding-bottom: 0.25em;
+  margin-top: 1.8em;
+  padding-bottom: 0.3em;
   border-bottom: 1px solid var(--line);
   color: var(--ink-900);
 }
-.tp-prose h3 { font-size: 1.1em; font-weight: 650; margin-top: 1em; color: var(--ink-900); }
-.tp-prose h4 { font-size: 1em; font-weight: 650; color: var(--ink-800); }
-.tp-prose ul { list-style: disc; padding-left: 1.5em; }
-.tp-prose ol { list-style: decimal; padding-left: 1.5em; }
-.tp-prose li { margin: 0.15em 0; }
+/* 开头的标题不要再顶出一大块空白（AI 生成的正文第一行就是 h2）。 */
+.tp-prose > h1:first-child,
+.tp-prose > h2:first-child { margin-top: 0; }
+.tp-prose h3 { font-size: 1.12em; font-weight: 650; margin-top: 1.4em; color: var(--ink-900); }
+.tp-prose h4 { font-size: 1.02em; font-weight: 650; margin-top: 1.2em; color: var(--ink-800); }
+.tp-prose ul { list-style: disc; padding-left: 1.4em; }
+.tp-prose ol { list-style: decimal; padding-left: 1.4em; }
+.tp-prose li { margin: 0.3em 0; }
 .tp-prose li > p { margin: 0; }
 .tp-prose a { color: var(--brand-700); text-decoration: underline; }
 .tp-prose strong { font-weight: 650; color: var(--ink-900); }
@@ -358,12 +370,19 @@ button, a, input, textarea, [role="button"] {
 .tp-prose table {
   border-collapse: collapse;
   width: 100%;
-  font-size: 0.95em;
+  font-size: 0.93em;
   table-layout: auto;
+}
+/* 列很多的表（权限矩阵）在版心里放不下时**横向滚动这张表**，
+ * 而不是把整个正文/页面撑出横向滚动条。TipTap 的表格会自己包一层
+ * .tableWrapper；粘贴进来的普通表格没有，就靠 max-width 兜住。 */
+.tp-prose .tableWrapper {
+  max-width: 100%;
+  overflow-x: auto;
 }
 .tp-prose th, .tp-prose td {
   border: 1px solid var(--line);
-  padding: 0.35em 0.55em;
+  padding: 0.4em 0.6em;
   vertical-align: top;
   text-align: left;
 }

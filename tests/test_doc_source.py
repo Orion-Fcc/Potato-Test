@@ -205,6 +205,106 @@ def test_uploaded_doc_can_be_edited_by_hand(client):
     assert docs[b["id"]]["origin"] == "human"
 
 
+def test_uploaded_markdown_is_rendered_as_rich_text(client):
+    """上传的 .md 不能把 `#` / `-` / `|` 原样显示成正文（2026-10-19）。
+
+    用户反馈「正文的文字排布有很大的问题」：原来解析出的文本是
+    `text.split("\\n")` 每行一个 `<p>`，Markdown 标题、列表、表格全变成
+    普通段落。这里守住"结构化内容真的被渲染成 HTML"。
+    """
+    pid = _pid(client)
+    body = (
+        "# 需求说明\n\n"
+        "## 2.1 组织架构\n\n"
+        "- 部门名称不能重复\n"
+        "- 删除前必须转移人员\n\n"
+        "| 字段 | 含义 |\n"
+        "| --- | --- |\n"
+        "| dept | 部门 |\n"
+    )
+    doc = _upload(client, pid, "需求.md", body.encode("utf-8")).json()["doc"]
+    html = doc["html"]
+
+    assert "<h2>需求说明</h2>" in html or "<h1>需求说明</h1>" in html
+    assert "<h2>2.1 组织架构</h2>" in html
+    assert "<ul>" in html and "<li>部门名称不能重复</li>" in html
+    assert "<table>" in html and "<th>字段</th>" in html
+    # 标记本身不该再出现在正文里
+    assert "<p>#" not in html
+    assert "<p>- " not in html
+    assert "<p>|" not in html
+
+
+def _set_doc_html(doc_id: int, html: str, parse_hash: str | None = None) -> None:
+    """直接改库里的正文，模拟"旧版本排版写进去的文档"。"""
+    from sqlalchemy import select
+
+    from app.db import db_session
+    from app.models import ProjectDoc
+
+    async def _do() -> None:
+        async with db_session() as s:
+            row = (
+                await s.execute(select(ProjectDoc).where(ProjectDoc.id == doc_id))
+            ).scalars().one()
+            row.html = html
+            if parse_hash is not None:
+                row.html_parse_hash = parse_hash
+
+    asyncio.run(_do())
+
+
+def test_reparse_old_layout_uses_the_new_typesetting(client):
+    """已经上传过的旧文档可以按原件重排，不必重新找文件（2026-10-19）。"""
+    from hashlib import sha256
+
+    pid = _pid(client)
+    body = "## 第 1 页\n2.1 组织架构\n组织架构采用三级结构，\n每个部门必须归属一个公司。\n"
+    doc = _upload(client, pid, "需规.txt", body.encode("utf-8")).json()["doc"]
+
+    # 旧版本写进库里的正文是"每行一个 <p>"。把指纹也改成它 —— 表示"没人改过"。
+    old = (
+        "<p>## 第 1 页</p><p>2.1 组织架构</p>"
+        "<p>组织架构采用三级结构，</p><p>每个部门必须归属一个公司。</p>"
+    )
+    _set_doc_html(doc["id"], old, sha256(old.encode("utf-8")).hexdigest()[:32])
+
+    r = client.post(f"/api/projects/{pid}/docs/{doc['id']}/reparse", json={})
+    assert r.status_code == 200, r.text
+    out = r.json()
+    assert out["ok"] is True
+
+    html = out["doc"]["html"]
+    assert "<h4>第 1 页</h4>" in html
+    assert "<h3>2.1 组织架构</h3>" in html
+    assert "##" not in html
+    # 两行被折行的正文接回了一段
+    assert html.count("<p>") == 1
+    assert "三级结构，每个部门" in html
+
+
+def test_reparse_refuses_to_overwrite_hand_edits_until_forced(client):
+    """重新排版不能静默覆盖人工修改；界面确认后带 force=true 才覆盖。"""
+    pid = _pid(client)
+    doc = _upload(client, pid, "需规.txt", b"# 1\n\noriginal text\n").json()["doc"]
+
+    _set_doc_html(doc["id"], "<p>我手工改的正文</p>")
+
+    r = client.post(f"/api/projects/{pid}/docs/{doc['id']}/reparse", json={})
+    assert r.status_code == 200, r.text
+    assert r.json()["ok"] is False
+    assert r.json()["reason"] == "edited"
+
+    r2 = client.post(
+        f"/api/projects/{pid}/docs/{doc['id']}/reparse", json={"force": True}
+    )
+    assert r2.status_code == 200, r2.text
+    assert r2.json()["ok"] is True
+    html = r2.json()["doc"]["html"]
+    assert "我手工改的正文" not in html
+    assert "original text" in html
+
+
 def test_editing_an_uploaded_doc_keeps_its_original(client):
     """手工改正文**不能**把原件弄丢 —— 原件是"原文到底怎么写的"的权威。"""
     pid = _pid(client)

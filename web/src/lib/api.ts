@@ -1208,6 +1208,25 @@ export const api = {
       body: JSON.stringify(b),
       timeoutMs: 300_000,
     }),
+  /** 用上传时存下的**原件**重新解析并排版正文（2026-10-19）。
+   *
+   *  修好解析排版后，已经上传过的旧文档仍是旧排版；原件还在，不必让用户
+   *  重新找文件。正文被人改过时后端会返回 `ok=false / reason="edited"`，
+   *  由界面确认后再带 `force=true` 重试。
+   */
+  reparseDoc: (pid: number, id: number, force = false) =>
+    req<{
+      ok: boolean;
+      reason?: string;
+      message?: string;
+      doc?: ProjectDoc;
+      chars?: number;
+      warnings?: string[];
+    }>(`/projects/${pid}/docs/${id}/reparse`, {
+      method: "POST",
+      body: JSON.stringify({ force }),
+      timeoutMs: 180_000,
+    }),
   deleteDoc: (pid: number, id: number) =>
     req<{ deleted: number }>(`/projects/${pid}/docs/${id}`, { method: "DELETE" }),
   /** 切换「只有我能改」（AI 不可写）。读不受影响 —— 助手永远能读全部。 */

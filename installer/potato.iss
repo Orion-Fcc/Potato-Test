@@ -53,16 +53,17 @@ DefaultDirName={localappdata}\Programs\PotatoTest
 DisableDirPage=no
 ; per-user 安装：不需要管理员，目录也可写
 PrivilegesRequired=lowest
-; ★★ 装机失败的真实规律（2026-10-19 补齐对照后修正）：
-; **安装包程序本身必须放在 C 盘运行**。实测（同一份 exe，SHA 一致）：
-;   C://tmp//build//…        → ✅ 装成功（10924 行日志）
-;   C://Users//16132//…      → ✅ 装成功
-;   D://agent_study//…       → ❌ 引导阶段就退出（exit 1，连安装日志都写不出来）
-;   D://（根）、D://inst-test → ❌ 同上
-; 装到哪个盘无所谓：`/DIR=D://agent_study//_probe_install`（C 盘的包 → D 盘目标）✅ 成功。
-; → 所以：**测安装包、给用户分发时，都从 C 盘（比如 Downloads）跑**；
-;   编译产物的输出目录本身不影响（它只决定写到哪）。
-; （早先以为是"路径含空格"，那是被这几个变量混在一起误导了 —— 空格**未单独验证**。）
+; ★ 安装包必须在**任何**位置、**任何**安装目录都能跑（2026-10-19 复盘纠正）
+;
+; 10-17 那次"双击安装立刻失败（安装程序无法创建目录 is-XXXX.tmp，错误 5: 拒绝访问）"，
+; 我先归因成"构建路径含空格"，后来又归因成"必须从 C 盘运行" —— **两个都是错的**，
+; 都是同一个坏掉的构建产物造成的混淆变量。重新编译后实测（同一个包）：
+;
+;   C://Users//16132//Downloads//   ✅    D://agent_study//   ✅    D://inst-test//   ✅
+;   安装目录带空格 D://Test Dir\PotatoApp（且从 D 盘运行）   ✅
+;
+; 所以：**不要**在这里加"请从 C 盘运行""别用空格路径"之类使用限制 —— 那是把排查失误
+; 写进产品。真遇到这类症状时，先怀疑构建产物本身：**重新编译一份再测**。
 OutputDir=..\dist_desktop\installer
 OutputBaseFilename=PotatoTest-Setup-{#AppVer}
 Compression=lzma2/max

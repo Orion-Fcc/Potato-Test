@@ -125,8 +125,7 @@ def main() -> int:
         # app 里用到但可能被漏掉的
         "--hidden-import",
         "aiosqlite",
-        "--hidden-import",
-        "asyncpg",
+
         "--hidden-import",
         "pythonnet",
         "--hidden-import",

@@ -135,9 +135,19 @@ def _run_window(url: str, log: logging.Logger) -> None:
 
     if webview is not None:
         log.info("窗口后端：pywebview（WebView2）")
-        webview.create_window(APP_NAME, url, width=1440, height=900, min_size=(1100, 700))
-        webview.start()  # 阻塞到最后一个窗口关闭
-        return
+        try:
+            webview.create_window(APP_NAME, url, width=1440, height=900, min_size=(1100, 700))
+            webview.start()  # 阻塞到最后一个窗口关闭
+            return
+        except Exception as exc:  # noqa: BLE001
+            # ★ 别人的电脑上可能**没装 WebView2**（Win10 没跟着 Edge 更新过）。
+            # pywebview 装得上、但 start() 起不来 —— 以前这里直接冒泡，结果是
+            # "双击没反应、只有日志里有一行异常"。现在降级到 Edge 应用窗口，再不行退浏览器。
+            log.warning(
+                "pywebview 起不来（%s: %s）—— 多半是缺 WebView2 运行时，改用 Edge 兜底",
+                type(exc).__name__,
+                exc,
+            )
 
     edge = _edge_exe()
     if edge:

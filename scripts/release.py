@@ -117,31 +117,58 @@ def publish(notes: str) -> None:
         )
 
     print(f"创建 Release {tag} …")
-    rel = _api(
-        "POST",
-        f"{GITHUB_API}/repos/{repo}/releases",
-        token,
-        json.dumps(
-            {
-                "tag_name": tag,
-                "name": f"Potato Test {v}",
-                "body": notes or f"Potato Test {v}",
-                "draft": False,
-                "prerelease": False,
-            }
-        ).encode(),
-    )
+    try:
+        rel = _api(
+            "POST",
+            f"{GITHUB_API}/repos/{repo}/releases",
+            token,
+            json.dumps(
+                {
+                    "tag_name": tag,
+                    "name": f"Potato Test {v}",
+                    "body": notes or f"Potato Test {v}",
+                    "draft": False,
+                    "prerelease": False,
+                }
+            ).encode(),
+        )
+    except SystemExit as exc:
+        # 422 already_exists：上次创建成功但资产没传上去，重跑时应当继续传，而不是整条失败。
+        if "422" not in str(exc) and "already_exists" not in str(exc):
+            raise
+        print(f"Release {tag} 已存在，复用它继续上传资产")
+        rel = _api("GET", f"{GITHUB_API}/repos/{repo}/releases/tags/{tag}", token)
     upload_url = str(rel["upload_url"]).split("{")[0]
 
     print(f"上传 {installer.name}（{installer.stat().st_size // 1024 // 1024} MB）…")
-    with installer.open("rb") as fh:
-        asset = _api(
-            "POST",
-            f"{upload_url}?name={urllib.parse.quote(installer.name)}",
-            token,
-            fh.read(),
-            "application/octet-stream",
-        )
+    # ★ 用 curl 上传，不用 urllib：190MB+ 的包走 urllib 会 write timeout
+    #（实测 5 分钟超时，而 curl 只要 20 多秒）。上次就是因为这个，旧资产删了、新的没传上去。
+    # --noproxy '*'：传大文件直连更稳（走本地代理容易被限速或中途断）。
+    up = f"{upload_url}?name={urllib.parse.quote(installer.name)}"
+    r = subprocess.run(
+        [
+            # --ssl-no-revoke：本机的证书吊销列表服务器常常连不上
+            # （curl 报 CRYPT_E_REVOCATION_OFFLINE），不跳过吊销检查会直接失败。
+            "curl", "-sS", "--ssl-no-revoke", "--noproxy", "*", "-m", "1800", "-X", "POST",
+            "-H", f"Authorization: Bearer {token}",
+            "-H", "Content-Type: application/octet-stream",
+            "-H", "Accept: application/vnd.github+json",
+            "--data-binary", f"@{installer}",
+            up,
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if r.returncode != 0:
+        raise SystemExit(f"上传失败（curl {r.returncode}）：{(r.stderr or '')[:300]}")
+    try:
+        asset = json.loads(r.stdout)
+    except Exception:
+        raise SystemExit(f"上传返回看不懂：{(r.stdout or r.stderr or '')[:300]}")
+    if not asset.get("browser_download_url"):
+        raise SystemExit(f"上传没有返回下载地址：{str(asset)[:300]}")
     print(f"完成：{rel.get('html_url')}")
     print(f"资产：{asset.get('browser_download_url')}")
     print("\n注意：版本号已改，但代码还没提交 —— 记得 git commit + push。")

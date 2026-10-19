@@ -41,7 +41,7 @@
 
 #define AppName "Potato Test"
 #define AppExe "PotatoTest.exe"
-#define AppVer "1.0.0"
+#define AppVer "1.0.1"
 
 [Setup]
 AppId={{8E2B7F4A-3C51-4C0E-9E77-5B2D8D1A6F31}

@@ -12,6 +12,8 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import unquote
 
+from pathlib import Path
+
 from fastapi import (
     APIRouter,
     BackgroundTasks,
@@ -5616,4 +5618,102 @@ async def app_update_install(body: dict) -> dict:
         "started": True,
         "installer": str(path),
         "message": "更新包已下载，应用即将退出并自动安装",
+    }
+
+
+# ---- 文件存放位置（2026-10-19 用户要求）--------------------------------------
+# 视频、截图、浏览器 profile 默认落在程序目录旁边。用户可以把它们放去别的盘
+#（C 盘紧张、或想把录像集中到数据盘），设完**重启生效**。
+#
+# ★ 为什么用 `storage.json` 而不是环境变量/注册表：这是用户**在界面里**选的设置，
+#   要在下一次启动就生效，且不能依赖 .env（桌面版可能没有 .env）。
+#   `desktop.py` 在 import app 之前读它 —— 早于 `app/config.py` 解析相对路径。
+
+
+def _app_root() -> Path:
+    """程序目录：冻结版是 exe 所在目录，源码版是仓库根。"""
+    import sys as _sys
+
+    if getattr(_sys, "frozen", False):
+        return Path(_sys.executable).resolve().parent
+    return Path(__file__).resolve().parents[1]
+
+
+def _move_storage(root: Path, dest: Path) -> None:
+    """把现有的 artifacts / profiles 搬到新位置。同盘是秒级改名，跨盘是复制。"""
+    import shutil
+
+    for name in ("artifacts", "profiles"):
+        src = root / name
+        if not src.is_dir():
+            continue
+        target = dest / name
+        try:
+            if target.exists():
+                for child in src.iterdir():  # 目标已存在：逐项搬，避免整体覆盖
+                    shutil.move(str(child), str(target / child.name))
+                src.rmdir()
+            else:
+                shutil.move(str(src), str(target))
+            log.info("已把 %s 搬到 %s", name, target)
+        except Exception as exc:  # noqa: BLE001 — 搬失败不能影响已经生效的设置
+            log.warning("搬 %s 失败（%s: %s）—— 旧文件仍留在原处", name, type(exc).__name__, exc)
+
+
+@router.get("/app/storage")
+async def get_app_storage() -> dict:
+    """当前的存放位置 + 程序默认位置（界面据此显示"恢复默认"）。"""
+    import json as _json
+
+    root = _app_root()
+    chosen = ""
+    f = root / "storage.json"
+    if f.is_file():
+        try:
+            chosen = str(_json.loads(f.read_text(encoding="utf-8")).get("storage_dir") or "")
+        except Exception:  # noqa: BLE001
+            chosen = ""
+    s = get_settings()
+    return {
+        "storage_dir": chosen,
+        "artifact_dir": s.artifact_dir,
+        "profile_dir": s.profile_dir,
+        "default_dir": str(root),
+        "app_root": str(root),
+    }
+
+
+@router.put("/app/storage")
+async def set_app_storage(body: dict, background: BackgroundTasks) -> dict:
+    """设置存放位置。传空 dir 表示恢复默认（放在程序目录）。重启生效。"""
+    import json as _json
+
+    root = _app_root()
+    f = root / "storage.json"
+    raw = str((body or {}).get("dir") or "").strip()
+
+    if not raw:
+        if f.is_file():
+            f.unlink()
+        return {"ok": True, "needs_restart": True, "storage_dir": "", "message": "已恢复默认位置，重启应用后生效"}
+
+    dest = Path(raw).expanduser()
+    if not dest.is_absolute():
+        raise HTTPException(400, "请填绝对路径，例如 D:\\PotatoTestData")
+    try:
+        dest.mkdir(parents=True, exist_ok=True)
+        probe = dest / ".write-test"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(400, f"这个目录不可写：{type(exc).__name__}") from exc
+
+    f.write_text(_json.dumps({"storage_dir": str(dest)}, ensure_ascii=False, indent=2), encoding="utf-8")
+    if bool((body or {}).get("move_existing")):
+        background.add_task(_move_storage, root, dest)
+    return {
+        "ok": True,
+        "needs_restart": True,
+        "storage_dir": str(dest),
+        "message": "已保存，重启应用后生效" + ("（旧文件正在后台搬过去）" if (body or {}).get("move_existing") else ""),
     }

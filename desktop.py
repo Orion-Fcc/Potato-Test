@@ -29,6 +29,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import secrets
@@ -178,9 +179,46 @@ def _run_window(url: str, log: logging.Logger) -> None:
     threading.Event().wait()
 
 
+STORAGE_FILE = "storage.json"
+
+
+def _apply_storage_config(root: Path) -> str | None:
+    """读 `storage.json`，把视频/截图/浏览器 profile 的落盘位置顶到用户选的地方（2026-10-19）。
+
+    ★ 必须在 `import app` **之前**跑：`app/config.py` 在导入时就把
+    `artifact_dir` / `profile_dir` 解析成绝对路径了，之后再改环境变量没有用。
+
+    为什么用文件而不是环境变量给用户设：用户是在**界面里**选的路径，
+    而这个设置要在"下一次启动"就生效 —— 写一个小 json 到程序目录是最不容易出错的传递方式
+    （不用改注册表、不用重启系统、也不依赖当前工作目录）。
+    """
+    f = root / STORAGE_FILE
+    if not f.is_file():
+        return None
+    try:
+        data = json.loads(f.read_text(encoding="utf-8"))
+        base = (data.get("storage_dir") or "").strip()
+        if not base:
+            return None
+        b = Path(base)
+        if not b.is_absolute():
+            return None
+        b.mkdir(parents=True, exist_ok=True)
+        os.environ["ARTIFACT_DIR"] = str(b / "artifacts")
+        os.environ["PROFILE_DIR"] = str(b / "profiles")
+        return str(b)
+    except Exception:  # noqa: BLE001 — 配置坏了不能挡住启动
+        return None
+
+
 def main() -> int:
     log = _setup_logging()
     root = _root_dir()
+
+    # ★ 存储位置（2026-10-19）：必须在 import app 之前落到环境变量里
+    store = _apply_storage_config(root)
+    if store:
+        log.info("文件存放位置：%s（视频/截图/浏览器 profile）", store)
 
     # ★ 导入 app 之前切目录（.env / 相对路径数据库都以 cwd 为基准）。
     if Path.cwd() != root:

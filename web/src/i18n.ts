@@ -1464,6 +1464,18 @@ const zh: Record<string, string> = {
   "右边「正文」里是解析出来的文字（可以改），但它是有损的；要核对格式请以原件为准。":
     "右边「正文」里是解析出来的文字（可以改），但它是有损的；要核对格式请以原件为准。",
 
+  // ---- 文件存放位置（2026-10-19）--------------------------------------------
+  "File storage location": "文件存放位置",
+  "Videos, screenshots and browser profiles live next to the app by default. Point them at another drive if C: is tight. Takes effect after restarting the app.":
+    "视频、截图和浏览器登录态默认存在程序目录旁边。C 盘紧张时可以改到别的盘，重启应用后生效。",
+  "Currently writing to": "当前实际写入",
+  "Browser profiles": "浏览器登录态",
+  "Default (inside the app folder)": "默认位置（程序目录内）",
+  "New location (blank = back to default)": "新位置（留空 = 恢复默认）",
+  "Also move the existing files (fast on the same drive, slow across drives)":
+    "把现有文件也搬过去（同盘很快，跨盘要等）",
+  "Takes effect after restarting the app.": "重启应用后生效。",
+
 };
 
 // 只在本文件里读写（init 与 setLang），故不导出。

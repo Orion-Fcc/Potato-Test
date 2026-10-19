@@ -1678,6 +1678,18 @@ export const api = {
   // ---- 应用更新（2026-10-17）--------------------------------------------
   /** 查最新版本。后端缓存 10 分钟，`force` 用于"再检查一次"。 */
   getAppUpdate: (force = false) => req<AppUpdateInfo>(`/app/update${force ? "?force=true" : ""}`),
+  // ---- 文件存放位置（2026-10-19）---------------------------------------
+  /** 当前存放位置 + 程序默认位置。 */
+  getAppStorage: () =>
+    req<{ storage_dir: string; artifact_dir: string; profile_dir: string; default_dir: string; app_root: string }>(
+      "/app/storage",
+    ),
+  /** 设置存放位置（空字符串 = 恢复默认）。`moveExisting` 会把旧文件也搬过去。 */
+  setAppStorage: (dir: string, moveExisting = false) =>
+    req<{ ok: boolean; needs_restart: boolean; storage_dir: string; message: string }>("/app/storage", {
+      method: "PUT",
+      body: JSON.stringify({ dir, move_existing: moveExisting }),
+    }),
   /** 下载并静默安装更新（仅桌面版；网页版后端会明确拒绝）。 */
   installAppUpdate: (url: string) =>
     req<{ started: boolean; installer: string; message: string }>("/app/update/install", {

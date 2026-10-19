@@ -33,6 +33,38 @@ WORK = ROOT / "build" / "desktop"
 NAME = "PotatoTest"
 
 
+# 打包后删掉**确定用不到**的运行时文件（2026-10-19）。
+# 每条都要能说清"为什么删了不会坏" —— 删错会让应用启动即崩，所以只挑有测试验证过的。
+_PRUNE = [
+    (
+        "**/cv2/opencv_videoio_ffmpeg*.dll",
+        "cv2 的视频解码后端（约 29 MB）。OCR 只做图片解码，cv2 对它是**懒加载**："
+        "实测删掉后 import cv2 与 cvtColor 都正常，只有 VideoCapture 会失败（本产品不读视频）",
+    ),
+    (
+        "**/playwright/driver/package/**/*.js.map",
+        "playwright 驱动的 JS source map（只给调试器用，运行时不需要）",
+    ),
+    (
+        "**/playwright/driver/package/**/*.d.ts",
+        "playwright 驱动的 TypeScript 类型声明（编译期用）",
+    ),
+]
+
+
+def _prune_bundle(dist: pathlib.Path) -> None:
+    total = 0
+    for pat, why in _PRUNE:
+        for f in dist.glob(pat):
+            try:
+                total += f.stat().st_size
+                f.unlink()
+            except Exception:  # noqa: BLE001
+                pass
+        print(f"  剔除 {pat}（{why}）")
+    print(f"  瘦身合计 {total / 1024 / 1024:.1f} MB")
+
+
 def _assert_embedding_model() -> None:
     """★ 向量模型必须在场（2026-10-19）。
 
@@ -156,6 +188,9 @@ def main() -> int:
     example = ROOT / ".env.example"
     if example.is_file():
         shutil.copy2(example, OUT / NAME / ".env.example")
+
+    # ★ 打包后瘦身（2026-10-19）：见 _PRUNE 的说明，只删有验证过的无用文件
+    _prune_bundle(OUT / NAME)
 
     size = sum(f.stat().st_size for f in (OUT / NAME).rglob("*") if f.is_file())
     print(f"== 完成：{exe} ==")

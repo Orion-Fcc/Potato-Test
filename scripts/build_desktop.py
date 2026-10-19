@@ -90,6 +90,13 @@ def main() -> int:
         # pywebview 的 Windows 后端（WebView2）
         "--collect-all",
         "webview",
+        # ★ 排除 imageio_ffmpeg（2026-10-19）：它自带一个 ffmpeg 二进制，占 **83 MB**，
+        # 而本项目、browser_use、playwright 都**没有引用它**（grep 确认）。
+        # 视频录制走 playwright 自己，用不到这个可执行文件。
+        "--exclude-module",
+        "imageio_ffmpeg",
+        "--exclude-module",
+        "imageio",
         # 向量模型（2026-10-19）：bge-small-zh-v1.5 的 ONNX 文件是**数据**，
         # PyInstaller 静态分析看不见 —— 不加 --add-data 的话，装出来的应用
         # `embeddings.available()` 永远 False，检索会静默退回关键词（不报错，很难发现）。

@@ -47,6 +47,9 @@ dependencies = [
     # 向量检索（2026-10-19）：bge-small-zh-v1.5 的 tokenizer 走这个库，
     # 不用 transformers（那会把 torch 拖进来，200MB+）。
     "tokenizers>=0.20",
+    # OCR 用的 opencv：**锁在 4.x**（2026-10-19）。5.0 解包后 111 MB，4.10 是 96 MB；
+    # 而且 5.0 是 2026-09 才发的，rapidocr 只在 4.x 上验证得最充分。
+    "opencv-python-headless>=4.10,<5",
     "pymupdf>=1.24",
     "rapidocr>=3.0",
     "pillow>=10.0",

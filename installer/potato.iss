@@ -89,3 +89,49 @@ Source: "..\dist_desktop\PotatoTest\*"; DestDir: "{app}"; Flags: ignoreversion r
 Name: "{autoprograms}\{#AppName}"; Filename: "{app}\{#AppExe}"
 ; 桌面项跟任务走
 Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExe}"; Tasks: desktopicon
+
+[Code]
+{ 检测 WebView2 运行时（Evergreen）是否已装。三处都查：
+  64 位进程看 WOW6432Node、32 位看 HKLM、用户级安装看 HKCU。 }
+function WebView2Installed: Boolean;
+var
+  pv: String;
+begin
+  Result :=
+    RegQueryStringValue(HKLM, 'SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}', 'pv', pv)
+    or RegQueryStringValue(HKLM, 'SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}', 'pv', pv)
+    or RegQueryStringValue(HKCU, 'Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}', 'pv', pv);
+end;
+
+function NeedsWebView2: Boolean;
+begin
+  Result := not WebView2Installed;
+end;
+
+procedure TryInstallWebView2;
+var
+  Exe: String;
+  Code: Integer;
+begin
+  Exe := ExpandConstant('{tmp}\MicrosoftEdgeWebview2Setup.exe');
+  { ★ 下载/安装失败**一律不阻断安装**：公司电脑常常没有外网，
+    不能因为补一个运行时就让整个安装失败。应用本身有 Edge 窗口与浏览器兜底。 }
+  try
+    DownloadTemporaryFile('https://go.microsoft.com/fwlink/p/?LinkId=2124703',
+      'MicrosoftEdgeWebview2Setup.exe', '', nil);
+  except
+    Log('WebView2 引导程序下载失败，跳过：' + GetExceptionMessage);
+    exit;
+  end;
+  if Exec(Exe, '/silent /install', '', SW_HIDE, ewWaitUntilTerminated, Code) then
+    Log('WebView2 安装已尝试，退出码 ' + IntToStr(Code))
+  else
+    Log('WebView2 安装程序没能启动，跳过');
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if CurStep = ssPostInstall then
+    if not WebView2Installed then
+      TryInstallWebView2;
+end;

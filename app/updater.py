@@ -41,6 +41,42 @@ _ALLOWED_PREFIX = f"https://github.com/{GITHUB_REPO}/releases/download/"
 
 _cache: dict[str, object] = {"at": None, "data": None}
 
+# ★ 代理策略（2026-10-19，实测踩出来的坑）：**先直连，失败再信环境/系统代理**。
+#
+# 为什么不能像别处那样直接 trust_env=True：在 Windows 上，httpx 的 trust_env 会通过
+# urllib 读**注册表**里的系统代理（HKCU\...\Internet Settings\ProxyServer）。
+# 而用户机器上配的 127.0.0.1:7877 很可能**根本没在跑**（代理客户端没启动）——
+# 于是每个请求都撞死在一个不存在的代理上，界面显示"连不上更新服务器（检查网络或代理）"，
+# 但真相是直连明明通。
+#
+# 实测（同一台机器、同一时刻）：
+#   trust_env=True  → ConnectError: All connection attempts failed  2.3s
+#   trust_env=False → HTTP 200                                        0.7s
+#
+# 反过来也有需要代理的网络，所以做成"直连优先、代理兜底"，并记住本次进程里哪种可用。
+_TRUST_ENV_MODES = (False, True)
+_proxy_mode: bool | None = None
+
+
+async def _request(url: str, headers: dict | None = None, timeout: float = _TIMEOUT):
+    """按"直连 → 系统代理"的顺序试，成功就记住这种方式。"""
+    global _proxy_mode
+    modes = [_proxy_mode] if _proxy_mode is not None else list(_TRUST_ENV_MODES)
+    last: Exception | None = None
+    for mode in modes:
+        try:
+            async with httpx.AsyncClient(
+                timeout=timeout, follow_redirects=True, trust_env=mode
+            ) as c:
+                r = await c.get(url, headers=headers or {})
+            _proxy_mode = mode
+            return r
+        except Exception as exc:  # noqa: BLE001 —— 换下一种方式再试
+            last = exc
+    if last is not None:
+        raise last
+    raise RuntimeError("没有可用的连接方式")
+
 
 def _ver_tuple(v: str) -> tuple[int, ...]:
     """`1.2.10` → (1, 2, 10)。只比前三位，剩下的忽略（够用且不会因为后缀炸掉）。"""
@@ -85,11 +121,15 @@ async def check(force: bool = False) -> dict:
         "error": None,
     }
     try:
-        async with httpx.AsyncClient(timeout=_TIMEOUT, follow_redirects=True) as c:
-            r = await c.get(
-                f"{API}/repos/{GITHUB_REPO}/releases/latest",
-                headers={"Accept": "application/vnd.github+json"},
-            )
+        r = await _request(
+            f"{API}/repos/{GITHUB_REPO}/releases/latest",
+            headers={
+                "Accept": "application/vnd.github+json",
+                # GitHub 对**没有 User-Agent** 的请求返回 403。少了这个头，检查更新会
+                # 显示"更新服务器返回 403"，看起来像仓库权限问题，其实是缺个头。
+                "User-Agent": f"PotatoTest/{APP_VERSION}",
+            },
+        )
         if r.status_code == 404:
             # 还没发过 Release —— 对用户是"暂时没有更新"，不是故障
             data["error"] = "这个项目还没有发布过版本"
@@ -107,8 +147,8 @@ async def check(force: bool = False) -> dict:
                 data["asset_name"] = asset.get("name")
             data["has_update"] = bool(tag) and is_newer(tag)
     except Exception as exc:  # noqa: BLE001 — 断网/超时都只当"查不到"
-        log.info("检查更新失败：%s", exc)
-        data["error"] = "连不上更新服务器（检查网络或代理）"
+        log.warning("检查更新失败（直连与代理都试过）：%s: %s", type(exc).__name__, exc)
+        data["error"] = f"连不上更新服务器（{type(exc).__name__}）"
 
     _cache["at"], _cache["data"] = now, data
     return dict(data)
@@ -131,7 +171,10 @@ async def download_installer(url: str, dest_dir: Path) -> Path:
     name = url.rsplit("/", 1)[-1]
     dest = dest_dir / name
     tmp = dest.with_suffix(dest.suffix + ".part")
-    async with httpx.AsyncClient(timeout=120.0, follow_redirects=True) as c:
+    # 用 check() 定下来的方式（直连还是走代理），否则"检查得通、下载连不上"
+    async with httpx.AsyncClient(
+        timeout=120.0, follow_redirects=True, trust_env=bool(_proxy_mode)
+    ) as c:
         async with c.stream("GET", url) as r:
             r.raise_for_status()
             with tmp.open("wb") as fh:

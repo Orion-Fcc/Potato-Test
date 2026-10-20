@@ -381,6 +381,24 @@ async def import_secret_key(body: SecretKeyIn, request: Request) -> dict:
     }
 
 
+@router.post("/secret-key/rotate")
+async def rotate_secret_key(request: Request, response: Response) -> dict:
+    """Re-encrypt all stored credentials with a fresh key; return it for backup."""
+    await auth.require_admin(request)
+    response.headers["Cache-Control"] = "no-store"
+    async with db_session() as session:
+        try:
+            status, new_key = await key_store.rotate(session)
+        except key_store.SecretKeyMissing as exc:
+            raise HTTPException(409, str(exc)) from exc
+    return {
+        **status.as_dict(),
+        "key": new_key,
+        "recovery_mode": False,
+        "restart_required": False,
+    }
+
+
 # ---- password reset ----
 # ponytail: per-process throttle on "forgot password" so the endpoint can't be used to
 # mailbomb an address. Good enough with a handful of workers; move to Redis if it grows.

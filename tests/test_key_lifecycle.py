@@ -16,7 +16,7 @@ from cryptography.fernet import Fernet
 
 from app import crypto, key_store
 from app.config import get_settings
-from app.models import AppSetting
+from app.models import AppSetting, Credential, Project
 
 
 def _run(coro):
@@ -44,6 +44,11 @@ async def _initialize(db_session):
 async def _import(db_session, raw: str):
     async with db_session() as sess:
         return await key_store.import_key(raw, sess)
+
+
+async def _rotate(db_session):
+    async with db_session() as sess:
+        return await key_store.rotate(sess)
 
 
 async def _seed_ciphertext(db_session, key: str) -> str:
@@ -214,6 +219,179 @@ def test_jwt_key_survives_missing_credential_key(tmp_db, key_env):
 
 
 
+# --------------------------------------------------------------------------- rotation
+
+
+def test_rotate_reencrypts_every_encrypted_field(tmp_db, key_env):
+    _, db_session, _ = tmp_db
+    assert _run(_initialize(db_session)).can_use_credentials
+    old_key = key_store.export_key()
+
+    async def seed():
+        async with db_session() as s:
+            project = Project(name="rotate")
+            s.add(project)
+            await s.flush()
+            s.add(
+                Credential(
+                    project_id=project.id,
+                    type="password",
+                    label="robot",
+                    secret=crypto.encrypt("pw-value"),
+                    session_bundle=crypto.encrypt("bundle-value"),
+                    is_active=False,
+                )
+            )
+            s.add(
+                AppSetting(
+                    key="secret-setting",
+                    value=crypto.encrypt("setting-value"),
+                    secret=True,
+                )
+            )
+            s.add(AppSetting(key="plain-setting", value="plain", secret=False))
+
+    _run(seed())
+
+    async def snapshot():
+        from sqlalchemy import select
+
+        async with db_session() as s:
+            cred = (await s.execute(select(Credential))).scalars().one()
+            setting = await s.get(AppSetting, "secret-setting")
+            plain = await s.get(AppSetting, "plain-setting")
+            return cred.secret, cred.session_bundle, setting.value, plain.value
+
+    old_tokens = _run(snapshot())
+    status, new_key = _run(_rotate(db_session))
+
+    assert new_key != old_key
+    assert status.can_use_credentials is True
+    assert status.source == "rotation"
+    assert key_store.export_key() == new_key
+    assert key_store.get_status().can_use_credentials is True
+
+    new_tokens = _run(snapshot())
+    assert all(a != b for a, b in zip(old_tokens[:3], new_tokens[:3]))
+    assert crypto.decrypt(new_tokens[0]) == "pw-value"
+    assert crypto.decrypt(new_tokens[1]) == "bundle-value"
+    assert crypto.decrypt(new_tokens[2]) == "setting-value"
+    assert new_tokens[3] == "plain"
+
+    for token in new_tokens[:3]:
+        with pytest.raises(Exception):
+            Fernet(old_key).decrypt(token.encode())
+
+    primary = key_env / key_store.DPAPI_FILE
+    assert key_store._read_key_file(primary).decode("utf-8").strip() == new_key
+    assert not (key_env / key_store.PENDING_FILE).exists()
+
+
+def test_rotate_aborts_cleanly_when_a_row_cannot_be_decrypted(tmp_db, key_env):
+    from sqlalchemy import select
+
+    _, db_session, _ = tmp_db
+    _run(_initialize(db_session))
+    old_key = key_store.export_key()
+    good_token = _run(_seed_ciphertext(db_session, old_key))
+
+    async def add_bad_row():
+        async with db_session() as s:
+            s.add(AppSetting(key="broken-secret", value="not-a-fernet-token", secret=True))
+
+    _run(add_bad_row())
+
+    with pytest.raises(key_store.SecretKeyMissing):
+        _run(_rotate(db_session))
+
+    assert key_store.export_key() == old_key
+    assert not (key_env / key_store.PENDING_FILE).exists()
+    assert key_store._read_key_file(key_env / key_store.DPAPI_FILE).decode().strip() == old_key
+
+    async def values():
+        async with db_session() as s:
+            rows = {
+                row.key: row.value
+                for row in (await s.execute(select(AppSetting))).scalars().all()
+            }
+            return rows
+
+    rows = _run(values())
+    assert rows["probe-secret"] == good_token
+    assert rows["broken-secret"] == "not-a-fernet-token"
+
+
+def test_rotate_refuses_environment_key(tmp_db, key_env):
+    _, db_session, _ = tmp_db
+    env_key = Fernet.generate_key().decode()
+    _run(_seed_ciphertext(db_session, env_key))
+
+    import os
+
+    os.environ["POTATO_SECRET_KEY"] = env_key
+    get_settings.cache_clear()
+    key_store.reset_for_tests(None)
+    assert _run(_initialize(db_session)).state is key_store.KeyState.OK_ENV
+
+    with pytest.raises(key_store.SecretKeyMissing) as exc:
+        _run(_rotate(db_session))
+
+    assert "POTATO_SECRET_KEY" in str(exc.value)
+    assert key_store.export_key() == env_key
+    assert not (key_env / key_store.PENDING_FILE).exists()
+
+
+def test_pending_key_recovers_a_committed_rotation(tmp_db, key_env):
+    from sqlalchemy import select
+
+    _, db_session, _ = tmp_db
+    _run(_initialize(db_session))
+    old_key = key_store.export_key()
+    _run(_seed_ciphertext(db_session, old_key))
+
+    new_key = Fernet.generate_key().decode()
+    key_store._write_key_file(key_env / key_store.PENDING_FILE, new_key.encode("utf-8"))
+
+    async def move_to_new_key():
+        async with db_session() as s:
+            row = (await s.execute(select(AppSetting))).scalars().one()
+            plain = Fernet(old_key.encode()).decrypt(row.value.encode())
+            row.value = Fernet(new_key.encode()).encrypt(plain).decode()
+
+    _run(move_to_new_key())
+
+    # Simulate a restart after the DB commit, before the pending key was promoted.
+    key_store.reset_for_tests(None)
+    status = _run(_initialize(db_session))
+
+    assert status.can_use_credentials is True
+    assert status.source == "pending_recovered"
+    assert "轮换" in (status.reason or "")
+    assert key_store.export_key() == new_key
+    assert not (key_env / key_store.PENDING_FILE).exists()
+    assert key_store._read_key_file(key_env / key_store.DPAPI_FILE).decode().strip() == new_key
+
+
+def test_stale_pending_key_does_not_override_the_primary(tmp_db, key_env):
+    _, db_session, _ = tmp_db
+    _run(_initialize(db_session))
+    old_key = key_store.export_key()
+    token = _run(_seed_ciphertext(db_session, old_key))
+
+    key_store._write_key_file(
+        key_env / key_store.PENDING_FILE, Fernet.generate_key()
+    )
+    key_store.reset_for_tests(None)
+    status = _run(_initialize(db_session))
+
+    assert status.can_use_credentials is True
+    assert key_store.export_key() == old_key
+    # Kept on purpose: deleting it outside the rotation lock could race with a
+    # rotation in another worker. It is only ever promoted if it decrypts the DB.
+    assert (key_env / key_store.PENDING_FILE).exists()
+    assert crypto.decrypt(token) == "stored-secret"
+
+
 
 # --------------------------------------------------------------------------- API
 
@@ -296,6 +474,25 @@ def test_import_wrong_key_is_rejected_then_right_key_recovers(recovery_client):
     r = client.get("/api/secret-key/status")
     assert r.json()["recovery_mode"] is False
     assert crypto.decrypt(token) == "stored-secret"
+
+
+def test_rotate_endpoint_returns_the_new_key(ready_client):
+    old_key = key_store.export_key()
+
+    r = ready_client.post("/api/secret-key/rotate")
+
+    assert r.status_code == 200
+    assert r.headers.get("cache-control") == "no-store"
+    body = r.json()
+    assert body["can_use_credentials"] is True
+    assert body["recovery_mode"] is False
+    assert body["restart_required"] is False
+    assert body["key"] != old_key
+    assert body["key"] == key_store.export_key()
+
+    r = ready_client.get("/api/secret-key/status")
+    assert r.status_code == 200
+    assert r.json()["can_use_credentials"] is True
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="DPAPI is Windows-only")

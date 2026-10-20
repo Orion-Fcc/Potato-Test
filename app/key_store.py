@@ -23,6 +23,8 @@ using only the standard library. Other platforms fall back to a 0600 plaintext f
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import ctypes
 import os
 import sys
@@ -35,6 +37,7 @@ from cryptography.fernet import Fernet, InvalidToken
 from app.config import get_settings
 
 DPAPI_FILE = ".potato-secret.key.dpapi"
+PENDING_FILE = ".potato-secret.key.pending"
 LEGACY_FILE = ".potato-secret.key"
 JWT_FILE = ".potato-jwt.key.dpapi"
 
@@ -87,6 +90,7 @@ _key: str | None = None
 _status: KeyStatus = KeyStatus(KeyState.MISSING, reason="密钥尚未初始化")
 _initialized = False
 _jwt_cache: str | None = None
+_rotation_lock = asyncio.Lock()
 
 
 @dataclass(frozen=True)
@@ -437,6 +441,27 @@ async def initialize(session) -> KeyStatus:
     has_ciphertext, sample = await _probe(session)
     candidate, failure = _load_candidate()
 
+    # Crash recovery: a rotation commits the DB before it promotes the pending key.
+    # If the primary key does not decrypt the stored ciphertext, the pending key may
+    # be the one that does. Never do this when POTATO_SECRET_KEY is set: rotation
+    # refuses to run in env mode, so a pending file cannot legitimately belong to it.
+    env_configured = bool((get_settings().secret_key or "").strip())
+    recovered_reason: str | None = None
+    if (
+        not env_configured
+        and sample is not None
+        and (candidate is None or not _decrypts(candidate.key, sample[0]))
+    ):
+        pending = _load_pending()
+        if pending is not None and _decrypts(pending.key, sample[0]):
+            recovered_reason = _promote_pending(pending, sample[0])
+            candidate = _Candidate(
+                pending.key,
+                "pending_recovered",
+                key_dir() / DPAPI_FILE,
+                KeyState.OK_DPAPI,
+            )
+
     if candidate is not None:
         if has_ciphertext and sample is not None and not _decrypts(candidate.key, sample[0]):
             _key = None
@@ -455,7 +480,12 @@ async def initialize(session) -> KeyStatus:
             _clear_crypto_cache()
             return _status
 
-        reason = _migrate_legacy(candidate) if candidate.source == "legacy_file" else None
+        # A pending key left here is from a rotation that never committed (or whose
+        # promotion succeeded). Keep it: deleting it outside the rotation lock could
+        # race with a concurrent rotation and destroy the only copy of its new key.
+        reason = recovered_reason
+        if reason is None and candidate.source == "legacy_file":
+            reason = _migrate_legacy(candidate)
         _key = candidate.key
         _status = KeyStatus(
             state=candidate.state,
@@ -648,6 +678,237 @@ async def import_key(raw: str, session) -> KeyStatus:
     )
     _clear_crypto_cache()
     return _status
+
+
+# --------------------------------------------------------------------------- rotation
+
+
+def _pending_path() -> Path:
+    return key_dir() / PENDING_FILE
+
+
+@contextlib.contextmanager
+def _rotation_file_lock():
+    """Cross-process guard: two workers must never promote different keys."""
+    path = key_dir() / ".potato-rotation.lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fh = open(path, "a+b")  # noqa: SIM115 - held for the rotation, closed in finally
+    try:
+        if sys.platform == "win32":
+            import msvcrt
+
+            _seed_lock_byte(fh)
+            fh.seek(0)
+            msvcrt.locking(fh.fileno(), msvcrt.LK_LOCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            if sys.platform == "win32":
+                fh.seek(0)
+                msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        except OSError:
+            pass
+        fh.close()
+
+
+def _load_pending() -> _Candidate | None:
+    path = _pending_path()
+    if not path.exists():
+        return None
+    try:
+        raw = _read_key_file(path).decode("utf-8").strip()
+    except Exception:  # noqa: BLE001 - an unreadable pending key is treated as absent
+        return None
+    if not _valid_key(raw):
+        return None
+    return _Candidate(raw, "pending", path, KeyState.OK_DPAPI)
+
+
+def _discard_pending() -> None:
+    try:
+        _pending_path().unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _promote_pending(pending: _Candidate, sample_token: str | None = None) -> str:
+    """Make the pending key primary. Returns a human-readable outcome."""
+    try:
+        with _rotation_file_lock():
+            if sample_token is not None and not _decrypts(pending.key, sample_token):
+                return (
+                    "检测到未完成的密钥轮换，但 .pending 中的密钥已不匹配当前密文，"
+                    "未提升为主密钥。请导入原密钥。"
+                )
+            primary = key_dir() / DPAPI_FILE
+            try:
+                _write_key_file(primary, pending.key.encode("utf-8"))
+                if _read_key_file(primary).decode("utf-8").strip() != pending.key:
+                    raise RuntimeError("回读内容与写入内容不一致")
+            except Exception as exc:  # noqa: BLE001
+                return (
+                    "检测到未完成的密钥轮换：当前使用 .pending 中的新密钥，但写入主密钥文件"
+                    f"失败（{exc}）。请勿删除 {PENDING_FILE}，修复后重启会自动重试。"
+                )
+            _discard_pending()
+            return "检测到上次密钥轮换未完成，已恢复新密钥并提升为主密钥。"
+    except OSError as exc:
+        return (
+            f"检测到未完成的密钥轮换，但无法获取轮换锁（{exc}）；"
+            f"当前暂用 .pending 中的密钥。请勿删除 {PENDING_FILE}。"
+        )
+
+
+def _seed_lock_byte(fh) -> None:
+    """msvcrt.locking needs a real byte to lock, even if the file was just created."""
+    fh.seek(0, os.SEEK_END)
+    if fh.tell() == 0:
+        fh.write(b"x")
+        fh.flush()
+
+
+def _primary_holds(key: str) -> bool:
+    primary = key_dir() / DPAPI_FILE
+    try:
+        return primary.exists() and (
+            _read_key_file(primary).decode("utf-8").strip() == key
+        )
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _ensure_primary(key: str) -> None:
+    """Make sure the key currently used for the DB is durable before we replace it."""
+    if _primary_holds(key):
+        return
+    primary = key_dir() / DPAPI_FILE
+    _write_key_file(primary, key.encode("utf-8"))
+    if _read_key_file(primary).decode("utf-8").strip() != key:
+        raise SecretKeyMissing("当前密钥写入主密钥文件后回读不一致，已取消轮换")
+
+
+def _reencrypt_value(old: Fernet, new: Fernet, value: str, label: str) -> str:
+    try:
+        plain = old.decrypt(value.encode("utf-8"))
+    except (InvalidToken, ValueError, TypeError) as exc:
+        raise SecretKeyMissing(
+            f"轮换中止：{label} 无法用当前密钥解密，数据库未修改。"
+        ) from exc
+    return new.encrypt(plain).decode("utf-8")
+
+
+async def _reencrypt_all(session, old_key: str, new_key: str) -> int:
+    from sqlalchemy import select
+
+    from app.models import AppSetting, Credential
+
+    old = Fernet(old_key.encode("utf-8"))
+    new = Fernet(new_key.encode("utf-8"))
+    changed = 0
+
+    rows = (await session.execute(select(Credential))).scalars().all()
+    for row in rows:
+        for field in ("secret", "session_bundle"):
+            value = getattr(row, field)
+            if not value:
+                continue
+            setattr(
+                row,
+                field,
+                _reencrypt_value(
+                    old, new, str(value), f"credential.{field}（id={row.id}）"
+                ),
+            )
+            changed += 1
+
+    settings = (
+        await session.execute(
+            select(AppSetting).where(AppSetting.secret.is_(True))
+        )
+    ).scalars().all()
+    for row in settings:
+        if not row.value:
+            continue
+        row.value = _reencrypt_value(
+            old, new, str(row.value), f"app_setting.{row.key}"
+        )
+        changed += 1
+    return changed
+
+
+async def rotate(session) -> tuple[KeyStatus, str]:
+    """Re-encrypt every credential with a fresh key and return (status, new key).
+
+    Ordering is deliberate: (1) make the current key durable, (2) park the new key in
+    PENDING_FILE, (3) re-encrypt and commit the DB, (4) promote pending to primary.
+    A crash before commit leaves the old key usable; a crash after commit leaves the
+    new key recoverable from PENDING_FILE at the next startup.
+    """
+    global _key, _status, _initialized
+
+    env = (get_settings().secret_key or "").strip()
+    if env:
+        raise SecretKeyMissing(
+            "当前密钥来自 POTATO_SECRET_KEY。在线轮换无法在重启后继续生效："
+            "新密钥会写入密钥文件，但环境变量仍然优先。"
+            "请删除该环境变量并重启后再轮换。"
+        )
+
+    async with _rotation_lock:
+        with _rotation_file_lock():
+            old_key = get_key()
+            _ensure_primary(old_key)
+
+            new_key = Fernet.generate_key().decode()
+            _self_check(new_key)
+
+            pending = _pending_path()
+            try:
+                _write_key_file(pending, new_key.encode("utf-8"))
+                if _read_key_file(pending).decode("utf-8").strip() != new_key:
+                    raise RuntimeError("回读内容与写入内容不一致")
+                await _reencrypt_all(session, old_key, new_key)
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                _discard_pending()
+                raise
+
+            primary = key_dir() / DPAPI_FILE
+            reason = None
+            key_file = str(primary)
+            try:
+                _write_key_file(primary, new_key.encode("utf-8"))
+                if _read_key_file(primary).decode("utf-8").strip() != new_key:
+                    raise RuntimeError("回读内容与写入内容不一致")
+                _discard_pending()
+            except Exception as exc:  # noqa: BLE001
+                reason = (
+                    "数据库已用新密钥重加密，但主密钥文件写入失败"
+                    f"（{exc}）。新密钥保留在 {PENDING_FILE}，请勿删除；重启会自动恢复。"
+                )
+                key_file = str(pending)
+
+            _key = new_key
+            _initialized = True
+            _status = KeyStatus(
+                state=KeyState.OK_DPAPI,
+                source="rotation",
+                reason=reason,
+                can_use_credentials=True,
+                has_ciphertext=True,
+                key_file=key_file,
+            )
+            _clear_crypto_cache()
+            return _status, new_key
 
 
 # --------------------------------------------------------------------------- JWT

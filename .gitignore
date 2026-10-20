@@ -8,6 +8,7 @@ __pycache__/
 *.db-journal
 # auto-generated Fernet key (see app/crypto.py) — never commit, it decrypts stored creds
 .potato-secret.key*
+.potato-rotation.lock
 profiles/
 artifacts/
 auth.json

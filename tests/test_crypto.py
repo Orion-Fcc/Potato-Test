@@ -9,6 +9,9 @@ from cryptography.fernet import Fernet
 
 
 def test_crypto_roundtrip() -> None:
+    from app import key_store
+
+    key_store.reset_for_tests(None)
     os.environ["POTATO_SECRET_KEY"] = Fernet.generate_key().decode()
     from app import crypto
     from app.config import get_settings
@@ -37,6 +40,9 @@ def test_a_malformed_key_fails_with_an_actionable_error() -> None:
     """
     import pytest
 
+    from app import key_store
+
+    key_store.reset_for_tests(None)
     os.environ["POTATO_SECRET_KEY"] = "x" * 32
     from app import crypto
     from app.config import get_settings

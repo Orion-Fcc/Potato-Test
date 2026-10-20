@@ -14,7 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from app.api import public as public_router
 from app.api import router
 from app.config import get_settings
-from app.db import init_db
+from app.db import db_session, init_db
 
 
 async def _seed_admin() -> None:
@@ -185,12 +185,36 @@ async def _stop_suite_scheduler(task) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    import logging
+
+    from app import key_store
+
+    log = logging.getLogger("potato-test.boot")
+
     await init_db()
+    # Resolve the credential key before anything that might touch ciphertext.
+    async with db_session() as sess:
+        key_status = await key_store.initialize(sess)
+    app.state.key_status = key_status
+    if not key_status.can_use_credentials:
+        log.error(
+            "凭据加密密钥不可用，进入恢复模式（%s）：%s",
+            key_status.state.value,
+            key_status.reason,
+        )
+
     await _seed_admin()
     await _fail_orphaned_runs()
     await _backfill_knowledge_chunks()
-    feishu_task = await _start_feishu_worker()
-    suite_task = await _start_suite_scheduler()
+
+    # Background workers read encrypted credentials. Starting them in recovery mode would
+    # only produce silent failures, so they stay off until the key is fixed.
+    if key_status.can_use_credentials:
+        feishu_task = await _start_feishu_worker()
+        suite_task = await _start_suite_scheduler()
+    else:
+        feishu_task = None
+        suite_task = None
     try:
         yield
     finally:

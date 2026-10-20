@@ -30,17 +30,16 @@ def _secret() -> str:
     JWT_SECRET was forgotten, anyone could forge a session cookie for any user id —
     including an admin. That is a silent takeover, not a degraded default.
 
-    Instead we fall back to the per-install key generated on first run (app/crypto.py):
-    random, host-local, never committed. api.set_admin_llm/set_gitlab_token already
-    refuse to work when that key is missing, so this cannot become an unauthenticated
-    path either.
+    Instead we use an independent JWT key from app/key_store.py: generated on demand,
+    host-local, never committed. It is deliberately decoupled from the credential key,
+    so a credential-key recovery state never blocks login.
     """
     s = get_settings()
     if s.jwt_secret:
         return s.jwt_secret
-    from app.crypto import _resolve_key
+    from app import key_store
 
-    return _resolve_key()
+    return key_store.jwt_key()
 
 
 def hash_password(pw: str) -> str:

@@ -647,3 +647,19 @@ def _rollback_env_and_caches():
         else:
             os.environ[k] = v
     _clear_process_caches()
+
+
+@pytest.fixture(autouse=True)
+def _credential_key_is_local_to_each_test():
+    """给每个测试一把独立、合法的凭据密钥。
+
+    key_store 现在会记住初始化状态；不重置的话，上一个测试的密钥（或"缺少密钥"
+    状态）会漏到下一个测试，表现为随机的加密/解密失败。测试不写任何密钥文件。
+    """
+    from cryptography.fernet import Fernet
+
+    from app import key_store
+
+    key_store.reset_for_tests(Fernet.generate_key().decode())
+    yield
+    key_store.reset_for_tests(None)

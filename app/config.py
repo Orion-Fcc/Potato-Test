@@ -97,7 +97,9 @@ class Settings(BaseSettings):
     # 一旦绑 0.0.0.0，同网段（咖啡厅/公司 WiFi）任何人都能读到全部测试数据和报表。
     # 手机本来也打不开这个页面，开放出去只有风险没有收益，所以不提供开关。
 
-    # Fernet key encrypting stored test credentials at rest (empty => credential API disabled).
+    # Fernet key encrypting stored test credentials at rest. Environment variable wins;
+    # otherwise a DPAPI-protected key file is used. If ciphertext already exists but no
+    # usable key is found, the app enters recovery mode instead of generating a new key.
     # 2026-10-04 改名收尾：这里原本还有一个旧项目名的兼容别名
     # （AliasChoices("POTATO_SECRET_KEY", "<旧名>_SECRET_KEY")），
     # 用户要求项目里不留旧名痕迹，已删除。
@@ -107,6 +109,8 @@ class Settings(BaseSettings):
     # 那份密钥会被**静默忽略** → 凭据接口自动关闭，已存的账号全部读不出来。
     # 迁移办法：把那个文件里的 <旧名>_SECRET_KEY 改名成 POTATO_SECRET_KEY 即可。
     secret_key: str = Field(default="", validation_alias=AliasChoices("POTATO_SECRET_KEY"))
+    # 密钥文件目录（默认与 SQLite 数据库同目录）。便携部署 / 测试用它隔离密钥。
+    key_dir: str = Field(default="", validation_alias=AliasChoices("POTATO_KEY_DIR"))
 
     # Empty S3_ENDPOINT => store artifacts on local disk under ./artifacts
     s3_endpoint: str = ""

@@ -13,6 +13,8 @@ GitHub 上必须有一个**带 `PotatoTest-Setup-*.exe` 资产**的 Release。�
     python scripts\\release.py --bump 1.0.1  &:: 只改版本号（三处一起改）
     python scripts\\release.py --publish     &:: 用当前版本发 Release + 传安装包
     python scripts\\release.py --publish --notes-file notes.md
+    python scripts\\release.py --check           &:: 只做发布前检查（token / 仓库 / Release / 资产）
+    python scripts\\release.py --publish --replace  &:: 覆盖 Release 中已有同名资产
 
 ## 每次发布上传两个资产
 
@@ -166,48 +168,170 @@ def _api(
         raise SystemExit(f"GitHub API {e.code}: {detail}") from e
 
 
-def publish(notes: str) -> None:
-    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+def _token() -> str:
+    token = (os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or "").strip()
     if not token:
         raise SystemExit("缺少 GITHUB_TOKEN（需要 repo 权限的 token）")
+    return token
+
+
+def _release_assets(repo: str, token: str, rel: dict) -> list[dict]:
+    return _api(
+        "GET",
+        f"{GITHUB_API}/repos/{repo}/releases/{rel['id']}/assets?per_page=100",
+        token,
+    )
+
+
+def _default_notes(v: str) -> str:
+    """发布说明：优先 RELEASE_NOTES.md，否则用上一个 tag 之后的 git log。"""
+    notes_file = ROOT / "RELEASE_NOTES.md"
+    if notes_file.is_file():
+        print(f"使用发布说明：{notes_file.name}")
+        return notes_file.read_text(encoding="utf-8").strip()
+
+    prev = ""
+    log = None
+    try:
+        tags = subprocess.run(
+            ["git", "tag", "--sort=-v:refname"],
+            cwd=str(ROOT),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        for name in tags.stdout.split():
+            if name.startswith("v") and name != f"v{v}":
+                prev = name
+                break
+        rng = f"{prev}..HEAD" if prev else "-30"
+        log = subprocess.run(
+            ["git", "log", rng, "--no-merges", "--pretty=format:- %s (%h)"],
+            cwd=str(ROOT),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+    except OSError:
+        log = None
+
+    if log is None or log.returncode != 0 or not log.stdout.strip():
+        return f"Potato Test {v}"
+
+    title = f"## 更新内容（{prev} → v{v}）" if prev else "## 更新内容"
+    print(f"自动生成发布说明{('：' + prev + ' → v' + v) if prev else ''}")
+    return f"{title}\n\n{log.stdout.strip()}\n"
+
+
+def preflight(require_installer: bool = False) -> dict:
+    """发布前检查：版本一致、token 有效、仓库可访问、Release/资产状态。
+
+    在打包**之前**跑一遍，避免等几分钟打包完才发现 token 过期或资产冲突。
+    """
     v = verify()
     repo = _read_repo()
+    token = _token()
+
+    print(f"检查 GitHub 仓库 {repo} …")
+    try:
+        data = _api("GET", f"{GITHUB_API}/repos/{repo}", token)
+    except SystemExit as exc:
+        raise SystemExit(
+            f"仓库访问失败：{exc}\n请确认 token 未过期、有 repo 权限、仓库名正确。"
+        ) from exc
+    print(f"  仓库可访问（私有：{'是' if data.get('private') else '否'}）")
+
     tag = f"v{v}"
+    rel = None
+    try:
+        rel = _api("GET", f"{GITHUB_API}/repos/{repo}/releases/tags/{tag}", token)
+    except SystemExit as exc:
+        # 404 = 还没建 Release，这是正常状态
+        if "404" not in str(exc):
+            raise
+
+    assets = _release_assets(repo, token, rel) if rel else []
+    if rel:
+        print(f"  Release {tag} 已存在：{rel.get('html_url')}")
+        if assets:
+            print("  已有资产：" + "、".join(str(a.get("name")) for a in assets))
+            print("  （同名资产需用 --replace 覆盖，否则发布会失败）")
+    else:
+        print(f"  Release {tag} 尚未创建")
 
     installer = ROOT / "dist_desktop" / "installer" / f"PotatoTest-Setup-{v}.exe"
-    if not installer.is_file():
-        raise SystemExit(
-            f"找不到安装包 {installer}\n先跑：python scripts\\build_desktop.py && ISCC.exe installer\\potato.iss"
-        )
+    if require_installer:
+        if not installer.is_file():
+            raise SystemExit(f"找不到安装包：{installer}\n先打包，或确认当前版本号是 {v}。")
+        print(f"  安装包：{installer.name}（{installer.stat().st_size // 1024 // 1024} MB）")
 
-    print(f"创建 Release {tag} …")
-    try:
-        rel = _api(
-            "POST",
-            f"{GITHUB_API}/repos/{repo}/releases",
-            token,
-            json.dumps(
-                {
-                    "tag_name": tag,
-                    "name": f"Potato Test {v}",
-                    "body": notes or f"Potato Test {v}",
-                    "draft": False,
-                    "prerelease": False,
-                }
-            ).encode(),
-        )
-    except SystemExit as exc:
-        # 422 already_exists：上次创建成功但资产没传上去，重跑时应当继续传，而不是整条失败。
-        if "422" not in str(exc) and "already_exists" not in str(exc):
-            raise
-        print(f"Release {tag} 已存在，复用它继续上传资产")
-        rel = _api("GET", f"{GITHUB_API}/repos/{repo}/releases/tags/{tag}", token)
+    return {
+        "version": v,
+        "repo": repo,
+        "token": token,
+        "tag": tag,
+        "release": rel,
+        "assets": assets,
+        "installer": installer,
+    }
+
+
+def publish(notes: str, replace: bool = False) -> None:
+    info = preflight(require_installer=True)
+    v = info["version"]
+    repo = info["repo"]
+    token = info["token"]
+    tag = info["tag"]
+    installer = info["installer"]
+    rel = info["release"]
+
+    if rel is None:
+        print(f"创建 Release {tag} …")
+        try:
+            rel = _api(
+                "POST",
+                f"{GITHUB_API}/repos/{repo}/releases",
+                token,
+                json.dumps(
+                    {
+                        "tag_name": tag,
+                        "name": f"Potato Test {v}",
+                        "body": notes or f"Potato Test {v}",
+                        "draft": False,
+                        "prerelease": False,
+                    }
+                ).encode(),
+            )
+        except SystemExit as exc:
+            # 422 already_exists：上次创建成功但资产没传完，接着传资产即可。
+            if "422" not in str(exc) and "already_exists" not in str(exc):
+                raise
+            print(f"Release {tag} 已存在，继续上传资产")
+            rel = _api("GET", f"{GITHUB_API}/repos/{repo}/releases/tags/{tag}", token)
     upload_url = str(rel["upload_url"]).split("{")[0]
 
-    # ★ 先传校验文件，再传安装包。顺序是有意的：安装包一直在变大，
-    #   万一传到一半断了，Release 里至少不会出现"有安装包、没校验值"的状态 ——
-    #   新版本 updater 遇到那种状态会拒绝安装（宁可不更新，也不执行未验证的 exe）。
+    # 先写校验文件再传安装包：顺序不能反。安装包一直在变，中途断掉会出现
+    # “有安装包、没校验值”的 Release —— 新版 updater 遇到这种状态会拒绝执行。
     checksum = _write_checksum(installer)
+    wanted = {checksum.name, installer.name}
+    current = {a.get("name"): a for a in _release_assets(repo, token, rel)}
+    clash = [name for name in wanted if name in current]
+    if clash:
+        if not replace:
+            raise SystemExit(
+                "Release 已有同名资产：" + "、".join(clash)
+                + "\n用 --replace 覆盖（先删除旧资产再上传），或先改版本号。"
+            )
+        for name in clash:
+            print(f"删除旧资产 {name} …")
+            _api(
+                "DELETE",
+                f"{GITHUB_API}/repos/{repo}/releases/assets/{current[name]['id']}",
+                token,
+            )
+
     print(f"上传 {checksum.name} …")
     _upload_asset(upload_url, token, checksum)
 
@@ -215,27 +339,32 @@ def publish(notes: str) -> None:
     asset = _upload_asset(upload_url, token, installer)
     print(f"完成：{rel.get('html_url')}")
     print(f"资产：{asset.get('browser_download_url')}")
-    print(f"校验：{checksum.name} → {_sha256_of(installer)}")
+    print(f"校验：{checksum.name} · {_sha256_of(installer)}")
     print("\n注意：版本号已改，但代码还没提交 —— 记得 git commit + push。")
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Potato Test 发布脚本")
     ap.add_argument("--bump", metavar="X.Y.Z", help="改版本号（三处一起改）")
+    ap.add_argument("--check", action="store_true", help="只做发布前检查（token、仓库、Release、资产）")
     ap.add_argument("--publish", action="store_true", help="发 Release 并上传安装包")
+    ap.add_argument("--replace", action="store_true", help="覆盖 Release 里已有的同名资产")
     ap.add_argument("--notes-file", help="更新说明（Markdown 文件，可选）")
     a = ap.parse_args()
 
     if a.bump:
         bump(a.bump)
+    if a.check:
+        preflight(require_installer=False)
     if a.publish:
-        notes = ""
         if a.notes_file:
             notes = Path(a.notes_file).read_text(encoding="utf-8")
-        publish(notes)
-    if not a.bump and not a.publish:
+        else:
+            notes = _default_notes(_read_version())
+        publish(notes, replace=a.replace)
+    if not (a.bump or a.check or a.publish):
         verify()
-        print("（什么都没做：用 --bump x.y.z 改版本，或 --publish 发布）")
+        print("什么都没做。用 --bump x.y.z、--check 或 --publish。")
     return 0
 
 

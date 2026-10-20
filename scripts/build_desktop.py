@@ -21,6 +21,7 @@
 
 from __future__ import annotations
 
+import argparse
 import os
 import shutil
 import subprocess
@@ -88,6 +89,14 @@ def _assert_embedding_model() -> None:
 
 
 def main() -> int:
+    ap = argparse.ArgumentParser(description="打包 Potato Test 桌面端")
+    ap.add_argument(
+        "--fast",
+        action="store_true",
+        help="增量构建：跳过 PyInstaller --clean，仅供本机调试；发版仍用完整构建",
+    )
+    args = ap.parse_args()
+
     _assert_embedding_model()  # 先查模型，别白跑 4 分钟打包
     dist = ROOT / "web" / "dist"
     if not (dist / "index.html").is_file():
@@ -106,7 +115,7 @@ def main() -> int:
         "-m",
         "PyInstaller",
         "--noconfirm",
-        "--clean",
+        *([] if args.fast else ["--clean"]),
         "--name",
         NAME,
         "--windowed",
@@ -177,7 +186,7 @@ def main() -> int:
         str(ROOT / "desktop.py"),
     ]
 
-    print("== 开始打包 ==")
+    print("== 开始打包 ==" + ("（增量 --fast）" if args.fast else "（完整 clean）"))
     print(" ".join(cmd))
     rc = subprocess.call(cmd, cwd=str(ROOT))
     if rc != 0:

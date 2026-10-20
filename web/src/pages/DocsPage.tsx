@@ -7,7 +7,6 @@ import { Badge, Button, Card, Input, PageHeader } from "../components/ui";
 import { RichTextEditor } from "../components/RichTextEditor";
 import { SourceViewer } from "../components/SourceViewer";
 import { InsightsPanel } from "../components/InsightsPanel";
-import { MermaidPreview } from "../components/MermaidPreview";
 import { Empty, PageSkeleton } from "../components/feedback";
 import { useErrorToast, useToast } from "../components/toast";
 
@@ -728,15 +727,8 @@ export function DocsPage() {
                 </details>
               )}
 
-              {/* ★ 流程图预览放**编辑器上面**（2026-10-12 用户反馈「流程图无法点开查看」）。
-                  原来它在编辑器下面，而流程图文档的正文是 20 多行 mermaid 源码，
-                  于是"打开流程图文档"看到的是满屏源码，图被挤到页面最底部
-                  （实测在 2000px 处）—— 用户以为打不开。
-                  放上面：切过去第一眼就是图，源码在下面等着改。 */}
               {/* ★ 内置文档在 AI 生成前本来就没有正文（后端补的是 id=0/html="" 占位）。
                   只靠编辑器占位符不够显眼：用户会以为页面或接口坏了。这里明说状态和下一步。 */}
-              <MermaidPreview html={html} />
-
               {viewMode === "source" && active.source_url ? (
                 <SourceViewer doc={active} />
               ) : (

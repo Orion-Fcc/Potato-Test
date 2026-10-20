@@ -24,7 +24,7 @@ import {
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Link, useNavigate } from "react-router-dom";
-import type { AuthUser, Project, ProjectGroup } from "../lib/api";
+import { api, type AuthUser, type Project, type ProjectGroup } from "../lib/api";
 import { setLang } from "../i18n";
 import { useAuth } from "../lib/auth";
 import { useCollapsedGroups } from "../lib/hooks";
@@ -312,6 +312,22 @@ export function Sidebar({
   const { authEnabled, sharedWorkspace, isAdmin, user } = useAuth();
   // 大系统分组的折叠状态（和项目页共用同一个 localStorage 键，两边一致）。
   const { collapsed: collapsedGroups, toggle: toggleGroup } = useCollapsedGroups();
+  // 版本号以后端 app/version.py 为唯一来源 —— 写死会随发版漂移（曾长期显示 v0.1）。
+  const [version, setVersion] = useState<string | null>(null);
+  useEffect(() => {
+    let alive = true;
+    api
+      .getVersion()
+      .then((r) => {
+        if (alive) setVersion(r.version);
+      })
+      .catch(() => {
+        // 取不到就不显示，宁可空着也不猜一个版本号。
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
   return (
     <aside
       className={clsx(
@@ -332,9 +348,11 @@ export function Sidebar({
         {!collapsed && (
           <>
             <span className="text-[15px] font-semibold tracking-tight text-ink-900">Potato Test</span>
-            <span className="ml-auto rounded-full border border-[var(--line)] px-1.5 py-px text-[10px] font-medium text-ink-400">
-              v0.1
-            </span>
+            {version && (
+              <span className="ml-auto rounded-full border border-[var(--line)] px-1.5 py-px text-[10px] font-medium text-ink-400">
+                v{version}
+              </span>
+            )}
           </>
         )}
       </Link>

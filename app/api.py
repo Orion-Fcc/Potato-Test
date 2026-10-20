@@ -243,6 +243,14 @@ def _expired(dt: datetime | None) -> bool:
 
 
 
+@public.get("/version")
+async def app_version() -> dict:
+    """当前后端版本号（唯一来源 app/version.py）。登录页与侧栏都要用，故公开。"""
+    from app.version import APP_VERSION
+
+    return {"version": APP_VERSION}
+
+
 @public.get("/config")
 async def public_config() -> dict:
     s = get_settings()

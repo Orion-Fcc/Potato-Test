@@ -1194,6 +1194,8 @@ export type AppUpdateInstallState = {
 };
 
 export const api = {
+  /** 后端版本号（唯一来源 app/version.py）。公开接口，未登录也能取。 */
+  getVersion: (o?: Opts) => req<{ version: string }>("/version", o),
   listProjects: (o?: Opts) => req<Project[]>("/projects", o),
   /** 单个项目详情。形状与 listProjects 的每一项逐字段一致（后端共用同一个 helper）。 */
   getProject: (pid: number, o?: Opts) => req<Project>(`/projects/${pid}`, o),

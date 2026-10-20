@@ -19,6 +19,7 @@ import {
   Heading2,
   Heading3,
   Highlighter,
+  GitBranch,
   ImagePlus,
   Italic,
   Link2,
@@ -35,6 +36,7 @@ import {
 import { useCallback, useEffect, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import { useErrorToast } from "./toast";
+import { MermaidNode } from "./workspace/MermaidNodeView";
 
 // 把自定义命令补进 TipTap 的类型里，这样 `editor.chain().setFontSize(...)` 有类型检查。
 // 不做这一步的话调用处只能 `as any`，而 `as any` 会把"命令名打错"这类错误放到运行时。
@@ -109,6 +111,8 @@ export function RichTextEditor({
   onUploadImage,
   placeholder,
   editable = true,
+  onReady,
+  onSelectionChange,
 }: {
   value: string;
   onChange: (html: string) => void;
@@ -118,17 +122,29 @@ export function RichTextEditor({
   /** false = 只读（2026-10-12）。用在"只有我能改"以外的场景；
    *  AI 只读这件事本身仍由服务端拦，这里只是不让人误以为还能编辑。 */
   editable?: boolean;
+  /** 编辑器实例就绪（2026-10-20）。工作区要让 AI 侧栏能写入正文。 */
+  onReady?: (editor: Editor) => void;
+  /** 选区变化（2026-10-20）。AI 侧栏据此知道用户高亮了哪一段。 */
+  onSelectionChange?: (sel: { from: number; to: number; text: string; empty: boolean }) => void;
 }) {
   const { t } = useTranslation();
   const fail = useErrorToast();
   const fileRef = useRef<HTMLInputElement>(null);
+  // 回调每次渲染都会新建；用 ref 取最新值，避免 effect 反复注册/注销。
+  const readyRef = useRef(onReady);
+  readyRef.current = onReady;
+  const selRef = useRef(onSelectionChange);
+  selRef.current = onSelectionChange;
 
   const editor = useEditor({
     extensions: [
+      // 先注册 Mermaid 节点：它的 `pre.tp-mermaid` 解析优先级高于 CodeBlock。
+      MermaidNode,
       StarterKit.configure({
         heading: { levels: [1, 2, 3, 4] },
-        // 代码块在需求文档里几乎用不到，而它会吃掉 Tab/回车，容易让人卡住。
-        codeBlock: false,
+        // 保留代码块：AI 的 Markdown 建议里可能出现围栏代码，插入时要能
+        // 无损落成 <pre><code>，而不是被解析器丢掉。
+        codeBlock: { exitOnTripleEnter: true, HTMLAttributes: { class: "tp-code-block" } },
       }),
       FontSize,
       Underline,
@@ -154,7 +170,7 @@ export function RichTextEditor({
       attributes: {
         // 富文本编辑区的最小高度与排版。用 class 而不是内联样式，
         // 这样它和只读渲染共用同一套 `.tp-prose` 排版（见 index.css）。
-        class: "tp-prose min-h-[420px] px-5 py-4 outline-none",
+        class: "tp-prose tp-editor-pad min-h-[420px] py-6 outline-none",
       },
     },
     onUpdate: ({ editor: e }) => onChange(e.getHTML()),
@@ -197,6 +213,30 @@ export function RichTextEditor({
     if (!editor) return;
     if (editor.isEditable !== editable) editor.setEditable(editable);
   }, [editor, editable]);
+
+  // ★ 把编辑器实例交给父组件（2026-10-20）。AI 侧栏的「替换 / 插入」需要它。
+  useEffect(() => {
+    if (editor) readyRef.current?.(editor);
+  }, [editor]);
+
+  // ★ 选区变化上报（2026-10-20）。ProseMirror 的 textBetween 只取纯文本，
+  //  用换行作块级分隔 —— 模型需要的是"用户圈了哪段话"，不是 HTML。
+  useEffect(() => {
+    if (!editor) return;
+    const handle = () => {
+      const { from, to } = editor.state.selection;
+      selRef.current?.({
+        from,
+        to,
+        text: editor.state.doc.textBetween(from, to, "\n"),
+        empty: from === to,
+      });
+    };
+    editor.on("selectionUpdate", handle);
+    return () => {
+      editor.off("selectionUpdate", handle);
+    };
+  }, [editor]);
 
   const insertImage = useCallback(
     async (file: File) => {
@@ -379,6 +419,21 @@ function Toolbar({
       </button>
       <button className={btn} title={t("分割线")} onClick={() => editor.chain().focus().setHorizontalRule().run()}>
         <Minus className="h-4 w-4" />
+      </button>
+      <button
+        className={btn}
+        title={t("插入流程图")}
+        onClick={() =>
+          editor
+            .chain()
+            .focus()
+            .insertContent(
+              '<pre class="tp-mermaid">flowchart TD\n  A["开始"] --> B["结束"]</pre>',
+            )
+            .run()
+        }
+      >
+        <GitBranch className="h-4 w-4" />
       </button>
       {sep}
 

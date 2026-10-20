@@ -13,7 +13,6 @@ import { RouteFallback } from "./components/ui";
 // radix, papaparse) only load when the user actually visits that route.
 const AdminSettingsPage = lazy(() => import("./pages/AdminSettingsPage").then((m) => ({ default: m.AdminSettingsPage })));
 const AdminUsersPage = lazy(() => import("./pages/AdminUsersPage").then((m) => ({ default: m.AdminUsersPage })));
-const AssistantPage = lazy(() => import("./pages/AssistantPage").then((m) => ({ default: m.AssistantPage })));
 const CasesPage = lazy(() => import("./pages/CasesPage").then((m) => ({ default: m.CasesPage })));
 const ComparePage = lazy(() => import("./pages/ComparePage").then((m) => ({ default: m.ComparePage })));
 const InvitePage = lazy(() => import("./pages/InvitePage").then((m) => ({ default: m.InvitePage })));
@@ -21,7 +20,6 @@ const IssuesPage = lazy(() => import("./pages/IssuesPage").then((m) => ({ defaul
 const LoginPage = lazy(() => import("./pages/LoginPage").then((m) => ({ default: m.LoginPage })));
 const MembersPage = lazy(() => import("./pages/MembersPage").then((m) => ({ default: m.MembersPage })));
 const OverviewPage = lazy(() => import("./pages/OverviewPage").then((m) => ({ default: m.OverviewPage })));
-const DocsPage = lazy(() => import("./pages/DocsPage").then((m) => ({ default: m.DocsPage })));
 const ProposalsPage = lazy(() =>
   import("./pages/ProposalsPage").then((m) => ({ default: m.ProposalsPage })),
 );
@@ -32,6 +30,7 @@ const RunReport = lazy(() => import("./pages/RunReport").then((m) => ({ default:
 const RunsPage = lazy(() => import("./pages/RunsPage").then((m) => ({ default: m.RunsPage })));
 const SuitesPage = lazy(() => import("./pages/SuitesPage").then((m) => ({ default: m.SuitesPage })));
 const SettingsPage = lazy(() => import("./pages/SettingsPage").then((m) => ({ default: m.SettingsPage })));
+const WorkspacePage = lazy(() => import("./pages/WorkspacePage").then((m) => ({ default: m.WorkspacePage })));
 
 const S = (node: React.ReactNode) => <Suspense fallback={<RouteFallback />}>{node}</Suspense>;
 
@@ -105,9 +104,9 @@ const router = createBrowserRouter([
       { path: "/admin/settings", element: <RequireAdmin>{S(<AdminSettingsPage />)}</RequireAdmin> },
       { path: "/projects/:pid", element: <Navigate to="overview" replace /> },
       { path: "/projects/:pid/overview", element: S(<OverviewPage />) },
-      { path: "/projects/:pid/docs", element: S(<DocsPage />) },
+      { path: "/projects/:pid/docs", element: S(<WorkspacePage />) },
       { path: "/projects/:pid/proposals", element: S(<ProposalsPage />) },
-      { path: "/projects/:pid/assistant", element: S(<AssistantPage />) },
+      { path: "/projects/:pid/assistant", element: S(<WorkspacePage />) },
       { path: "/projects/:pid/cases", element: S(<CasesPage />) },
       { path: "/projects/:pid/suites", element: S(<SuitesPage />) },
       { path: "/projects/:pid/runs", element: S(<RunsPage />) },

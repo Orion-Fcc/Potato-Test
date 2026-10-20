@@ -1948,6 +1948,279 @@ async def project_assistant(pid: int, body: AssistantIn, request: Request) -> di
     return await assistant_turn(pid, body.message, body.history, body.attachments)
 
 
+# ---------------------------------------------------------------------------
+# 协同工作区流式接口（2026-10-20）
+# ---------------------------------------------------------------------------
+#
+# 为什么单独加流式端点而不是复用 /assistant：
+#   * 前端侧栏要在模型生成时逐字显示，普通 POST 只能等完整回复；
+#   * 这两个端点**不写数据库** —— 生成结果只是建议，用户点「替换 / 插入」
+#     后前端才走原来的 PUT /projects/{pid}/docs 保存。生成中途失败、
+#     用户点停止，都不会留下半截文档。
+#
+# 为什么流程图单独一路：它要的是 Mermaid 源码，而不是可直接写入正文的 HTML，
+# 两者的系统提示词、校验、产物格式完全不同。
+
+_ASSIST_STREAM_SYSTEM = """你是经验丰富的产品与需求文档写作助手，正在一个软件项目的工作区里和用户协同写作。
+
+## 你要做什么
+
+根据用户的要求，直接给出**可以放进文档正文**的内容。
+
+## 铁律
+
+1. **只依据**下面提供的项目资料（需规原文、章节标题、当前文档、用户选中文字）。
+   资料里没有的信息不要编造；不确定时明确说"资料中没有提到"，并给出需要补充什么。
+2. 用**简体中文**写作，语气专业、简洁，不要客套话，不要复述用户的问题。
+3. 输出直接可用的正文：**不要**输出整篇 `<html>`/`<body>`，不要输出代码围栏包裹整段内容。
+   需要强调时可以用少量 Markdown（`**粗体**`、`- 列表`、`### 小标题`），前端会转换成富文本。
+4. 如果用户要求修改选中的文字，就只重写这部分，保持与上下文一致。
+5. 涉及流程时，用编号步骤或列表描述清楚"谁在什么条件下做什么"。
+6. 不要输出你的思考过程，不要写"以下是……"这类引导语，直接给结果。"""
+
+_FLOW_STREAM_SYSTEM = """你是资深需求分析师，负责把项目需求文档画成 **Mermaid 流程图**。
+
+## 铁律
+
+1. **只画文档里写了的。** 文档没说"驳回"就不要画驳回分支。宁可少画两条线，
+   也不要补一个文档里不存在的状态 —— 那种图看起来专业，但它是假的。
+2. **只输出 Mermaid 源码**：不要 JSON，不要 ``` 围栏，不要解释文字，不要前后缀。
+3. 用**中文**标注节点。
+4. 第一行必须是 `flowchart TD`（从上到下）或 `flowchart LR`（从左到右）。
+5. 节点 ID 只用 **ASCII 字母数字**（`A`、`B1`、`step1`）；中文只能出现在标签里。
+6. 标签一律用方括号并加引号：`A["提交申请"]`。标签里不要用 `()`、`[]`、`{}`，
+   会和 Mermaid 语法冲突。
+7. 判断节点用花括号：`B{"是否通过"}`；连线 `A --> B`；
+   带标签的连线 `A -->|"通过"| B`；驳回这类回边 `B -->|"驳回"| A`。
+8. 需要时用 `subgraph 申请人` … `end` 分组。
+9. **不要**写 `%%` 注释，不要写 `classDef`/`style`/`linkStyle`。
+10. 节点总数控制在 **6~18 个**。一张图只画一条主线。"""
+
+_FLOW_DEFAULT_INSTRUCTION = "请根据项目需求文档，画出一张主要业务流程图。"
+
+
+def _stream_json(payload: dict[str, Any]) -> str:
+    """SSE 的 data 必须是字符串；中文不转义，前端才能直接显示。"""
+    import json
+
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def _clip_text(value: Any, limit: int) -> str:
+    return str(value or "").strip()[: max(0, limit)]
+
+
+def _strip_mermaid_fences(src: str) -> str:
+    """模型偶尔无视"不要围栏"，这里兜底剥掉 ```mermaid … ```。"""
+    text = src or ""
+    m = re.search(r"```(?:mermaid)?\s*\n?(.*?)```", text, re.S | re.I)
+    return (m.group(1) if m else text).strip()
+
+
+@router.post("/projects/{pid}/assistant/stream")
+async def project_assistant_stream(
+    pid: int, body: dict[str, Any], request: Request
+) -> EventSourceResponse:
+    """工作区右侧 AI 侧栏：流式生成一段可写入文档的建议。
+
+    事件：`token` 增量文本 → 结束 `done`（带模型名）；失败 `error`（中文提示）。
+    与 `/assistant` 的区别是这里**不执行任何工具、不写数据库**。
+    """
+    await _project_access(request, pid, "viewer")
+    from app import spec_overview, specgen
+    from app.llm_chat import chat_stream_with_pool
+
+    message = _clip_text(body.get("message"), 8000)
+    if not message:
+        raise HTTPException(400, "message 不能为空")
+
+    history: list[dict] = []
+    for item in (body.get("history") or [])[-12:]:
+        if not isinstance(item, dict):
+            continue
+        role = str(item.get("role") or "")
+        if role not in ("user", "assistant"):
+            continue
+        text = _clip_text(item.get("content"), 4000)
+        if text:
+            history.append({"role": role, "content": text})
+
+    doc = body.get("doc") if isinstance(body.get("doc"), dict) else {}
+    doc_kind = _clip_text(doc.get("kind"), 40) or "custom"
+    doc_title = _clip_text(doc.get("title"), 200) or "未命名文档"
+    selection = _clip_text(body.get("selection"), 4000)
+    content = _clip_text(body.get("content"), 12000)
+
+    headings: list[str] = []
+    try:
+        headings = await specgen.list_headings(pid)
+    except Exception:  # noqa: BLE001
+        headings = []
+    try:
+        recalled = await spec_overview._recall_text(pid, "flow", limit=4)
+    except Exception:  # noqa: BLE001
+        recalled = ""
+
+    kind_label = {"overview": "项目总览", "flow": "流程图", "spec_source": "需求原文", "custom": "自定义文档"}.get(
+        doc_kind, doc_kind
+    )
+    parts = [
+        f"## 当前文档\n类型：{kind_label}\n标题：{doc_title}",
+    ]
+    if headings:
+        listing = "\n".join(f"{i + 1}. {h}" for i, h in enumerate(headings[:60]))
+        parts.append(f"## 需规章节标题（共 {len(headings)} 个）\n{listing}")
+    if recalled:
+        parts.append(f"## 相关资料原文\n{recalled}")
+    if content:
+        parts.append(f"## 当前文档正文\n{content}")
+    if selection:
+        parts.append(f"## 用户选中的文字\n{selection}")
+    parts.append(f"## 用户要求\n{message}")
+
+    messages = [
+        {"role": "system", "content": _ASSIST_STREAM_SYSTEM},
+        *history,
+        {"role": "user", "content": "\n\n".join(parts)},
+    ]
+
+    async def gen() -> Any:
+        model = ""
+        try:
+            async for ev in chat_stream_with_pool(
+                role="assistant",
+                messages=messages,
+                max_tokens=2000,
+                timeout=180.0,
+            ):
+                if ev.model:
+                    model = ev.model
+                if ev.text:
+                    yield {"event": "token", "data": _stream_json({"text": ev.text})}
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            yield {
+                "event": "error",
+                "data": _stream_json({"message": f"生成失败：{_clip_text(exc, 300)}"}),
+            }
+            return
+        yield {"event": "done", "data": _stream_json({"model": model})}
+
+    return EventSourceResponse(gen())
+
+
+@router.post("/projects/{pid}/docs/flow/stream")
+async def project_doc_flow_stream(
+    pid: int, body: dict[str, Any], request: Request
+) -> EventSourceResponse:
+    """流程图文档：根据需规流式生成 Mermaid 源码。
+
+    只在最后 `done` 里给出**校验通过**的完整源码；中途的 token 仅用于前端
+    显示"正在生成"。校验失败不会替换用户文档，而是发中文 `error`。
+    """
+    await _project_access(request, pid, "editor")
+    from app import spec_overview, specgen
+    from app.llm_chat import chat_stream_with_pool
+
+    instruction = _clip_text(body.get("instruction"), 4000) or _FLOW_DEFAULT_INSTRUCTION
+    current = _clip_text(body.get("current"), 12000)
+    selection = _clip_text(body.get("selection"), 4000)
+
+    headings: list[str] = []
+    intro = ""
+    recalled = ""
+    try:
+        headings = await specgen.list_headings(pid)
+    except Exception:  # noqa: BLE001
+        headings = []
+    if not headings:
+        async def empty_gen() -> Any:
+            yield {
+                "event": "error",
+                "data": _stream_json(
+                    {"message": "这个项目还没有可用的需规内容，先上传需求文档再生成流程图。"}
+                ),
+            }
+
+        return EventSourceResponse(empty_gen())
+
+    try:
+        intro = await specgen.document_intro(pid, 2000)
+    except Exception:  # noqa: BLE001
+        intro = ""
+    try:
+        recalled = await spec_overview._recall_text(pid, "flow")
+    except Exception:  # noqa: BLE001
+        recalled = ""
+
+    listing = "\n".join(f"{i + 1}. {h}" for i, h in enumerate(headings[:80]))
+    parts = [f"## 项目背景\n{intro or '（未取到文档开头）'}"]
+    parts.append(f"## 章节标题（共 {len(headings)} 个）\n{listing}")
+    if recalled:
+        parts.append(f"## 相关需求原文\n{recalled}")
+    if current:
+        parts.append(f"## 当前流程图的 Mermaid 源码\n{current}")
+    if selection:
+        parts.append(f"## 用户选中的内容（优先参考）\n{selection}")
+    parts.append(f"## 用户要求\n{instruction}")
+    parts.append("直接输出 Mermaid 源码，不要 JSON、不要代码围栏、不要解释。")
+
+    messages = [
+        {"role": "system", "content": _FLOW_STREAM_SYSTEM},
+        {"role": "user", "content": "\n\n".join(parts)},
+    ]
+
+    async def gen() -> Any:
+        acc = ""
+        try:
+            async for ev in chat_stream_with_pool(
+                role="docgen",
+                messages=messages,
+                max_tokens=2000,
+                temperature=0.2,
+                timeout=120.0,
+            ):
+                if ev.text:
+                    acc += ev.text
+                    yield {"event": "token", "data": _stream_json({"text": ev.text})}
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            yield {
+                "event": "error",
+                "data": _stream_json({"message": f"生成失败：{_clip_text(exc, 300)}"}),
+            }
+            return
+
+        src = spec_overview.normalize_mermaid(_strip_mermaid_fences(acc))
+        ok, why = spec_overview.mermaid_looks_renderable(src)
+        if not ok:
+            yield {
+                "event": "error",
+                "data": _stream_json(
+                    {
+                        "message": (
+                            f"这次生成的流程图不完整（{why}），没有替换你的文档。"
+                            "可以直接重试，或在要求里补充更具体的流程步骤。"
+                        )
+                    }
+                ),
+            }
+            return
+        yield {
+            "event": "done",
+            "data": _stream_json(
+                {
+                    "mermaid": src,
+                    "note": f"已根据 {len(headings)} 个章节标题和需规原文生成；应用后记得保存。",
+                }
+            ),
+        }
+
+    return EventSourceResponse(gen())
+
+
 @router.get("/projects/{pid}/knowledge/formats")
 async def knowledge_formats(pid: int, request: Request) -> dict:
     """**后端实际支持**的需规文件格式（2026-10-12）。

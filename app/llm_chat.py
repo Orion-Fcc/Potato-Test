@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -42,6 +43,21 @@ class ChatResult:
     def json(self, default: Any = None) -> Any:
         """把 text 当 JSON 解析（容错：去代码块、截取第一个完整对象）。"""
         return extract_json(self.text, default=default)
+
+
+@dataclass
+class ChatStreamEvent:
+    """One chunk of a streaming reply.
+
+    The event with ``done=True`` carries usage/model/protocol only. Text always
+    arrives in ``text``; concatenating all text chunks gives the full reply.
+    """
+
+    text: str = ""
+    done: bool = False
+    usage: dict[str, int] = field(default_factory=dict)
+    model: str = ""
+    protocol: str = ""
 
 
 def empty_usage() -> dict[str, int]:
@@ -218,6 +234,104 @@ async def chat_with_pool(
             ), prof
         except Exception as exc:  # noqa: BLE001
             if _llm._is_rate_limited(exc):
+                last = exc
+                continue
+            raise
+    if last is not None:
+        raise last
+    raise RuntimeError("llm: 池里没有任何可用 profile")
+
+
+# ---------------------------------------------------------------------------
+# Streaming facade (2026-10-20)
+# ---------------------------------------------------------------------------
+#
+# Kept separate from chat(): a stream yields many chunks, a non-stream call
+# yields one result; forcing both through one return type would make every
+# existing caller test "is this a stream?". Both share the same message and
+# protocol selection logic.
+
+async def chat_stream(
+    profile=None,
+    *,
+    role: str | None = None,
+    messages: list[dict] | None = None,
+    system: str | None = None,
+    user: Any = None,
+    content: Any = None,
+    json_mode: bool = False,
+    temperature: float | None = None,
+    max_tokens: int | None = None,
+    timeout: float = 60.0,
+) -> AsyncIterator[ChatStreamEvent]:
+    """Protocol-agnostic streaming completion.
+
+    Failure is raised **during iteration**, not at call time. Callers must wrap
+    the ``async for`` in try/except.
+    """
+    from app import llm as _llm
+
+    if profile is None:
+        profile = await _llm.role_profile(role) if role else await _llm.active_profile()
+    caps = await capabilities_for(profile)
+
+    if messages is None:
+        msgs: list[dict] = []
+        if system:
+            msgs.append({"role": "system", "content": system})
+        body = content if content is not None else user
+        msgs.append({"role": "user", "content": body if body is not None else ""})
+        messages = msgs
+
+    if caps.protocol == "anthropic":
+        gen = _chat_anthropic_stream(profile, caps, messages, json_mode, temperature, max_tokens, timeout)
+    elif caps.protocol == "google":
+        gen = _chat_google_stream(profile, caps, messages, json_mode, temperature, max_tokens, timeout)
+    elif caps.protocol == "ollama":
+        gen = _chat_openai_stream(
+            profile, caps, messages, json_mode, temperature, max_tokens, timeout,
+            force_base_url=_ollama_openai_base(profile.base_url),
+        )
+    else:
+        gen = _chat_openai_stream(profile, caps, messages, json_mode, temperature, max_tokens, timeout)
+    async for ev in gen:
+        yield ev
+
+
+async def chat_stream_with_pool(
+    *,
+    role: str | None = None,
+    messages: list[dict] | None = None,
+    system: str | None = None,
+    user: Any = None,
+    content: Any = None,
+    json_mode: bool = False,
+    temperature: float | None = None,
+    max_tokens: int | None = None,
+    timeout: float = 60.0,
+) -> AsyncIterator[ChatStreamEvent]:
+    """Stream through the profile pool; switch profiles only before first text.
+
+    Switching after text has been sent would splice two models' output together,
+    which reads worse than an error. So only a pre-first-token 429 rotates.
+    """
+    from app import llm as _llm
+
+    pool = await (_llm.pool_for_role(role) if role else _llm.load_pool())
+    last: Exception | None = None
+    for prof in pool:
+        started = False
+        try:
+            async for ev in chat_stream(
+                prof, messages=messages, system=system, user=user, content=content,
+                json_mode=json_mode, temperature=temperature, max_tokens=max_tokens, timeout=timeout,
+            ):
+                if ev.text:
+                    started = True
+                yield ev
+            return
+        except Exception as exc:  # noqa: BLE001
+            if not started and _llm._is_rate_limited(exc):
                 last = exc
                 continue
             raise
@@ -466,5 +580,212 @@ async def _chat_google(
         try:
             await client.aio.aclose()
         except Exception:  # noqa: BLE001 — 关闭失败不影响结果
+            pass
+        await http.aclose()
+
+
+# ---------------------------------------------------------------------------
+# Streaming implementations per protocol
+# ---------------------------------------------------------------------------
+
+async def _chat_openai_stream(
+    profile, caps: Capabilities, messages: list[dict], json_mode: bool,
+    temperature: float | None, max_tokens: int | None, timeout: float,
+    force_base_url: str | None = None,
+) -> AsyncIterator[ChatStreamEvent]:
+    from openai import AsyncOpenAI
+
+    s = get_settings()
+    msgs = [dict(m) for m in messages]
+    rf: dict | None = None
+    if json_mode:
+        if caps.json_schema:
+            rf = {"type": "json_object"} if caps.json_object else None
+        elif caps.json_object:
+            rf = {"type": "json_object"}
+        if rf is None:
+            _append_hint(msgs, _JSON_ONLY_HINT)
+
+    body: dict[str, Any] = {"model": profile.effective_model, "messages": msgs}
+    if temperature is not None:
+        body["temperature"] = temperature
+    if max_tokens is not None:
+        body["max_tokens"] = max_tokens
+    if rf is not None:
+        body["response_format"] = rf
+
+    http = httpx.AsyncClient(
+        verify=s.gateway_verify_ssl, timeout=httpx.Timeout(timeout), trust_env=not s.gateway_ignore_proxy
+    )
+    client = AsyncOpenAI(
+        base_url=force_base_url or profile.base_url,
+        api_key=profile.api_key or "not-needed",
+        http_client=http,
+        max_retries=s.llm_max_retries,
+    )
+    usage = empty_usage()
+    try:
+        # No stream_options: many compatible gateways reject it with 400.
+        # Missing usage only zeroes the token ledger; text is unaffected.
+        stream = await client.chat.completions.create(**body, stream=True)
+        async for chunk in stream:
+            choices = getattr(chunk, "choices", None) or []
+            if not choices:
+                u = getattr(chunk, "usage", None)
+                if u is not None and not usage.get("calls"):
+                    usage = _usage_from_openai(chunk)
+                continue
+            delta = getattr(choices[0], "delta", None)
+            text = getattr(delta, "content", None) if delta is not None else None
+            if text:
+                yield ChatStreamEvent(text=text)
+        yield ChatStreamEvent(
+            done=True, usage=usage, model=profile.effective_model, protocol="openai",
+        )
+    finally:
+        await client.close()
+
+
+async def _chat_anthropic_stream(
+    profile, caps: Capabilities, messages: list[dict], json_mode: bool,
+    temperature: float | None, max_tokens: int | None, timeout: float,
+) -> AsyncIterator[ChatStreamEvent]:
+    from anthropic import AsyncAnthropic
+
+    s = get_settings()
+    system, rest = _split_system(messages)
+    if json_mode:
+        system = (system + _JSON_ONLY_HINT).strip()
+    conv: list[dict] = []
+    for m in rest:
+        conv.append({"role": m.get("role", "user"), "content": _to_anthropic_content(m.get("content"))})
+    kwargs: dict[str, Any] = {
+        "model": profile.effective_model,
+        "max_tokens": max_tokens or s.gateway_max_tokens or 4096,
+        "messages": conv,
+    }
+    if system:
+        kwargs["system"] = system
+    if temperature is not None:
+        kwargs["temperature"] = temperature
+
+    http = httpx.AsyncClient(
+        verify=s.gateway_verify_ssl, timeout=httpx.Timeout(timeout), trust_env=not s.gateway_ignore_proxy
+    )
+    client = AsyncAnthropic(
+        api_key=profile.api_key, base_url=profile.base_url or None,
+        http_client=http, max_retries=s.llm_max_retries,
+    )
+    try:
+        async with client.messages.stream(**kwargs) as stream:
+            async for text in stream.text_stream:
+                if text:
+                    yield ChatStreamEvent(text=text)
+            final = await stream.get_final_message()
+        u = getattr(final, "usage", None)
+        prompt = int(getattr(u, "input_tokens", 0) or 0) if u else 0
+        completion = int(getattr(u, "output_tokens", 0) or 0) if u else 0
+        yield ChatStreamEvent(
+            done=True,
+            usage={
+                "prompt": prompt, "completion": completion, "total": prompt + completion,
+                "cached": int(getattr(u, "cache_read_input_tokens", 0) or 0) if u else 0,
+                "calls": 1,
+            },
+            model=profile.effective_model, protocol="anthropic",
+        )
+    finally:
+        await client.close()
+
+
+def _google_chunk_text(chunk: Any) -> str:
+    text = getattr(chunk, "text", None)
+    if isinstance(text, str):
+        return text
+    out = ""
+    for c in getattr(chunk, "candidates", None) or []:
+        for part in getattr(getattr(c, "content", None), "parts", None) or []:
+            out += getattr(part, "text", "") or ""
+    return out
+
+
+async def _chat_google_stream(
+    profile, caps: Capabilities, messages: list[dict], json_mode: bool,
+    temperature: float | None, max_tokens: int | None, timeout: float,
+) -> AsyncIterator[ChatStreamEvent]:
+    from google import genai
+    from google.genai import types as gtypes
+
+    s = get_settings()
+    system, rest = _split_system(messages)
+    contents: list[Any] = []
+    for m in rest:
+        parts: list[Any] = []
+        content = m.get("content")
+        if isinstance(content, str):
+            parts.append(gtypes.Part.from_text(text=content))
+        else:
+            for p in content if isinstance(content, list) else []:
+                if not isinstance(p, dict):
+                    continue
+                if p.get("type") == "text":
+                    parts.append(gtypes.Part.from_text(text=p.get("text", "")))
+                elif p.get("type") == "image_url":
+                    imgs = _image_parts([p])
+                    if imgs and imgs[0].get("data"):
+                        import base64
+
+                        parts.append(
+                            gtypes.Part.from_bytes(
+                                data=base64.b64decode(imgs[0]["data"]), mime_type=imgs[0]["mime"]
+                            )
+                        )
+        contents.append(gtypes.Content(role="user", parts=parts or [gtypes.Part.from_text(text="")]))
+
+    cfg_kwargs: dict[str, Any] = {}
+    if system:
+        cfg_kwargs["system_instruction"] = system
+    if temperature is not None:
+        cfg_kwargs["temperature"] = temperature
+    if max_tokens is not None:
+        cfg_kwargs["max_output_tokens"] = max_tokens
+    if json_mode:
+        cfg_kwargs["response_mime_type"] = "application/json"
+
+    http = httpx.AsyncClient(
+        verify=s.gateway_verify_ssl, timeout=httpx.Timeout(timeout), trust_env=not s.gateway_ignore_proxy
+    )
+    base = (profile.base_url or "").strip().rstrip("/")
+    http_options = gtypes.HttpOptions(
+        httpx_async_client=http, timeout=int(timeout * 1000), base_url=base or None,
+    )
+    client = genai.Client(api_key=profile.api_key, http_options=http_options)
+    usage = empty_usage()
+    try:
+        stream = await client.aio.models.generate_content_stream(
+            model=profile.effective_model,
+            contents=contents,
+            config=gtypes.GenerateContentConfig(**cfg_kwargs),
+        )
+        async for chunk in stream:
+            text = _google_chunk_text(chunk)
+            if text:
+                yield ChatStreamEvent(text=text)
+            um = getattr(chunk, "usage_metadata", None)
+            if um is not None:
+                prompt = int(getattr(um, "prompt_token_count", 0) or 0)
+                completion = int(getattr(um, "candidates_token_count", 0) or 0)
+                usage = {
+                    "prompt": prompt, "completion": completion, "total": prompt + completion,
+                    "cached": int(getattr(um, "cached_content_token_count", 0) or 0),
+                    "calls": 1,
+                }
+        yield ChatStreamEvent(
+            done=True, usage=usage, model=profile.effective_model, protocol="google",
+        )
+    finally:
+        try:
+            await client.aio.aclose()
+        except Exception:  # noqa: BLE001 — close failure must not mask the result
             pass
         await http.aclose()

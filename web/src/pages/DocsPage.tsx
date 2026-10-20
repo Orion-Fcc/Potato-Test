@@ -1,10 +1,12 @@
 import { ExternalLink, FileText, GitBranch, Loader2, Lock, Plus, RefreshCw, Save, Sparkles, Trash2, Unlock, Upload } from "lucide-react";
+import type { Editor } from "@tiptap/react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useParams } from "react-router-dom";
 import { api, type KnowledgeFormats, type ProjectDoc, type VerifiedCoverage } from "../lib/api";
-import { Badge, Button, Card, Input, PageHeader } from "../components/ui";
+import { Badge, Button, Card, Input } from "../components/ui";
 import { RichTextEditor } from "../components/RichTextEditor";
+import { EMPTY_SELECTION, useWorkspace, type SelectionInfo } from "../state/WorkspaceContext";
 import { SourceViewer } from "../components/SourceViewer";
 import { InsightsPanel } from "../components/InsightsPanel";
 import { Empty, PageSkeleton } from "../components/feedback";
@@ -231,6 +233,87 @@ export function DocsPage() {
     setDirty(false);
   }, [active]);
 
+  // 工作区状态（2026-10-20）：AI 侧栏要实时知道"现在编辑哪份文档、用户选了哪段"。
+  // 正文不逐键推给 Context —— getContext 从 ref 现取，避免长文档每敲一个字
+  // 就让整棵工作区树重渲染。
+  const { setDoc, setSelection, apiRef, flowTriggerRef } = useWorkspace();
+  const editorRef = useRef<Editor | null>(null);
+  const lastSelRef = useRef<SelectionInfo>(EMPTY_SELECTION);
+  const htmlRef = useRef(html);
+  htmlRef.current = html;
+  const activeRef = useRef<ProjectDoc | null>(active);
+  activeRef.current = active;
+
+  useEffect(() => {
+    setDoc(active ? { id: active.id, kind: active.kind, title } : null);
+  }, [active, title, setDoc]);
+
+  // 切文档时清掉上一份的选区 —— 否则侧栏会把旧文档的字数当成新文档的上下文。
+  useEffect(() => {
+    lastSelRef.current = EMPTY_SELECTION;
+    setSelection(EMPTY_SELECTION);
+  }, [active?.id, active?.kind, setSelection]);
+
+  // 侧栏的写入通道。注册一次，用 ref 取实时值。
+  useEffect(() => {
+    const write = (next: string) => {
+      const ed = editorRef.current;
+      if (!ed) {
+        setHtml(next);
+      } else {
+        // 用「全选 + 插入」而不是 setContent：前者走正常的 ProseMirror 事务，
+        // 整篇替换后仍可 Ctrl+Z 撤销，也不会清空撤销历史。
+        const ok = ed.chain().focus().selectAll().insertContent(next).run();
+        if (!ok) ed.commands.setContent(next, { emitUpdate: false });
+        setHtml(ed.getHTML());
+      }
+      setDirty(true);
+    };
+    apiRef.current = {
+      getContext: () => ({
+        doc: activeRef.current
+          ? {
+              id: activeRef.current.id,
+              kind: activeRef.current.kind,
+              title: activeRef.current.title,
+            }
+          : null,
+        html: htmlRef.current,
+        selection: lastSelRef.current,
+      }),
+      replaceContent: write,
+      insertContent: (next: string) => {
+        const ed = editorRef.current;
+        if (!ed || activeRef.current?.kind === "flow") return false;
+        // 取编辑器实时选区，而不是缓存的最后一次选区：用户点侧栏输入框后
+        // ProseMirror 的 selection 仍然保留，而缓存可能是旧文档/旧位置。
+        const pos = Math.min(ed.state.selection.to, ed.state.doc.content.size);
+        // 传 HTML 字符串给 insertContentAt，TipTap 会解析成节点（标题、列表、
+        // 加粗、表格等），不是 insertText 的纯文本。updateSelection 让光标
+        // 落到插入内容末尾，用户可以直接接着改。
+        const ok = ed
+          .chain()
+          .focus()
+          .insertContentAt(pos, next, { updateSelection: true })
+          .run();
+        if (!ok) return false;
+        setHtml(ed.getHTML());
+        setDirty(true);
+        return true;
+      },
+    };
+    return () => {
+      apiRef.current = null;
+    };
+  }, [apiRef]);
+
+  const handleSelection = useCallback((sel: SelectionInfo) => {
+    // 拖拽/键入过程中会有空选区；保留最后一次**非空**选区，
+    // 这样用户选中一段、再点侧栏输入框时 AI 仍知道他说的是哪段。
+    if (!sel.empty && sel.text.trim()) lastSelRef.current = sel;
+    setSelection(sel);
+  }, [setSelection]);
+
   // 上传需规 / 资料（2026-10-13）：同时走两条路 —— 知识库（AI 检索分块）+ 一份项目文档
   // （和别的文档一样可读可改）。默认「允许助手修改」，上传后可在该文档上随时切换。
   const onUpload = async (list: FileList | null) => {
@@ -419,108 +502,141 @@ export function DocsPage() {
   };
 
   return (
-    <div className="space-y-4">
-      <PageHeader
-        title={t("Project Docs")}
-        subtitle={t("项目说明与上传的资料都在左边；每一份都可以像 Word 一样直接编辑。")}
-        actions={
-          <>
-            <Button variant="outline" onClick={addCustom}>
-              <Plus className="h-4 w-4" />
-              {t("New document")}
-            </Button>
-            <Button onClick={save} disabled={!dirty || saving}>
-              {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
-              {t("Save")}
-            </Button>
-          </>
-        }
-      />
-
-      {/* 文档与编辑器。2026-10-13：上传入口放进左列的**文档清单里**（用户要求
-          「需规和他们一样，在这里面加入上传」）—— 上传完直接成为列表里的一员，
-          和 项目总览 / 需求分析 / 流程图 完全一样。 */}
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-[260px_1fr]">
-        {/* 左：文档清单（含上传入口） */}
-        <Card className="h-fit p-2">
-          <div className="space-y-0.5">
-            {docs.map((d) => {
-              const Icon = KIND_ICON[d.kind] ?? FileText;
-              const on = active?.kind === d.kind && active?.id === d.id;
-              return (
-                <div key={`${d.kind}-${d.id}`} className="group flex items-center">
-                  <button
-                    onClick={() => setActive(d)}
-                    className={
-                      "flex min-w-0 flex-1 items-center gap-2 rounded-lg px-2.5 py-2 text-left text-[13px] transition-colors " +
-                      (on ? "bg-brand-50 text-brand-700" : "hover:bg-[var(--panel2)]")
-                    }
+    <div className="flex min-h-0 flex-1 flex-col gap-3">
+      {/* 顶部：文档 Tab（左，可横向滚动）+ 操作区（右，固定不换行）。
+          2026-10-20 用户要求「干掉左侧列表、操作按钮全部上移」：
+          Tab 替代原来的左栏清单，切换时只换 `active`，编辑器由 key 强制重挂载。 */}
+      <div className="flex flex-wrap items-center gap-2 rounded-lg border border-[var(--line)] bg-[var(--panel)] px-2 py-1.5">
+        <div
+          role="tablist"
+          aria-label={t("项目文档")}
+          className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto"
+        >
+          {docs.map((d) => {
+            const Icon = KIND_ICON[d.kind] ?? FileText;
+            const on = active?.kind === d.kind && active?.id === d.id;
+            return (
+              <button
+                key={`${d.kind}-${d.id}`}
+                role="tab"
+                aria-selected={on}
+                title={d.title}
+                onClick={() => setActive(d)}
+                className={
+                  "inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md px-3 py-1.5 text-[13px] transition-colors " +
+                  (on
+                    ? "bg-brand-50 font-medium text-brand-700"
+                    : "text-ink-600 hover:bg-[var(--panel2)] hover:text-ink-900")
+                }
+              >
+                <Icon className="h-3.5 w-3.5 shrink-0" />
+                <span className="max-w-[220px] truncate">{d.title}</span>
+                {d.origin === "ai" && (
+                  <span
+                    className="text-[9px] uppercase tracking-wide text-ink-400"
+                    title={t("AI 生成后还没有人改过")}
                   >
-                    <Icon className="h-4 w-4 shrink-0 text-ink-400" />
-                    <span className="min-w-0 flex-1 truncate">{d.title}</span>
-                    {d.origin === "ai" && (
-                      <span
-                        className="shrink-0 text-[10px] text-ink-400"
-                        title={t("AI 生成后还没有人改过")}
-                      >
-                        AI
-                      </span>
-                    )}
-                    {/* 列表里也要能看出哪份被锁了 —— 否则用户得逐份点开才知道
-                        为什么助手"不肯"改某一份。lucide 图标不接受 title，
-                        所以包一层 span 承载提示。 */}
-                    {d.id > 0 && !d.ai_editable && (
-                      <span
-                        className="shrink-0"
-                        title={t("只有我能改（助手不能写）")}
-                      >
-                        <Lock className="h-3 w-3 text-[var(--warn-fg)]" />
-                      </span>
-                    )}
-                  </button>
-                  {d.kind === "custom" && d.id > 0 && (
-                    <button
-                      onClick={() => removeCustom(d)}
-                      title={t("删除")}
-                      className="mr-1 hidden shrink-0 rounded p-1 text-ink-400 hover:text-[var(--bad-fg)] group-hover:block"
-                    >
-                      <Trash2 className="h-3.5 w-3.5" />
-                    </button>
-                  )}
-                </div>
-              );
-            })}
+                    AI
+                  </span>
+                )}
+                {d.id > 0 && !d.ai_editable && (
+                  <span className="shrink-0" title={t("只有我能改（助手不能写）")}>
+                    <Lock className="h-3 w-3 text-[var(--warn-fg)]" />
+                  </span>
+                )}
+              </button>
+            );
+          })}
+        </div>
 
-            {/* 上传入口（2026-10-13）：和文档同列、同样式。点它上传需规 / 资料，
-                解析后存成一份文档（列表里的一员，和 总览/需求分析/流程图 一样），
-                同时也进知识库供 AI 检索。默认「允许助手修改」，之后可在该文档上切换。 */}
-            <button
-              onClick={() => fileRef.current?.click()}
-              disabled={uploading}
-              className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-[13px] text-ink-500 transition-colors hover:bg-[var(--panel2)] disabled:opacity-50"
-            >
-              {uploading ? (
-                <Loader2 className="h-4 w-4 shrink-0 animate-spin text-ink-400" />
-              ) : (
-                <Upload className="h-4 w-4 shrink-0 text-ink-400" />
+        <div className="flex shrink-0 items-center gap-1.5">
+          <input
+            ref={fileRef}
+            type="file"
+            multiple
+            accept={formats?.accept ?? ".md,.txt,.docx,.pdf,.xlsx,.html,.rtf"}
+            className="hidden"
+            onChange={(e) => onUpload(e.target.files)}
+          />
+          <Button
+            variant="ghost"
+            size="sm"
+            disabled={uploading}
+            onClick={() => fileRef.current?.click()}
+            title={t("上传需规 / 资料")}
+          >
+            {uploading ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <Upload className="h-3.5 w-3.5" />
+            )}
+            <span className="hidden xl:inline">{t("上传")}</span>
+          </Button>
+          <Button variant="outline" size="sm" onClick={addCustom} title={t("新建文档")}>
+            <Plus className="h-3.5 w-3.5" />
+            <span className="hidden xl:inline">{t("新建")}</span>
+          </Button>
+          {active && active.kind !== "custom" && (
+            <>
+              {active.kind !== "flow" && (
+                <label
+                  className="hidden cursor-pointer select-none items-center gap-1.5 rounded-md px-1.5 py-1 text-[11.5px] text-ink-600 lg:flex"
+                  title={t("打开后先把整份需规通读一遍（多次调用，慢且更费），而不是只检索相关片段。")}
+                >
+                  <input
+                    type="checkbox"
+                    checked={fullRead}
+                    onChange={(e) => setFullRead(e.target.checked)}
+                    className="h-3.5 w-3.5 accent-[var(--brand-600)]"
+                  />
+                  {t("检索全文")}
+                </label>
               )}
-              <span className="min-w-0 flex-1 truncate">
-                {uploading ? t("读取中…") : t("上传需规 / 资料")}
-              </span>
-            </button>
-            <input
-              ref={fileRef}
-              type="file"
-              multiple
-              accept={formats?.accept ?? ".md,.txt,.docx,.pdf,.xlsx,.html,.rtf"}
-              className="hidden"
-              onChange={(e) => onUpload(e.target.files)}
-            />
-          </div>
-        </Card>
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={generating}
+                onClick={() => {
+                  if (active.kind === "flow" && flowTriggerRef.current) {
+                    flowTriggerRef.current();
+                  } else {
+                    analyze(false);
+                  }
+                }}
+              >
+                {generating ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <Sparkles className="h-3.5 w-3.5" />
+                )}
+                {active.kind === "flow" ? t("AI 生成流程图") : t("AI 分析")}
+              </Button>
+              {active.html?.trim() && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  disabled={generating}
+                  onClick={() => analyze(true)}
+                  title={t("用新生成的内容替换现有正文")}
+                >
+                  <RefreshCw className="h-3.5 w-3.5" />
+                  <span className="hidden 2xl:inline">{t("覆盖生成")}</span>
+                </Button>
+              )}
+            </>
+          )}
+          <Button size="sm" onClick={save} disabled={!dirty || saving}>
+            {saving ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <Save className="h-3.5 w-3.5" />
+            )}
+            {t("保存")}
+          </Button>
+        </div>
+      </div>
 
-        {/* 右：编辑区 */}
-        <div className="min-w-0 space-y-3">
+      <div className="min-w-0 flex-1 space-y-3">
           {/* ★ 这个空态**实际上到不了**（2026-10-12 实测确认）：后端
               `list_project_docs` 总会补上「项目总览 / 需求分析 / 流程图」三个占位，
               所以 `docs` 永远非空、`active` 也永远有值 —— 我改了这里的文案之后
@@ -532,7 +648,7 @@ export function DocsPage() {
               <Empty
                 title={t("还没有文档")}
                 sub={t(
-                  "在下面「需规 / 资料」里上传文件：它会同时存成可查看可编辑的文档，并加进 AI 检索的资料库。上传前可以选「允许助手修改」。",
+                  "点顶部「上传」选择需规 / 资料：它会同时存成可查看可编辑的文档，并加进 AI 检索的资料库。",
                 )}
               />
             </Card>
@@ -545,49 +661,19 @@ export function DocsPage() {
                     setTitle(e.target.value);
                     setDirty(true);
                   }}
-                  className="h-9 max-w-[280px] font-medium"
+                  className="h-9 min-w-[180px] max-w-[360px] flex-1 font-medium"
                 />
-                {active.kind !== "custom" && (
-                  <>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      disabled={generating}
-                      onClick={() => analyze(false)}
-                    >
-                      {generating ? (
-                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                      ) : (
-                        <Sparkles className="h-3.5 w-3.5" />
-                      )}
-                      {t("AI 分析与生成")}
-                    </Button>
-                    {active.html?.trim() && (
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        disabled={generating}
-                        onClick={() => analyze(true)}
-                        title={t("用新生成的内容替换现有正文")}
-                      >
-                        {t("重新生成（覆盖）")}
-                      </Button>
-                    )}
-                    {/* 「通读全文」开关（2026-10-13 用户要求）。默认关：只检索相关片段，快。
-                        打开后先分块通读整份需规、再写各节 —— 慢、更贵，但真读到全文。 */}
-                    <label
-                      className="flex cursor-pointer select-none items-center gap-1.5 text-[12px] text-ink-600"
-                      title={t("打开后先把整份需规通读一遍（多次调用，慢且更费），而不是只检索相关片段。")}
-                    >
-                      <input
-                        type="checkbox"
-                        checked={fullRead}
-                        onChange={(e) => setFullRead(e.target.checked)}
-                        className="h-3.5 w-3.5 accent-[var(--brand-600)]"
-                      />
-                      {t("检索全文")}
-                    </label>
-                  </>
+                {active.kind === "custom" && active.id > 0 && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => removeCustom(active)}
+                    title={t("删除这份文档")}
+                    className="text-ink-400 hover:text-[var(--bad-fg)]"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                    {t("删除")}
+                  </Button>
                 )}
                 {/* 出处徽标只对**有正文**的节显示。流程图没有正文
                     （它的内容就是那张图），显示"正文引用了 N 个条目"会误导。 */}
@@ -733,18 +819,26 @@ export function DocsPage() {
                 <SourceViewer doc={active} />
               ) : (
                 <RichTextEditor
+                  key={`${active.kind}-${active.id}`}
                   value={html}
                   onChange={(v) => {
                     setHtml(v);
                     setDirty(true);
                   }}
                   onUploadImage={async (f) => (await api.uploadDocImage(pid, f)).url}
-                  placeholder={t("在这里写项目说明，或点上面的「AI 分析与生成」让它先起草…")}
+                  onReady={(ed) => {
+                    editorRef.current = ed;
+                  }}
+                  onSelectionChange={handleSelection}
+                  placeholder={
+                    active.kind === "flow"
+                      ? t("点顶部「AI 生成流程图」画流程图；已有流程图块可点击修改源码。")
+                      : t("在这里写项目说明，或点顶部「AI 分析」让它先起草…")
+                  }
                 />
               )}
             </>
           )}
-        </div>
       </div>
 
       {/* 人工确认过的通过率（2026-10-12）。

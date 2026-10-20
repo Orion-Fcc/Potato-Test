@@ -18,11 +18,14 @@ export function MermaidBlock({
   source,
   className = "",
   cacheKey,
+  zoomable = true,
 }: {
   source: string;
   className?: string;
   /** 同一页有多个图时用它做缓存键，避免重复渲染。默认用源码本身。 */
   cacheKey?: string;
+  /** 编辑器 NodeView 里要关掉：点图是"进入源码编辑"，不是打开大图浮层。 */
+  zoomable?: boolean;
 }) {
   const { t } = useTranslation();
   const [svg, setSvg] = useState("");
@@ -114,25 +117,31 @@ export function MermaidBlock({
           "bg-[var(--panel)] p-2 transition-colors hover:border-brand-300 " +
           className
         }
-        onClick={() => setZoom(true)}
-        onKeyDown={(e) => {
-          if (e.key === "Enter" || e.key === " ") {
-            e.preventDefault();
-            setZoom(true);
-          }
-        }}
-        role="button"
-        tabIndex={0}
-        title={t("点开查看大图")}
+        onClick={zoomable ? () => setZoom(true) : undefined}
+        onKeyDown={
+          zoomable
+            ? (e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  setZoom(true);
+                }
+              }
+            : undefined
+        }
+        role={zoomable ? "button" : undefined}
+        tabIndex={zoomable ? 0 : undefined}
+        title={zoomable ? t("点开查看大图") : undefined}
         // mermaid 自己生成的 SVG；源码里的 HTML 已被 securityLevel:"strict" 拦下
         dangerouslySetInnerHTML={{ __html: svg }}
       />
       {/* 提示"可以点开"—— 不给提示的话用户不知道这图是可点的 */}
-      <p className="mt-1 text-[10.5px] text-ink-400 group-hover:text-ink-500">
-        {t("点图可放大查看")}
-      </p>
+      {zoomable && (
+        <p className="mt-1 text-[10.5px] text-ink-400 group-hover:text-ink-500">
+          {t("点图可放大查看")}
+        </p>
+      )}
 
-      {zoom && (
+      {zoomable && zoom && (
         <div
           // ★ `inset-0` 只固定四个边，内容更高时 flex 容器会被撑高
           //   （实测 1735px，视口只有 900）→ body 掉到屏幕外、背后内容透出来。

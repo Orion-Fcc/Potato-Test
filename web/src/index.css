@@ -332,6 +332,14 @@ button, a, input, textarea, [role="button"] {
   overflow-wrap: break-word !important;
   white-space: normal !important;
 }
+/* 编辑区左右留白（2026-10-20 用户要求「类似 Word 的沉浸式阅读」）。
+ * 40px 起步，随视口/栏宽增长但最多 60px —— 用 clamp 而不是固定 px，
+ * 侧栏折叠后编辑区变宽时留白不会显得过窄。只挂在可编辑根节点上，
+ * 只读渲染（MarkdownBody）不受影响。 */
+.tp-editor-pad {
+  padding-left: clamp(2.5rem, 6%, 3.75rem);
+  padding-right: clamp(2.5rem, 6%, 3.75rem);
+}
 .tp-prose > * + * { margin-top: 0.8em; }
 .tp-prose h1 { font-size: 1.55em; font-weight: 700; margin-top: 1.4em; }
 .tp-prose h2 {
@@ -807,3 +815,93 @@ button, a, input, textarea, [role="button"] {
   background-clip: content-box;
 }
 *::-webkit-scrollbar-corner { background: transparent; }
+
+/* ★ AI 协同工作区（2026-10-20）。react-resizable-panels 在窄屏上左右分栏会把
+   两栏都挤成一条，正文和侧栏都没法读。900px 以下直接上下堆叠：
+   隐藏拖拽条，侧栏给一个最小高度，页面整体滚动。 */
+@media (max-width: 900px) {
+  .tp-workspace {
+    display: block !important;
+    min-height: 0 !important;
+  }
+  .tp-workspace [data-panel] {
+    overflow: visible !important;
+  }
+  .tp-ws-handle {
+    display: none !important;
+  }
+  .tp-ai-sidebar {
+    height: auto !important;
+    min-height: 520px;
+    margin-top: 1rem;
+  }
+}
+
+/* AI 侧栏的 Markdown 气泡。只作用于 .tp-md，不影响编辑器与全站正文。 */
+.tp-md > :first-child { margin-top: 0; }
+.tp-md > :last-child { margin-bottom: 0; }
+.tp-md p { margin: 0.35rem 0; }
+.tp-md h1, .tp-md h2, .tp-md h3, .tp-md h4, .tp-md h5, .tp-md h6 {
+  margin: 0.7rem 0 0.35rem;
+  font-weight: 600;
+  line-height: 1.4;
+  color: var(--ink-900);
+}
+.tp-md h1 { font-size: 1.1rem; }
+.tp-md h2 { font-size: 1.02rem; }
+.tp-md h3 { font-size: 0.95rem; }
+.tp-md h4, .tp-md h5, .tp-md h6 { font-size: 0.9rem; }
+.tp-md ul, .tp-md ol { margin: 0.35rem 0; padding-left: 1.15rem; }
+.tp-md ul { list-style: disc; }
+.tp-md ol { list-style: decimal; }
+.tp-md li { margin: 0.15rem 0; }
+.tp-md li > p { margin: 0; }
+.tp-md strong { font-weight: 600; color: var(--ink-900); }
+.tp-md a { color: var(--brand-700); text-decoration: underline; text-underline-offset: 2px; }
+.tp-md blockquote {
+  margin: 0.4rem 0;
+  padding: 0.1rem 0 0.1rem 0.6rem;
+  border-left: 2px solid var(--line);
+  color: var(--ink-600);
+}
+.tp-md code {
+  padding: 0.08rem 0.28rem;
+  border-radius: 0.25rem;
+  background: color-mix(in oklch, var(--ink-500) 12%, transparent);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.92em;
+}
+.tp-md pre {
+  margin: 0.45rem 0;
+  padding: 0.55rem 0.65rem;
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: 0.4rem;
+  background: var(--panel);
+}
+.tp-md pre code {
+  padding: 0;
+  background: transparent;
+  font-size: 0.88em;
+  line-height: 1.55;
+}
+.tp-md table {
+  width: 100%;
+  margin: 0.45rem 0;
+  border-collapse: collapse;
+  font-size: 0.95em;
+}
+.tp-md th, .tp-md td {
+  padding: 0.25rem 0.4rem;
+  border: 1px solid var(--line);
+  text-align: left;
+  vertical-align: top;
+}
+.tp-md th { background: color-mix(in oklch, var(--ink-500) 8%, transparent); font-weight: 600; }
+.tp-md hr { margin: 0.7rem 0; border: 0; border-top: 1px solid var(--line); }
+
+/* Mermaid NodeView：被选中的原子块给出清晰边界，避免用户不知道点中了什么。 */
+.tp-mermaid-node.ProseMirror-selectednode {
+  outline: 2px solid color-mix(in oklch, var(--brand-500) 55%, transparent);
+  outline-offset: 2px;
+}

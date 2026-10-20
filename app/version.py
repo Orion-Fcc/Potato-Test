@@ -12,7 +12,7 @@
 改版本号的正确姿势：`python scripts/release.py --bump 1.0.1`（会同时改这三处 + 打标签）。
 """
 
-APP_VERSION = "1.0.2"
+APP_VERSION = "1.0.3"
 
 # 更新源：本项目的 GitHub 仓库。改仓库地址要同时改 `app/updater.py` 里的下载白名单，
 # 否则下载会被拒绝（那是故意的 —— 见 updater 的注释）。

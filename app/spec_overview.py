@@ -1,4 +1,4 @@
-"""AI 需求分析：把整份需规读成"人看得懂的项目概况"（2026-10-12）。
+"""AI 项目分析：把整份需规读成"人看得懂的项目概况"（2026-10-12）。
 
 ## 用户要的是什么
 
@@ -965,7 +965,9 @@ async def _recall_text(
     return "\n\n".join(parts)
 
 
-async def _full_read_notes(project_id: int, usage: dict) -> dict[str, list[str]]:
+async def _full_read_notes(
+    project_id: int, usage: dict, keys: tuple[str, ...] | None = None
+) -> dict[str, list[str]]:
     """把整份需规**分段通读**一遍，抽成"按节归类的事实条目"（2026-10-13）。
 
     为什么分段：网关单次 user 提示词 ~4.5~5k 字符就返回空，整份需规塞不进一次调用。
@@ -1003,7 +1005,7 @@ async def _full_read_notes(project_id: int, usage: dict) -> dict[str, list[str]]
         segs.append(buf)
     segs = segs[:_FULL_MAX_CHUNKS]
 
-    keys = [k for k, _t, _d in _SECTION_SPECS]
+    keys = list(keys) if keys is not None else [k for k, _t, _d in _SECTION_SPECS]
     notes: dict[str, list[str]] = {k: [] for k in keys}
     for seg in segs:
         user = (
@@ -1032,19 +1034,31 @@ async def _full_read_notes(project_id: int, usage: dict) -> dict[str, list[str]]
     return notes
 
 
-async def analyze(project_id: int, *, full: bool = False) -> OverviewResult:
+async def analyze(
+    project_id: int,
+    *,
+    full: bool = False,
+    keys: tuple[str, ...] | None = None,
+) -> OverviewResult:
     """读项目知识库 → 产出一份项目概况。**绝不抛异常。**
 
     `full=True` 走「通读全文」模式（2026-10-13 用户开关）：先把整份需规分段读一遍抽成
     要点，再按要点写各节 —— 慢、贵，但真读到全文。默认 False（检索片段，快）。
 
-    六节各发一次调用，失败的那一节记下来但**不影响其它节** ——
-    六节里坏一节，用户拿到的是五节，而不是零节。
+    默认生成全部六节，失败的那一节记下来但**不影响其它节**。
+    `keys` 可以只生成某几节（2026-10-20）：生成「流程图」时只要 `flow`，
+    不必再花五次调用陪跑 —— 调用越少，撞上网关空回复/截断的机会越少，
+    也更快。生成失败大多发生在"根本用不到的节"上。
     （原来一次要六节，实测被硬截断，结果是零节。见 `_SECTION_SPECS` 的注释。）
     """
     import asyncio
 
     from app import specgen
+
+    all_keys = tuple(k for k, _t, _d in _SECTION_SPECS)
+    wanted = tuple(k for k in (keys or all_keys) if k in all_keys)
+    if not wanted:
+        return OverviewResult(error="没有可生成的章节类型。")
 
     try:
         headings = await specgen.list_headings(project_id)
@@ -1063,7 +1077,7 @@ async def analyze(project_id: int, *, full: bool = False) -> OverviewResult:
     usage = {"prompt": 0, "completion": 0, "cached": 0, "total": 0, "calls": 0}
     full_notes: dict[str, list[str]] = {}
     if full:
-        full_notes = await _full_read_notes(project_id, usage)
+        full_notes = await _full_read_notes(project_id, usage, wanted)
     failures: list[str] = []
     # ★ 并发上限 1（2026-10-12 第三次调，见下面的实测）。
     #
@@ -1146,11 +1160,15 @@ async def analyze(project_id: int, *, full: bool = False) -> OverviewResult:
         sec.recalled = recalled
         return sec
 
-    # 并发发出去。六节彼此独立、都要跑模型 —— 串行会让用户等六倍。
-    sections = list(await asyncio.gather(*(one(k) for k, _t, _d in _SECTION_SPECS)))
+    # 并发发出去。各节彼此独立、都要跑模型 —— 串行会让用户等成倍时间。
+    produced = list(await asyncio.gather(*(one(k) for k in wanted)))
+    # ★ 空节不能算"生成成功"（2026-10-20）。原来只要 gather 返回了对象，
+    # `if not sections` 永远为假 —— 六节全失败也返回 ok=True + 空文档。
+    # 必须按节判断它到底产出了正文（flow 看 mermaid，其余看 html）。
+    sections = [x for x in produced if (x.mermaid if x.key == "flow" else x.html)]
 
     if not sections:
-        detail = ("；".join(failures))[:200] if failures else "模型没有给出任何内容"
+        detail = ("；".join(failures))[:300] if failures else "模型没有给出任何内容"
         return OverviewResult(
             error=f"生成失败（{detail}）。可以重试一次。",
             usage=usage,

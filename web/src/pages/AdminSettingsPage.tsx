@@ -33,7 +33,7 @@ const ROLE_LABEL: Record<string, string> = {
   judge_escalate: "Judge escalation (review)",
   narrative: "Failure narrative / case memory",
   specgen: "Case generation from spec",
-  docgen: "Project docs generation (overview / analysis / flowchart)",
+  docgen: "Project docs generation (overview / flowchart)",
   caseopt: "AI case optimization (rewrite cases)",
   failattr: "Failure root-cause classification",
   assistant: "Assistant chat & Feishu",

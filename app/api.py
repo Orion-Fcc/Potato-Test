@@ -2099,7 +2099,7 @@ async def search_project_knowledge(pid: int, request: Request, body: KnowledgeIn
 # 与知识库的分工：知识库存**原件**（检索用），这里存**提炼**（人读用）。
 # 正文是富文本 HTML（用户要求能改字体/颜色/字号/贴图），渲染前必须净化。
 
-_DOC_KINDS = ("overview", "analysis", "flow", "spec_source", "custom")
+_DOC_KINDS = ("overview", "flow", "spec_source", "custom")
 
 # 上传 HTML 存成文档正文时的字符上限（2026-10-13）。
 # 自包含的"单文件网页"（图片内嵌成 base64）动辄几 MB；净化器默认上限 40 万字符会把
@@ -2107,7 +2107,6 @@ _DOC_KINDS = ("overview", "analysis", "flow", "spec_source", "custom")
 _DOC_HTML_MAX_CHARS = 20_000_000
 _DOC_TITLE_DEFAULT = {
     "overview": "项目总览",
-    "analysis": "需求分析",
     "flow": "流程图",
     # 上传的资料原文（2026-10-12）。单独一种 kind 而不是塞进 custom：
     # 它要能按文件名重复上传时**覆盖同一份**（见 create_doc_from_file），
@@ -2201,7 +2200,7 @@ async def list_project_docs(pid: int, request: Request) -> dict:
     # 缺哪一项就少一个按钮，用户会以为是权限问题。
     # `spec_source` **不补占位**：它是"上传了哪几份资料"，没有资料时就不该有一个
     # 空条目摆在那儿（用户会点进去发现是空的）。有上传才出现。
-    for k in ("overview", "analysis", "flow"):
+    for k in ("overview", "flow"):
         if k not in have:
             docs.append(
                 {
@@ -2549,7 +2548,7 @@ async def reparse_project_doc(
 async def analyze_project_docs(pid: int, request: Request, body: dict | None = None) -> dict:
     """让 AI 把整份需规读成一份项目概况，并**存成可编辑的文档**。
 
-    请求体可选：{"kind": "overview"|"analysis"|"flow", "replace": true}
+    请求体可选：{"kind": "overview"|"flow", "replace": true}
     `replace=false`（默认）时把生成结果**追加**在现有内容后面 ——
     用户已经改过的地方不该被一次重新生成抹掉。
     """
@@ -2561,13 +2560,38 @@ async def analyze_project_docs(pid: int, request: Request, body: dict | None = N
 
     body = body or {}
     kind = str(body.get("kind") or "overview").strip()
-    if kind not in ("overview", "analysis", "flow"):
-        raise HTTPException(400, "kind 必须是 overview / analysis / flow 之一")
+    if kind not in ("overview", "flow"):
+        raise HTTPException(400, "kind 必须是 overview / flow 之一")
     replace = bool(body.get("replace"))
     # 「通读全文」模式（2026-10-13 用户开关）：慢、贵，但真读整份需规。
     full = bool(body.get("full"))
 
-    res = await spec_overview.analyze(pid, full=full)
+    # ★ 只把**属于这份文档的**节写进去（2026-10-12 修一个真实的功能错位）。
+    #
+    # 问题：`analyze` 一次生成全部六节（总览/模块/流程/角色/规则/名词表），
+    # 而这里原来把**六节全写进当前文档**。于是用户在「流程图」上点生成，
+    # 拿到的文档开头是「项目总览」、流程图埋在很下面 —— 他点的是"画流程图"，
+    # 看到的却是文案。实测截图就是这样。
+    #
+    # 现在按文档类型挑节：流程图只要那张图，项目总览拿其余全部。
+    # 需求分析已并入总览（2026-10-20 用户要求），不再单独生成。
+    #
+    # ★ 2026-10-20 修：analysis 原来还包含 `overview`，于是「需求分析」正文
+    # 第一行永远是 `<h2>项目总览</h2>` + 项目背景 —— 用户点「需求分析」看到
+    # 「项目总览」，以为前端把文档串了。那是这一节被主动写进来的，不是串台。
+    #
+    # ★ 2026-10-20 再修（生成失败）：wanted 必须在调用**之前**算出来并传给
+    # `analyze`。原来先跑完六节再在这里挑，等于流程图也白等五节 —— 慢、贵，
+    # 而且网关一次要吐六份长文本时最容易空返回/截断，用户看到的就是"生成失败"。
+    # ★ 2026-10-20 合并：需求分析并入项目总览，只保留两份 AI 文档：
+    #   总览 = 概况/模块/角色/规则/名词表；流程图 = 流程图。
+    _KIND_SECTIONS: dict[str, tuple[str, ...]] = {
+        "flow": ("flow",),
+        "overview": ("overview", "modules", "roles", "rules", "glossary"),
+    }
+    wanted = _KIND_SECTIONS.get(kind, _KIND_SECTIONS["overview"])
+
+    res = await spec_overview.analyze(pid, full=full, keys=wanted)
     if res.error and not res.sections:
         # 失败要如实报，不能回一份空文档让用户以为"这个项目没内容"。
         return {
@@ -2578,21 +2602,6 @@ async def analyze_project_docs(pid: int, request: Request, body: dict | None = N
             "doc_chars": res.doc_chars,
         }
 
-    # ★ 只把**属于这份文档的**节写进去（2026-10-12 修一个真实的功能错位）。
-    #
-    # 问题：`analyze` 一次生成全部六节（总览/模块/流程/角色/规则/名词表），
-    # 而这里原来把**六节全写进当前文档**。于是用户在「流程图」上点生成，
-    # 拿到的文档开头是「项目总览」、流程图埋在很下面 —— 他点的是"画流程图"，
-    # 看到的却是文案。实测截图就是这样。
-    #
-    # 现在按文档类型挑节：流程图只要那张图，需求分析要"是什么/有哪些/怎么走"这三块，
-    # 项目总览拿其余全部（含名词表）。这样每份文档都只说它该说的事。
-    _KIND_SECTIONS: dict[str, tuple[str, ...]] = {
-        "flow": ("flow",),
-        "analysis": ("overview", "modules", "roles", "rules"),
-        "overview": ("overview", "modules", "flow", "roles", "rules", "glossary"),
-    }
-    wanted = _KIND_SECTIONS.get(kind, _KIND_SECTIONS["overview"])
     picked = [s for s in res.sections if s.key in wanted]
     if not picked:
         return {
@@ -2790,16 +2799,28 @@ async def generate_case_proposals(pid: int, request: Request, body: dict | None 
 
     async with db_session() as s:
         await _get_project_or_404(s, pid)
-        # 需规内容取"项目总览"，它本身就是从整份需规提炼的骨架 ——
+        # 需规内容取三份项目文档拼起来 —— 它们合起来才是从整份需规提炼的骨架。
         # 拿原件（46 万字）反而塞不进提示词。
-        doc = (
-            await s.execute(
-                select(ProjectDoc).where(
-                    ProjectDoc.project_id == pid, ProjectDoc.kind == "overview"
+        # ★ 2026-10-20：总览去重后只剩概况 + 名词表，模块/流程都在各自文档里，
+        # 不能只看 overview，否则按模块抠段落会抠不到。
+        doc_rows = (
+            (
+                await s.execute(
+                    select(ProjectDoc).where(
+                        ProjectDoc.project_id == pid,
+                        ProjectDoc.kind.in_(("overview", "flow")),
+                    )
                 )
             )
-        ).scalars().first()
-        spec_html = (doc.html if doc else "") or ""
+            .scalars()
+            .all()
+        )
+        by_kind = {d.kind: d for d in doc_rows}
+        spec_html = (chr(10) + "<hr>" + chr(10)).join(
+            (by_kind[k].html or "")
+            for k in ("overview", "flow")
+            if k in by_kind and (by_kind[k].html or "").strip()
+        )
         if not spec_html.strip():
             return {
                 "ok": False,

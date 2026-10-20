@@ -185,7 +185,7 @@ class CaseProposal(Base):
 
 
 class ProjectDoc(Base):
-    """项目文档：需求分析 / 流程图 / 总览（2026-10-12）。
+    """项目文档：总览（含原需求分析）/ 流程图（2026-10-12）。
 
     ## 为什么需要它
 
@@ -215,7 +215,7 @@ class ProjectDoc(Base):
     project_id: Mapped[int] = mapped_column(
         ForeignKey("project.id", ondelete="CASCADE"), index=True, nullable=False
     )
-    # "overview"（项目总览）/ "analysis"（需求分析）/ "flow"（流程图）/ "custom"（自己加的）
+    # "overview"（项目总览，含原需求分析）/ "flow"（流程图）/ "custom"（自己加的）
     kind: Mapped[str] = mapped_column(String(30), nullable=False, default="custom")
     title: Mapped[str] = mapped_column(String(200), nullable=False, default="")
     # 富文本正文（HTML）。**渲染前必须净化**，见类注释。

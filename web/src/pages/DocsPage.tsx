@@ -1,4 +1,4 @@
-import { ExternalLink, FileText, GitBranch, Loader2, Lock, Plus, RefreshCw, Save, Sparkles, Trash2, Unlock, Upload, Wand2 } from "lucide-react";
+import { ExternalLink, FileText, GitBranch, Loader2, Lock, Plus, RefreshCw, Save, Sparkles, Trash2, Unlock, Upload } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useParams } from "react-router-dom";
@@ -415,7 +415,6 @@ export function DocsPage() {
 
   const KIND_ICON: Record<string, typeof FileText> = {
     overview: FileText,
-    analysis: Wand2,
     flow: GitBranch,
     custom: FileText,
   };
@@ -734,6 +733,8 @@ export function DocsPage() {
                   于是"打开流程图文档"看到的是满屏源码，图被挤到页面最底部
                   （实测在 2000px 处）—— 用户以为打不开。
                   放上面：切过去第一眼就是图，源码在下面等着改。 */}
+              {/* ★ 内置文档在 AI 生成前本来就没有正文（后端补的是 id=0/html="" 占位）。
+                  只靠编辑器占位符不够显眼：用户会以为页面或接口坏了。这里明说状态和下一步。 */}
               <MermaidPreview html={html} />
 
               {viewMode === "source" && active.source_url ? (

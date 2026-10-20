@@ -145,16 +145,25 @@ function RequirementMatrix({ data, pid }: { data: ProjectInsights; pid: number }
     <Fold
       title={t("需求覆盖矩阵")}
       icon={ShieldAlert}
-      hint={t("{{c}}/{{n}} 条需求有用例引用；{{r}}/{{n2}} 条用例填了需求 ID", {
-        c: s.covered,
-        n: s.total,
-        r: s.cases_with_refs,
-        n2: s.cases_total,
-      })}
+      hint={
+        s.total === 0
+          ? t("用例未填写需求 ID（references），无法建立需求追溯；共 {{n}} 条用例", {
+              n: s.cases_total,
+            })
+          : t("{{c}}/{{n}} 条需求有用例引用；{{r}}/{{n2}} 条用例填了需求 ID", {
+              c: s.covered,
+              n: s.total,
+              r: s.cases_with_refs,
+              n2: s.cases_total,
+            })
+      }
     >
       {s.total === 0 ? (
         <p className="text-[12px] text-ink-400">
-          {t("用例里没有填需求 ID（references），所以无法建立需求追溯。")}
+          {t(
+            "用例里没有填需求 ID（references），所以无法建立需求追溯。当前共 {{n}} 条用例。请在用例的 references 字段填写需求 ID（如 SYS-LOGIN-001）。",
+            { n: s.cases_total },
+          )}
         </p>
       ) : (
         <>

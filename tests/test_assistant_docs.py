@@ -200,7 +200,8 @@ class TestHelpers:
     def test_guessed_kind_is_conservative(self):
         assert guessed_kind("往流程图里加") == "flow"
         assert guessed_kind("项目总览加一段") == "overview"
-        assert guessed_kind("需求分析补一节") == "analysis"
+        # 需求分析已并入总览（2026-10-20），旧叫法继续写到总览。
+        assert guessed_kind("需求分析补一节") == "overview"
         # 猜不出就返回空，让调用方决定 —— 猜错会把内容放错文档，用户很难发现
         assert guessed_kind("随便写点什么") == ""
 

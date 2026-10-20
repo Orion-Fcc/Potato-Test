@@ -366,6 +366,12 @@ class TestOnlyICanEdit:
         for d in docs:
             assert d["ai_editable"] is True, f"{d['kind']} 的占位不是可改：{d}"
 
+    def test_analysis_kind_is_gone(self, client):
+        """需求分析已并入项目总览（2026-10-20），列表里不再出现这一项。"""
+        pid = _project(client, "no-analysis")
+        docs = client.get(f"/api/projects/{pid}/docs").json()["docs"]
+        assert all(d["kind"] != "analysis" for d in docs)
+
 
 def test_missing_document_permission_returns_404(client):
     pid = _project(client, "perm-404")

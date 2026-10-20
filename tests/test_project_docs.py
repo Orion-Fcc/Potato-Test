@@ -743,7 +743,8 @@ def test_new_project_lists_three_builtin_placeholders(client):
     c = client
     pid = c.post("/api/projects", json={"name": "doc-empty"}).json()["id"]
     docs = c.get(f"/api/projects/{pid}/docs").json()["docs"]
-    assert {d["kind"] for d in docs} >= {"overview", "analysis", "flow"}
+    assert {d["kind"] for d in docs} >= {"overview", "flow"}
+    assert all(d["kind"] != "analysis" for d in docs), "需求分析已并入总览"
     assert all(d["id"] == 0 for d in docs), "空项目不该有已保存的行"
 
 
@@ -780,10 +781,12 @@ def test_analyze_stores_editable_doc_with_sources(client, monkeypatch):
     """
     c = client
     pid = c.post("/api/projects", json={"name": "doc-ok"}).json()["id"]
+    seen: dict = {}
 
-    async def fake(_pid: int, **_kw):
+    async def fake(_pid: int, **kw):
         from app.spec_overview import OverviewResult, OverviewSection
 
+        seen.update(kw)
         return OverviewResult(
             sections=[
                 OverviewSection("overview", "项目总览", "<p>业务描述</p>", ["1. 概述"]),
@@ -800,6 +803,8 @@ def test_analyze_stores_editable_doc_with_sources(client, monkeypatch):
     body = r.json()
     assert body["ok"] is True
     assert body["headings_used"] == 586
+    # ★ 需求分析已并入总览（2026-10-20）：总览生成概况/模块/角色/规则/名词表，流程图单独生成。
+    assert seen.get("keys") == ("overview", "modules", "roles", "rules", "glossary")
     doc = body["doc"]
     assert "业务描述" in doc["html"]
     assert doc["origin"] == "ai", "AI 生成的内容要能被人一眼看出还没改过"
@@ -809,6 +814,47 @@ def test_analyze_stores_editable_doc_with_sources(client, monkeypatch):
     again = c.get(f"/api/projects/{pid}/docs").json()["docs"]
     ov = [d for d in again if d["kind"] == "overview"][0]
     assert "业务描述" in ov["html"]
+
+
+def test_overview_absorbs_analysis_and_kind_is_gone(client, monkeypatch):
+    """「需求分析」并入「项目总览」（2026-10-20 用户要求）。
+
+    合并后总览拿概况/模块/角色/规则/名词表；旧的 analysis kind 不再生成，
+    避免同一批内容出现在两份文档里。
+    """
+    c = client
+    pid = c.post("/api/projects", json={"name": "doc-merged"}).json()["id"]
+    seen: dict = {}
+
+    async def fake(_pid: int, **kw):
+        from app.spec_overview import OverviewResult, OverviewSection
+
+        seen.update(kw)
+        return OverviewResult(
+            sections=[
+                OverviewSection("overview", "项目总览", "<p>项目背景介绍</p>", []),
+                OverviewSection("modules", "功能模块", "<p>甲模块</p>", []),
+                OverviewSection("roles", "角色", "<p>管理员</p>", []),
+                OverviewSection("rules", "规则", "<p>同一范围不能重复配置</p>", []),
+                OverviewSection("glossary", "名词表", "<p>甲：示例术语</p>", []),
+                OverviewSection("flow", "主要流程", "<p>提交→审批</p>", []),
+            ],
+        )
+
+    monkeypatch.setattr("app.spec_overview.analyze", fake)
+    r = c.post(f"/api/projects/{pid}/docs/analyze", json={"kind": "overview"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ok"] is True, body
+    assert seen.get("keys") == ("overview", "modules", "roles", "rules", "glossary")
+    html = body["doc"]["html"]
+    for text in ("项目背景介绍", "甲模块", "管理员", "同一范围不能重复配置", "示例术语"):
+        assert text in html
+    assert "提交→审批" not in html, "流程图仍归独立的流程图文档"
+
+    # 旧 kind 不再接受，防止前端/助手继续写出一份重复文档。
+    r2 = c.post(f"/api/projects/{pid}/docs/analyze", json={"kind": "analysis"})
+    assert r2.status_code == 400
 
 
 def test_regenerating_appends_by_default(client, monkeypatch):

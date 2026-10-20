@@ -113,6 +113,28 @@ async def _backfill_login_states() -> None:
         log.warning("login state backfill skipped: %s", exc)
 
 
+async def _purge_analysis_docs() -> None:
+    """删除旧「需求分析」文档（2026-10-20 并入项目总览）。
+
+    用户确认旧内容不保留。幂等：没有这类行就什么都不做；失败不阻塞启动。
+    """
+    import logging
+
+    from sqlalchemy import delete
+
+    from app.db import db_session
+    from app.models import ProjectDoc
+
+    log = logging.getLogger("potato-test.boot")
+    try:
+        async with db_session() as s:
+            res = await s.execute(delete(ProjectDoc).where(ProjectDoc.kind == "analysis"))
+        if res.rowcount:
+            log.info("analysis docs purge: removed %s row(s)", res.rowcount)
+    except Exception as exc:  # noqa: BLE001 — cleanup must not block boot
+        log.warning("analysis docs purge skipped: %s", exc)
+
+
 async def _start_feishu_worker():
     """把飞书轮询机器人挂到本服务进程上（返回 task，或 None 表示没启动）。
 
@@ -229,6 +251,7 @@ async def lifespan(app: FastAPI):
     await _fail_orphaned_runs()
     await _backfill_knowledge_chunks()
     await _backfill_login_states()
+    await _purge_analysis_docs()
 
     # Background workers read encrypted credentials. Starting them in recovery mode would
     # only produce silent failures, so they stay off until the key is fixed.

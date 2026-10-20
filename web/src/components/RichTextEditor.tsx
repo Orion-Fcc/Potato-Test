@@ -4,6 +4,7 @@ import Color from "@tiptap/extension-color";
 import Highlight from "@tiptap/extension-highlight";
 import Image from "@tiptap/extension-image";
 import Link from "@tiptap/extension-link";
+import Placeholder from "@tiptap/extension-placeholder";
 import { Table, TableCell, TableHeader, TableRow } from "@tiptap/extension-table";
 import TextAlign from "@tiptap/extension-text-align";
 import { TextStyle } from "@tiptap/extension-text-style";
@@ -134,6 +135,10 @@ export function RichTextEditor({
       TextStyle,
       Color,
       Highlight.configure({ multicolor: true }),
+      // ★ 空文档的占位提示必须由扩展注入 `is-editor-empty` 类与
+      // `data-placeholder` 属性；手写在 editorProps 上不会落到段落节点，
+      // CSS 因此永远匹配不到（用户报"文档一片空白、没有占位符"）。
+      Placeholder.configure({ placeholder: placeholder ?? "" }),
       TextAlign.configure({ types: ["heading", "paragraph"] }),
       Link.configure({ openOnClick: false, autolink: true }),
       Image.configure({ inline: false, allowBase64: true }),
@@ -150,7 +155,6 @@ export function RichTextEditor({
         // 富文本编辑区的最小高度与排版。用 class 而不是内联样式，
         // 这样它和只读渲染共用同一套 `.tp-prose` 排版（见 index.css）。
         class: "tp-prose min-h-[420px] px-5 py-4 outline-none",
-        "data-placeholder": placeholder ?? "",
       },
     },
     onUpdate: ({ editor: e }) => onChange(e.getHTML()),

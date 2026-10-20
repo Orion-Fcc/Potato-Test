@@ -332,7 +332,7 @@ const zh: Record<string, string> = {
   "Judge escalation (review)": "判定复核（强模型）",
   "Failure narrative / case memory": "失败叙述 / 用例记忆",
   "Case generation from spec": "需规生成用例",
-  "Project docs generation (overview / analysis / flowchart)": "生成项目文档（总览 / 需求分析 / 流程图）",
+  "Project docs generation (overview / flowchart)": "生成项目文档（总览 / 流程图）",
   "AI case optimization (rewrite cases)": "AI 用例优化（改写用例）",
   "Failure root-cause classification": "失败根因分类（回填）",
   "Assistant chat & Feishu": "助手对话 / 飞书",
@@ -999,6 +999,10 @@ const zh: Record<string, string> = {
     "{{c}}/{{n}} 条需求有用例引用；{{r}}/{{n2}} 条用例填了需求 ID",
   "用例里没有填需求 ID（references），所以无法建立需求追溯。":
     "用例里没有填需求 ID（references），所以无法建立需求追溯。",
+  "用例未填写需求 ID（references），无法建立需求追溯；共 {{n}} 条用例":
+    "用例未填写需求 ID（references），无法建立需求追溯；共 {{n}} 条用例",
+  "用例里没有填需求 ID（references），所以无法建立需求追溯。当前共 {{n}} 条用例。请在用例的 references 字段填写需求 ID（如 SYS-LOGIN-001）。":
+    "用例里没有填需求 ID（references），所以无法建立需求追溯。当前共 {{n}} 条用例。请在用例的 references 字段填写需求 ID（如 SYS-LOGIN-001）。",
   "需求 ID": "需求 ID",
   "需求原文（摘自需规）": "需求原文（摘自需规）",
   "用例数": "用例数",

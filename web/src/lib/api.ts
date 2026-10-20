@@ -881,7 +881,7 @@ export interface SpecDraftResult {
 export interface ProjectDoc {
   /** 0 = 还没保存过的内置占位（界面据此显示"AI 生成"按钮而不是"删除"）。 */
   id: number;
-  /** overview（项目总览）/ analysis（需求分析）/ flow（流程图）/ custom */
+  /** overview（项目总览，含原需求分析）/ flow（流程图）/ custom */
   kind: string;
   title: string;
   html: string;
@@ -1236,12 +1236,17 @@ export const api = {
       method: "PUT",
       body: JSON.stringify(b),
     }),
-  /** 让 AI 把整份需规读成项目概况并存成可编辑文档（要跑模型，比较慢）。 */
+  /** 让 AI 把整份需规读成项目概况并存成可编辑文档（要跑模型，比较慢）。
+   *
+   *  ★ 600s（2026-10-20）：后端各节是串行跑的（并发压太高会让流程图空回复，
+   *  见 spec_overview 的实测注释）。「项目总览」六节加出处摘录，300s 很容易
+   *  在正常生成中途被前端 abort —— 用户看到"生成失败"，其实后端还在写。
+   *  与用例提案生成保持同一个上限。 */
   analyzeDocs: (pid: number, b: { kind?: string; replace?: boolean; full?: boolean } = {}) =>
     req<AnalyzeDocsResult>(`/projects/${pid}/docs/analyze`, {
       method: "POST",
       body: JSON.stringify(b),
-      timeoutMs: 300_000,
+      timeoutMs: 600_000,
     }),
   /** 用上传时存下的**原件**重新解析并排版正文（2026-10-19）。
    *

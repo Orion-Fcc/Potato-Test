@@ -144,12 +144,12 @@ def _system_prompt(catalog: str, project_name: str = "Potato Test", pid: int = 0
         "5) 通用工具 `potato-test_api`：可调用下面列出的任意平台接口——"
         "用例/套件/运行/缺陷/项目/成员/凭据/角色/环境/系统设置 的增删改查都能做；\n"
         "6) 项目『需规/资料』：用 `search_knowledge(query)` 检索需求规格，再据此作答或写文档；\n"
-        "6b) ★**项目文档**：read_project_docs 读「项目总览 / 需求分析 / 流程图」——"
+        "6b) ★**项目文档**：read_project_docs 读「项目总览 / 流程图」——"
         "那是从整份需规提炼出来的骨架（有哪些功能模块、流程怎么走、角色怎么分、"
         "关键规则是什么）。用户问「这个项目有哪些功能」「XX 模块干什么」"
         "「照总览给我补用例」这类**整体性**问题时先读它；"
         "search_knowledge 是关键词检索，搜回来的是零散片段，回答不了整体问题。\n"
-        "6c) ★**往项目文档里写**：write_project_doc 能把内容写进「项目总览 / 需求分析 / "
+        "6c) ★**往项目文档里写**：write_project_doc 能把内容写进「项目总览 / "
         "流程图」，写完用户在「项目文档」页能直接看到并接着编辑。\n"
         "6d) ★**读上传的原件**：read_project_docs 的索引里 has_original=true 说明这份文档是"
         "用户**上传来的**，里面的 readable 只是**解析产物**（PDF 丢版面、表格被压平、"
@@ -692,7 +692,7 @@ def _tools() -> list[dict]:
             "function": {
                 "name": "read_project_docs",
                 "description": (
-                    "读取本项目的**项目文档**（项目总览 / 需求分析 / 流程图）——"
+                    "读取本项目的**项目文档**（项目总览 / 流程图）——"
                     "那是从整份需规提炼出来的骨架：有哪些功能模块、流程怎么走、"
                     "角色怎么分、关键业务规则是什么。"
                     "\n\n★ 什么时候用它：用户问「这个项目有哪些功能」「XX 模块是干什么的」"
@@ -708,7 +708,7 @@ def _tools() -> list[dict]:
                     "properties": {
                         "kind": {
                             "type": "string",
-                            "description": "overview=项目总览 / analysis=需求分析 / flow=流程图；省略则只列索引。",
+                            "description": "overview=项目总览 / flow=流程图；省略则只列索引。",
                         },
                         "max_chars": {
                             "type": "integer",
@@ -757,7 +757,7 @@ def _tools() -> list[dict]:
             "function": {
                 "name": "write_project_doc",
                 "description": (
-                    "往**项目文档**里写内容（项目总览 / 需求分析 / 流程图 / 自建文档）——"
+                    "往**项目文档**里写内容（项目总览 / 流程图 / 自建文档）——"
                     "写进去的东西用户在「项目文档」页能直接看到并继续编辑。"
                     "\n\n★ 它和 generate_document 的区别（别用错）："
                     "\ngenerate_document 产出一份**可下载的 Markdown 文件**（报告、计划、矩阵）；"
@@ -775,7 +775,7 @@ def _tools() -> list[dict]:
                     "properties": {
                         "kind": {
                             "type": "string",
-                            "description": "overview=项目总览 / analysis=需求分析 / flow=流程图 / custom=自建。",
+                            "description": "overview=项目总览 / flow=流程图 / custom=自建。",
                         },
                         "title": {"type": "string", "description": "文档标题（custom 时必填，其余可省）。"},
                         "markdown": {"type": "string", "description": "正文，标准 Markdown。"},

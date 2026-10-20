@@ -27,10 +27,9 @@ from __future__ import annotations
 import re
 
 # 项目文档的四种 kind（与 app/api.py 的 _DOC_KINDS 对齐）
-KINDS = ("overview", "analysis", "flow", "custom")
+KINDS = ("overview", "flow", "custom")
 _KIND_LABEL = {
     "overview": "项目总览",
-    "analysis": "需求分析",
     "flow": "流程图",
     "custom": "自定义文档",
 }
@@ -130,8 +129,7 @@ def guessed_kind(name: str) -> str:
         return ""
     if any(k in s for k in ("流程", "flow", "图")):
         return "flow"
-    if any(k in s for k in ("需求分析", "分析", "analysis")):
-        return "analysis"
-    if any(k in s for k in ("总览", "概览", "overview", "说明书")):
+    # 「需求分析」已并入项目总览（2026-10-20），旧叫法继续认到总览。
+    if any(k in s for k in ("需求分析", "分析", "analysis", "总览", "概览", "overview", "说明书")):
         return "overview"
     return ""

@@ -319,7 +319,18 @@ button, a, input, textarea, [role="button"] {
   font-size: 15px;
   line-height: 1.8;
   color: var(--ink-700);
-  word-break: break-word;
+  /* ★ 中文断行（2026-10-20 修）。
+   *
+   * `word-break: break-word` 在 Chromium 里等价于 `overflow-wrap: anywhere`，
+   * 会把 Latin 单词/数字串也从中间劈开；它又挂在编辑器根节点上，
+   * 内部所有 ProseMirror 节点都会继承，外层 CSS 怎么写都盖不住。
+   * 改回标准三件套：按语言默认规则断行，只有整词放不下时才允许救急换行。
+   * `!important` 留着防止以后有 Tailwind 工具类（break-words）接回 wrapper
+   * 时把这条覆盖掉。
+   */
+  word-break: normal !important;
+  overflow-wrap: break-word !important;
+  white-space: normal !important;
 }
 .tp-prose > * + * { margin-top: 0.8em; }
 .tp-prose h1 { font-size: 1.55em; font-weight: 700; margin-top: 1.4em; }

@@ -22,6 +22,7 @@ from __future__ import annotations
 from app import embeddings
 import logging
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from sqlalchemy import delete, func, select
@@ -116,7 +117,9 @@ def chunk_text(text: str, target: int = CHUNK_TARGET_CHARS) -> list[Chunk]:
         # of §4.3's chunk, and a snippet shown to the reader appears to be under §4.3.
         if is_heading:
             flush()
-            pending_heading = _HEADING_RE.match(block.split("\n", 1)[0]).group(2).strip()[:400]
+            _m = _HEADING_RE.match(block.split("\n", 1)[0])
+            if _m:
+                pending_heading = _m.group(2).strip()[:400]
 
         if not cur_lines:
             cur_start = start_line
@@ -437,7 +440,7 @@ async def search(project_id: int, query: str, limit: int = SEARCH_LIMIT) -> dict
         scope = await effective_condition(s, project_id)
         total = (await s.execute(select(func.count(KnowledgeChunk.id)).where(scope))).scalar_one()
 
-        rows_vec: list[KnowledgeChunk] = []
+        rows_vec: Sequence[KnowledgeChunk] = []
         if qvec is not None:
             rows_vec = (
                 (
@@ -452,7 +455,7 @@ async def search(project_id: int, query: str, limit: int = SEARCH_LIMIT) -> dict
                 .all()
             )
 
-        rows_kw: list[KnowledgeChunk] = []
+        rows_kw: Sequence[KnowledgeChunk] = []
         if terms:
             cond = None
             for t in terms[:12]:

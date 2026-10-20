@@ -18,6 +18,7 @@ import shutil
 import tempfile
 import time
 from dataclasses import dataclass, field
+from typing import Any
 
 from app import browser_binary, cdp_endpoint, failure_attrib, shot_probe
 from app.config import get_settings
@@ -1546,7 +1547,7 @@ def _build_tools(s, spec: "CaseSpec | None" = None):
     try:
         from browser_use import Tools
 
-        tools = Tools()
+        tools: Any = Tools()
         excluded = []
         # 两组排除项合并：excluded_agent_actions（低价值动作）+
         # excluded_file_tools（没人用的文件工具）。两组的依据不同，所以在 config 里
@@ -1562,7 +1563,8 @@ def _build_tools(s, spec: "CaseSpec | None" = None):
                 log.debug("executor: 无法排除动作 %s：%s", name, exc)
         if excluded:
             log.info("executor: 已禁用低价值动作 %s（每步都是完整模型回合）", ", ".join(excluded))
-        _add_switch_account(tools, spec)
+        if spec is not None:
+            _add_switch_account(tools, spec)
         _add_look_at_screen(tools, s)
         return tools
     except Exception as exc:  # noqa: BLE001 — never fail a case over a speed tweak
@@ -2020,7 +2022,7 @@ async def execute_case(spec: CaseSpec, on_step=None, should_abort=None) -> Resul
             log.debug("executor: 读取经验笔记失败（忽略）：%s", exc)
 
         browser = None
-        agent = None
+        agent: Any = None
         live_steps: list[dict] = []
         # Per-step wall clock. The step callback fires AFTER each step, so the gap between
         # two callbacks is that step's true cost (DOM collection + model round-trip +
@@ -2537,7 +2539,7 @@ async def execute_case(spec: CaseSpec, on_step=None, should_abort=None) -> Resul
                 flash_mode=s.agent_flash_mode,
                 # None 时不下传，保持 browser-use 自己的默认（不限制历史）。
                 **(
-                    {"max_history_items": s.agent_max_history_items}
+                    {"max_history_items": s.agent_max_history_items}  # type: ignore[arg-type]
                     if s.agent_max_history_items
                     else {}
                 ),
@@ -2856,7 +2858,7 @@ async def execute_case(spec: CaseSpec, on_step=None, should_abort=None) -> Resul
             # 存在的理由是它能把两种都表现为"查不到"的世界分开：文字快照漏掉了
             # 已渲染的表格 vs 页面确实空。前者报出来的是假缺陷，代价是开发
             # 半天时间。所以这里把结论喂进归因的证据里，让 classifier 一并权衡。
-            _shot_facts = shot_probe.analyse(final_shot)
+            _shot_facts = shot_probe.analyse(base64.b64decode(final_shot) if final_shot else None)
             log.info("executor: %s", shot_probe.describe(_shot_facts))
             _shot_evidence = shot_probe.evidence_line(
                 "\n".join(evidence), _shot_facts
@@ -3276,7 +3278,7 @@ async def capture_session(
         async def _capture_step_cb(_browser_state, _model_output, _step_no) -> None:
             await _ensure_sprite_pruner(browser)
 
-        agent = Agent(
+        agent: Any = Agent(
             task=task,
             llm=await browser_use_llm(),
             browser=browser,

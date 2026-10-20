@@ -252,6 +252,8 @@ async def poll_project(project_id: int) -> int:
 
 async def _pull_notes(session, client: GitLabClient, issue: Issue) -> None:
     """Add GitLab notes we haven't seen as local comments (skips system notes)."""
+    if issue.gitlab_iid is None:
+        return
     seen = {
         c.gitlab_note_id
         for c in (

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from typing import Any
 
 import httpx
 from openai import AsyncOpenAI
@@ -668,7 +669,7 @@ async def probe_profile(profile: LLMProfile) -> bool:
         timeout=httpx.Timeout(30.0),
         trust_env=not s.gateway_ignore_proxy,
     )
-    client = None
+    client: Any = None
     try:
         if caps.protocol == "anthropic":
             from anthropic import AsyncAnthropic

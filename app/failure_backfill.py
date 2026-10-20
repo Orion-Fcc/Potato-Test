@@ -150,6 +150,8 @@ async def backfill_root_causes(
                 if not isinstance(it, dict):
                     continue
                 rid = it.get("id")
+                if rid is None:
+                    continue
                 row = by_id.get(rid)
                 if row is None:
                     continue

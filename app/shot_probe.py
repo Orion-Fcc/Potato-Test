@@ -287,7 +287,7 @@ def analyse(png_bytes: bytes | None) -> ShotFacts:
                 # to prevent. Nearest keeps a sample of what was actually drawn.
                 step = int((w * h / _MAX_PIXELS) ** 0.5) + 1
                 small = rgb.resize(
-                    (max(w // step, 1), max(h // step, 1)), Image.NEAREST
+                    (max(w // step, 1), max(h // step, 1)), Image.Resampling.NEAREST
                 )
                 w, h = small.size
                 pixels = list(small.getdata())

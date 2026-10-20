@@ -138,7 +138,8 @@ def _issue_fields(
         # SQLite gives a NAIVE datetime holding a UTC value; `.timestamp()` would read it
         # as local time, landing every BitTable date 8 hours off on this machine.
         created = _as_utc(issue.created_at)
-        fields["问题日期"] = int(created.timestamp() * 1000)
+        if created is not None:
+            fields["问题日期"] = int(created.timestamp() * 1000)
     if reporter_open_id:
         # Only written when the table already has this person field; never created.
         fields[_REPORTER_FIELD] = [{"id": reporter_open_id}]

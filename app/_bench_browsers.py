@@ -74,6 +74,7 @@ async def bench(name: str, exe: str) -> dict | None:
                     )
                     t1 = time.monotonic()
                     page = await ctx.new_page()
+                    assert TARGET is not None
                     await page.goto(TARGET, wait_until="domcontentloaded", timeout=45000)
                     t2 = time.monotonic()
                     await ctx.close()

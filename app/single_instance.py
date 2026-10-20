@@ -32,6 +32,7 @@ from __future__ import annotations
 import atexit
 import os
 import tempfile
+from typing import BinaryIO
 
 __all__ = ["SingleInstance"]
 
@@ -51,7 +52,7 @@ class SingleInstance:
         # 仅 POSIX 用得到；Windows 走互斥体。保留一个可读的 owner 文件供日志展示。
         self.path = os.path.join(directory, f"{name}.lock")
         self.owner_path = os.path.join(directory, f"{name}.owner")
-        self._fh = None
+        self._fh: BinaryIO | None = None
         self._handle = None
 
     # -- public ---------------------------------------------------------------
@@ -144,16 +145,16 @@ class SingleInstance:
         return True
 
     @staticmethod
-    def _lock_posix(fh) -> None:
+    def _lock_posix(fh: BinaryIO) -> None:
         import fcntl
 
-        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)  # type: ignore[attr-defined]
 
     @staticmethod
-    def _unlock_posix(fh) -> None:
+    def _unlock_posix(fh: BinaryIO) -> None:
         import fcntl
 
-        fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        fcntl.flock(fh.fileno(), fcntl.LOCK_UN)  # type: ignore[attr-defined]
 
     # -- shared ---------------------------------------------------------------
     def _write_owner(self) -> None:

@@ -43,6 +43,7 @@ tokenizers==0.23.3
 opencv-python-headless==5.0.0.93
 pymupdf==1.28.2
 rapidocr==3.10.0
+onnxruntime==1.31.0
 pillow==12.3.0
 numpy==2.4.1
 

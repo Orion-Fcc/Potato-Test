@@ -27,6 +27,11 @@ import subprocess
 import sys
 from pathlib import Path
 
+# CI 的 Windows 运行器 stdout 默认 cp1252，打印中文会 UnicodeEncodeError。
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "dist_desktop"
 WORK = ROOT / "build" / "desktop"

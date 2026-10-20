@@ -1531,7 +1531,7 @@ async def _run_tool(name: str, args: dict, pid: int, ctx: dict | None = None) ->
             ]
         }
     if name == "get_run":
-        rid = int(args.get("run_id"))
+        rid = int(args.get("run_id") or 0)
         run = await _api("GET", f"/api/runs/{rid}")
         results = await _api("GET", f"/api/runs/{rid}/results")
         rows = results if isinstance(results, list) else []
@@ -1550,15 +1550,15 @@ async def _run_tool(name: str, args: dict, pid: int, ctx: dict | None = None) ->
             ],
         }
     if name == "create_case":
-        payload = {k: v for k, v in args.items() if v not in (None, "")}
-        return await _api("POST", f"/api/projects/{pid}/testcases", payload)
+        new_case = {k: v for k, v in args.items() if v not in (None, "")}
+        return await _api("POST", f"/api/projects/{pid}/testcases", new_case)
     if name == "start_run":
-        payload: dict = {}
+        run_payload: dict = {}
         if args.get("case_ids"):
-            payload["case_ids"] = args["case_ids"]
+            run_payload["case_ids"] = args["case_ids"]
         if args.get("name"):
-            payload["name"] = args["name"]
-        return await _api("POST", f"/api/projects/{pid}/runs", payload)
+            run_payload["name"] = args["name"]
+        return await _api("POST", f"/api/projects/{pid}/runs", run_payload)
     if name == "generate_document":
         return await _save_document(
             pid,
@@ -2396,7 +2396,7 @@ async def _read_doc_source(pid: int, args: dict) -> dict:
             ),
         }
 
-    data = await storage.read_bytes(keep["key"])
+    data = await storage.read_bytes(str(keep["key"]))
     if not data:
         return {
             "doc_id": keep["id"],
@@ -2405,7 +2405,7 @@ async def _read_doc_source(pid: int, args: dict) -> dict:
             "error": "原件在存储里找不到了（读回为空）。",
         }
     try:
-        res = docparse.extract(keep["name"] or keep["title"], data)
+        res = docparse.extract(str(keep["name"] or keep["title"]), data)
     except Exception as exc:  # noqa: BLE001
         return {"error": f"原件解析失败：{type(exc).__name__}: {exc}"}
 
@@ -2667,7 +2667,7 @@ async def _project_label(pid: int) -> str:
             name = (
                 await s.execute(_select(_Project.name).where(_Project.id == pid))
             ).scalar_one_or_none()
-            if (name or "").strip():
+            if name and name.strip():
                 return name.strip()
             app_name = await _get_setting(s, "app_name")
     except Exception as exc:  # noqa: BLE001 — identity text is never worth a failed turn
@@ -3005,7 +3005,7 @@ async def assistant_turn(
                     "content": "请现在就用中文给出最终回答，不要再调用工具。",
                 }
             )
-            resp = await client.chat.completions.create(model=model, messages=messages)
+            resp = await client.chat.completions.create(model=model, messages=messages)  # type: ignore[arg-type]
             reply = (resp.choices[0].message.content or "").strip()
         except Exception as exc:
             log.warning("assistant: final forced answer failed: %s", exc)

@@ -178,7 +178,7 @@ async def agent_reply(session, text: str, context: str, project_id: int | None) 
     for _ in range(4):
         try:
             resp = await client.chat.completions.create(
-                model=model, temperature=0.2, messages=messages, tools=_TOOLS
+                model=model, temperature=0.2, messages=messages, tools=_TOOLS  # type: ignore[arg-type]
             )
         except Exception:
             # Gateway may not support function-calling — answer without tools.
@@ -192,10 +192,13 @@ async def agent_reply(session, text: str, context: str, project_id: int | None) 
             return (msg.content or "").strip()
         messages.append(msg.model_dump())
         for tc in msg.tool_calls:
+            fn = getattr(tc, "function", None)
+            if fn is None:
+                continue
             try:
-                args = json.loads(tc.function.arguments or "{}")
+                args = json.loads(fn.arguments or "{}")
             except json.JSONDecodeError:
                 args = {}
-            result = await _exec_tool(session, project_id, tc.function.name, args)
+            result = await _exec_tool(session, project_id, fn.name, args)
             messages.append({"role": "tool", "tool_call_id": tc.id, "content": result})
     return "(处理步骤过多,请把问题说得更具体些,或去网页查看)"

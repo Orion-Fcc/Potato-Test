@@ -765,16 +765,20 @@ async def set_admin_llm(body: LlmSettingsIn) -> dict:
             # 用途名按 PREMIUM_ROLES 白名单过滤：一个拼错的用途如果被存下来，
             # 界面会显示它"已生效"而实际从不生效 —— 正是这一版要消灭的那类错觉。
             roles_in = {r for r in (body.premium.roles or []) if r in llm_mod.PREMIUM_ROLES}
-            item = {
+            premium_item: dict[str, Any] = {
                 "enabled": bool(body.premium.enabled),
                 "pool_name": (body.premium.pool_name or "").strip(),
                 # 按固定顺序归一：界面勾选顺序不该泄漏进存储内容。
                 "roles": [r for r in llm_mod.PREMIUM_ROLES if r in roles_in],
             }
-            empty = not (item["enabled"] or item["pool_name"] or item["roles"])
+            empty = not (
+                premium_item["enabled"]
+                or premium_item["pool_name"]
+                or premium_item["roles"]
+            )
             await set_setting(
                 s, llm_mod.LLM_PREMIUM_KEY,
-                "" if empty else json.dumps(item, ensure_ascii=False),
+                "" if empty else json.dumps(premium_item, ensure_ascii=False),
                 secret=False,
             )
     llm_mod.invalidate_llm_cache()
@@ -828,7 +832,7 @@ async def get_admin_llm_token_share() -> dict:
     from sqlalchemy import select
 
     async with db_session() as s:
-        rows = (await s.execute(select(RunResult.timing))).scalars().all()
+        rows: Any = (await s.execute(select(RunResult.timing))).scalars().all()
     # 跨所有运行聚合 per-role 的 total token。
     agg: dict[str, int] = {}
     runs = 0
@@ -2738,7 +2742,7 @@ async def list_case_proposals(pid: int, request: Request, status: str = "") -> d
             .scalars()
             .all()
         )
-    items = [
+    items: list[dict[str, Any]] = [
         {
             "id": r.id,
             "action": r.action,
@@ -5067,9 +5071,9 @@ async def failure_digest(
                         new_cause = mapped.get(d["id"])
                         if not new_cause:
                             continue
-                        res = await s2.get(RunResult, d["id"])
-                        if res is not None and not (res.root_cause or "").strip():
-                            res.root_cause = new_cause
+                        row_res = await s2.get(RunResult, d["id"])
+                        if row_res is not None and not (row_res.root_cause or "").strip():
+                            row_res.root_cause = new_cause
                             backfilled += 1
                     await s2.commit()
                 for d in data:
@@ -5747,6 +5751,8 @@ async def _redirect_artifact(rid: int, field: str, request: Request) -> Redirect
         if x is None:
             raise HTTPException(404, "result not found")
         run = await s.get(Run, x.run_id)
+        if run is None:
+            raise HTTPException(404, "run not found")
         await _project_access(request, run.project_id, "viewer")
         url = getattr(x, field)
         if not url:

@@ -273,24 +273,24 @@ def _from_docx(data: bytes, w: list[str]) -> str:
     # AI 读到的上下文是错位的。`iter_inner_content()` 是 python-docx 1.1+ 的接口；
     # 老版本退回原来的顺序（宁可顺序错，也不能读不到）。
     if hasattr(doc, "iter_inner_content"):
-        for block in doc.iter_inner_content():
-            if isinstance(block, DocxTable):
+        for item in doc.iter_inner_content():
+            if isinstance(item, DocxTable):
                 tables += 1
-                rows = [[_cell(c.text) for c in row.cells] for row in block.rows]
+                rows = [[_cell(c.text) for c in row.cells] for row in item.rows]
                 md = _rows_to_text(rows, header=f"表格 {tables}")
                 if md:
                     parts.append(md)
             else:
-                t = (block.text or "").strip()
+                t = (item.text or "").strip()
                 if t:
                     parts.append(t)
     else:
         parts = [p.text.strip() for p in doc.paragraphs if p.text.strip()]
         for i, table in enumerate(doc.tables, 1):
             rows = [[_cell(c.text) for c in row.cells] for row in table.rows]
-            block = _rows_to_text(rows, header=f"表格 {i}")
-            if block:
-                parts.append(block)
+            table_md = _rows_to_text(rows, header=f"表格 {i}")
+            if table_md:
+                parts.append(table_md)
 
     if not parts:
         w.append(

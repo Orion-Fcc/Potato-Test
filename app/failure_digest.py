@@ -202,7 +202,7 @@ def build_groups(rows: list[dict[str, Any]]) -> list[Group]:
         # 用例去重（同一 case 多次失败只列一次，附失败次数）
         by_case: dict[int, dict] = {}
         for i in items:
-            cid = i.get("case_id")
+            cid = int(i.get("case_id") or 0)
             entry = by_case.setdefault(cid, {
                 "case_id": cid,
                 "case_key": i.get("case_key") or "",

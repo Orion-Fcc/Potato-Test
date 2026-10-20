@@ -29,6 +29,7 @@ import re
 import subprocess
 import sys
 from datetime import UTC, datetime, timedelta
+from typing import cast
 from pathlib import Path
 
 import httpx
@@ -114,7 +115,7 @@ async def check(force: bool = False) -> dict:
     """查最新版本。10 分钟内重复调用直接给缓存，避免用户连点把 GitHub 限流。"""
     now = datetime.now(UTC)
     if not force and _cache["data"] and _cache["at"] and now - _cache["at"] < _CACHE_TTL:  # type: ignore[operator]
-        return dict(_cache["data"])  # type: ignore[arg-type]
+        return cast(dict, _cache["data"])
 
     data: dict = {
         "current": APP_VERSION,

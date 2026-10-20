@@ -184,6 +184,8 @@ def scan_suite_reminders() -> int:
                 ).first()
                 if already:  # already reminded for this due window
                     continue
+                if x.due_at is None:
+                    continue
                 due = x.due_at if x.due_at.tzinfo else x.due_at.replace(tzinfo=UTC)
                 overdue_days = (now - due).days
                 typ = "reminder_overdue" if overdue_days >= 1 else "reminder_due"

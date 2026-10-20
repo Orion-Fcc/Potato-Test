@@ -391,7 +391,7 @@ def bind_shared_http(client: "httpx.AsyncClient | None") -> None:
     _SHARED_HTTP = client
 
 
-def feishu_http(timeout: int = 15) -> "httpx.AsyncClient":
+def feishu_http(timeout: int = 15) -> "httpx.AsyncClient | _BorrowedClient":
     """An httpx client for the Feishu Open API, with proxy handling already decided.
 
     Centralised so that "should this call trust HTTP(S)_PROXY" is answered in exactly one
@@ -539,7 +539,7 @@ class FeishuClient:
         """
         token = await self._tenant_token()
         url = f"{self._base}/open-apis/im/v1/messages"
-        params = {
+        params: dict[str, str | int] = {
             "container_id_type": "chat",
             "container_id": chat_id,
             "sort_type": "ByCreateTimeDesc",
@@ -1076,7 +1076,7 @@ async def handle_message_event(payload: dict) -> None:
         # Without this guard the FIRST message the bot receives kills the whole handler
         # with ModuleNotFoundError — and with GitLab sync off nothing would be enqueued
         # anyway, so a no-op is the correct fallback, not an error.
-        def enqueue_push(*_args, **_kwargs) -> None:
+        def enqueue_push(*_args, **_kwargs) -> None:  # type: ignore[misc]
             return None
 
     from app.db import db_session
@@ -1169,7 +1169,7 @@ async def handle_message_event(payload: dict) -> None:
                         f"已把本群绑定到项目「{match.name}」✅ 之后这里的问题/运行都归到该项目。"
                     )
                 else:
-                    names = ", ".join(p["name"] for p in projects) or "(无)"
+                    names = ", ".join(str(p["name"]) for p in projects) or "(无)"
                     reply = f"没找到项目「{bind_name}」。现有项目:{names}"
             elif want_help:
                 # Cheap and instant: no LLM, no DB. Listing what the bot understands is
@@ -1218,7 +1218,7 @@ async def handle_message_event(payload: dict) -> None:
                 else:
                     rerun_of = None
                     only = None
-                    case_ids: list[int] = []
+                    run_case_ids: list[int] = []
                     if kind in ("rerun", "rerun_failing"):
                         last = (
                             (
@@ -1241,15 +1241,15 @@ async def handle_message_event(payload: dict) -> None:
                                 # confirm time. The operator should confirm the number they
                                 # were shown; recomputing later could silently change it.
                                 only = "failing"
-                                case_ids, all_ids = await _rerun_failing_ids(s, last.id)
-                                if not case_ids:
+                                run_case_ids, all_ids = await _rerun_failing_ids(s, last.id)
+                                if not run_case_ids:
                                     reply = (
                                         f"run #{last.id} 里没有未通过的用例"
                                         f"（共 {len(all_ids)} 条），无需重跑。"
                                     )
                     if not reply:
-                        if case_ids:
-                            count = len(case_ids)
+                        if run_case_ids:
+                            count = len(run_case_ids)
                         else:
                             count = (
                                 await s.execute(
@@ -1269,12 +1269,12 @@ async def handle_message_event(payload: dict) -> None:
                                 "project_id": proj.id,
                                 "rerun_of": rerun_of,
                                 "only": only,
-                                "case_ids": case_ids,
+                                "case_ids": run_case_ids,
                                 "message_id": evt["message_id"],
                             },
                         )
                         reply_card_payload = confirm_run_card(
-                            proj.id, proj.name, count, rerun_of, only, case_ids
+                            proj.id, proj.name, count, rerun_of, only, run_case_ids
                         )
             else:
                 context = await _recent_context(client, evt["chat_id"])

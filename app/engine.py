@@ -611,7 +611,7 @@ async def _ensure_bundle(
         async with db_session() as s:
             c = await s.get(Credential, cred_id)
             v = getattr(c, field, None) if c else None
-            if not v or not bundle_is_fresh(c.expires_at, min_remaining_s=timeout_s):
+            if c is None or not v or not bundle_is_fresh(c.expires_at, min_remaining_s=timeout_s):
                 return None
             return decrypt(v)
 
@@ -622,7 +622,7 @@ async def _ensure_bundle(
         async with db_session() as s:
             c = await s.get(Credential, cred_id)
             v = getattr(c, field, None) if c else None
-            if not v or not captured_recently(c.expires_at, ttl, RECAPTURE_COOLDOWN_S):
+            if c is None or not v or not captured_recently(c.expires_at, ttl, RECAPTURE_COOLDOWN_S):
                 return None
             return decrypt(v)
 
@@ -847,7 +847,8 @@ async def execute_one_case(run_id: int, case_id: int) -> str:
                         else "账号都在忙"
                     )
                     return await _finalize_case_error(live_id, run_id, f"角色「{r}」{why}")
-                _leased_ids.append(rl.lease_id)
+                if rl.lease_id is not None:
+                    _leased_ids.append(rl.lease_id)
                 if r == role:
                     # 首个角色：沿用原来的单角色变量，heal 信息也照旧填
                     login_state = rl.bundle
@@ -950,23 +951,23 @@ async def execute_one_case(run_id: int, case_id: int) -> str:
         # effective_retries 里，好在不带数据库的情况下单测这条语义。
         retries = effective_retries(run)
         attempt_statuses: list[str] = []
-        r = None
+        case_res = None
         healed = False
         infra_attempts = 0
         while True:
-            r = await execute_case(spec, on_step=on_step, should_abort=should_abort)
-            attempt_statuses.append(r.status)
+            case_res = await execute_case(spec, on_step=on_step, should_abort=should_abort)
+            attempt_statuses.append(case_res.status)
             # A timeout means the case wants more wall clock than its budget. Neither
             # re-attempt below can change that, and each one burns another full budget
             # (10 minutes at case_timeout_s=600). It also stops the self-heal from
             # misreading a run cut off mid-flight as a dead session: the last URL of a
             # timed-out attempt says nothing about whether the login still works.
-            if r.timed_out:
+            if case_res.timed_out:
                 break
             # P3: dead restored session (ended on a login page) → invalidate + re-capture +
             # retry once. This one-shot heal is separate from the infra-error retries.
             if (
-                r.auth_failed
+                case_res.auth_failed
                 and not healed
                 and bundle_cred_id is not None
                 and refresh_user
@@ -979,7 +980,7 @@ async def execute_one_case(run_id: int, case_id: int) -> str:
                     bundle_field,
                     base_url,
                     refresh_user,
-                    refresh_pass,
+                    refresh_pass or "",
                     to_s,
                     force=True,
                 )
@@ -988,7 +989,7 @@ async def execute_one_case(run_id: int, case_id: int) -> str:
                     continue
             if await run_cancelled():
                 break
-            if not should_retry(r, retries, infra_attempts):
+            if not should_retry(case_res, retries, infra_attempts):
                 break
             infra_attempts += 1
         final, flaky = resolve_attempts(attempt_statuses)
@@ -999,32 +1000,32 @@ async def execute_one_case(run_id: int, case_id: int) -> str:
                 row.status = final
                 row.attempts = len(attempt_statuses)
                 row.flaky = flaky
-                row.video_url = r.video_url
-                row.trace_url = r.trace_url
-                row.steps = r.steps
+                row.video_url = case_res.video_url
+                row.trace_url = case_res.trace_url
+                row.steps = case_res.steps
                 # final history-based diagnostics (with results/errors) supersede live ones
-                row.diagnostics = r.diagnostics or row.diagnostics
-                row.judge_reason = r.judge_reason
+                row.diagnostics = case_res.diagnostics or row.diagnostics
+                row.judge_reason = case_res.judge_reason
                 # 2026-10-04 失败根因分类 + 判定依据步骤。
                 # `or row.*` 的原因同 failure_narrative：一次重试若没产出分类
                 # （例如被取消），不能把上一轮已经得到的分类擦掉。
-                row.root_cause = r.root_cause or row.root_cause
-                row.verdict_evidence = r.verdict_evidence or row.verdict_evidence
+                row.root_cause = case_res.root_cause or row.root_cause
+                row.verdict_evidence = case_res.verdict_evidence or row.verdict_evidence
                 # 归因同理用 `or`：一次重试若没产出归因（例如被取消），
                 # 不能把上一轮已经算好的擦掉。
-                row.attribution = r.attribution or row.attribution
-                row.final_answer = r.final_answer
+                row.attribution = case_res.attribution or row.attribution
+                row.final_answer = case_res.final_answer
                 # AI bug description for failed/errored cases (NULL for passed).
                 # `or row.failure_narrative` keeps the last non-empty value: the live
                 # heartbeat path may have written a progress snapshot, and a later retry
                 # that produced no narrative must not erase a good one.
-                row.failure_narrative = r.failure_narrative or row.failure_narrative
+                row.failure_narrative = case_res.failure_narrative or row.failure_narrative
                 row.account_label = account_label
-                row.latency_ms = r.latency_ms
+                row.latency_ms = case_res.latency_ms
                 # 耗时分解：和上面 `or` 的理由一致 —— 一次被取消的重试没产出 timing 时，
                 # 不能把上一轮已经算好的擦掉。
-                row.timing = r.timing or row.timing
-                row.error = r.error
+                row.timing = case_res.timing or row.timing
+                row.error = case_res.error
             run_row = await s.get(Run, run_id)
             if run_row is not None:
                 run_row.processed_count += 1
@@ -1047,13 +1048,13 @@ async def execute_one_case(run_id: int, case_id: int) -> str:
         try:
             from app.case_memory import remember_case
 
-            await remember_case(case_id, (r.diagnostics if r is not None else None) or [])
+            await remember_case(case_id, (case_res.diagnostics if case_res is not None else None) or [])
         except Exception:
             pass
         # passive account health: the leased role account is healthy on a pass, unhealthy
         # on an infra error (likely login). A judge 'failed' is a test bug, not the account.
         if lease_id is not None and final in ("passed", "error"):
-            await _update_account_health(lease_id, final, r.error if r else None)
+            await _update_account_health(lease_id, final, case_res.error if case_res else None)
         return final
     except Exception:
         # never propagate: a raising case task would break the Celery chord so finalize
@@ -1255,10 +1256,12 @@ async def reconcile_stale_runs(now: datetime | None = None) -> list[int]:
         # every other run in the same session, so nothing got reconciled at all.
         try:
             async with db_session() as s:
-                run = await s.get(Run, rid)
+                dead_run = await s.get(Run, rid)
+                if dead_run is None:
+                    continue
                 why = (
                     "运行已取消"
-                    if run.status == "cancelled"
+                    if dead_run.status == "cancelled"
                     else "执行进程中断(worker 重启或被回收)"
                 )
                 rows = await _run_rows(s, rid)

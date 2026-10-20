@@ -332,11 +332,11 @@ def _add_missing_columns(sync_conn) -> None:
         if column in cols:
             continue
         sync_conn.exec_driver_sql(f'ALTER TABLE "{table}" ADD COLUMN "{column}" {ddl_type}')
-    for table, index_name, cols in _ADDITIVE_INDEXES:
+    for table, index_name, index_cols in _ADDITIVE_INDEXES:
         if table not in existing_tables:
             continue
         sync_conn.exec_driver_sql(
-            f'CREATE INDEX IF NOT EXISTS "{index_name}" ON "{table}" ({cols})'
+            f'CREATE INDEX IF NOT EXISTS "{index_name}" ON "{table}" ({index_cols})'
         )
 
 

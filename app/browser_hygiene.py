@@ -339,8 +339,8 @@ def _install_safe_batching() -> bool:
                     log.info("executor: 导航后页面未就绪（%s），已等待", _st)
             return out
 
-        safe_multi_act._tp_safe_batch = True
-        Agent.multi_act = safe_multi_act
+        setattr(safe_multi_act, "_tp_safe_batch", True)
+        Agent.multi_act = safe_multi_act  # type: ignore[method-assign]
         return True
     except Exception as exc:  # noqa: BLE001 — 加固项绝不能反过来搞死用例
         log.warning("executor: 批处理安全补丁安装失败（%s），将保守回退", exc)
@@ -397,8 +397,8 @@ def _disable_per_step_screenshots() -> bool:
                 include_recent_events=include_recent_events,
             )
 
-        without_screenshot._tp_no_screenshot = True
-        BrowserSession.get_browser_state_summary = without_screenshot
+        setattr(without_screenshot, "_tp_no_screenshot", True)
+        BrowserSession.get_browser_state_summary = without_screenshot  # type: ignore[method-assign]
         return True
     except Exception:  # noqa: BLE001
         return False
@@ -612,7 +612,7 @@ async def _install_sprite_pruner(browser) -> None:
             log.info("executor: 图标精灵裁剪已在当前 CDP 会话安装")
         return
 
-    installed = 0
+    installed_count = 0
     for tgt in targets:
         tid = getattr(tgt, "target_id", None)
         if not tid:
@@ -620,15 +620,15 @@ async def _install_sprite_pruner(browser) -> None:
         try:
             cdp = await browser.get_or_create_cdp_session(target_id=tid, focus=False)
             if await _install_prune_on_session(cdp):
-                installed += 1
+                installed_count += 1
                 log.info("executor: 图标精灵裁剪已装到 target=%s", str(tid)[:12])
         except Exception as exc:  # noqa: BLE001 — per-target, but must be loud
             log.warning(
                 "executor: ★ 图标精灵裁剪装到 target=%s 失败：%s —— 本轮该页面每步可能慢 20s+",
                 str(tid)[:12], exc,
             )
-    if installed:
-        log.info("executor: 图标精灵裁剪已在 %s 个页面上安装", installed)
+    if installed_count:
+        log.info("executor: 图标精灵裁剪已在 %s 个页面上安装", installed_count)
 
 
 async def _install_prune_on_session(cdp) -> bool:

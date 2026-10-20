@@ -1,6 +1,8 @@
-import { AlertTriangle, Maximize2 } from "lucide-react";
+import { Maximize2 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
+
+import { MermaidErrorCard, dropMermaidRenderNode } from "./MermaidErrorCard";
 
 /** 渲染一段 Mermaid 源码为图（2026-10-12）。
  *
@@ -25,6 +27,8 @@ export function MermaidBlock({
   const { t } = useTranslation();
   const [svg, setSvg] = useState("");
   const [err, setErr] = useState("");
+  // import/初始化失败与源码语法错误要分开说：前者刷新可救，后者只能改源码。
+  const [loadFailed, setLoadFailed] = useState(false);
   // 点开大图的浮层
   const [zoom, setZoom] = useState(false);
   const seq = useRef(0);
@@ -36,18 +40,23 @@ export function MermaidBlock({
     if (!source.trim()) {
       setSvg("");
       setErr("");
+      setLoadFailed(false);
       return;
     }
     const hit = _CACHE.get(key);
     if (hit) {
       setSvg(hit);
       setErr("");
+      setLoadFailed(false);
       return;
     }
     let alive = true;
     (async () => {
+      const id = `tp-mb-${++seq.current}`;
+      let modLoaded = false;
       try {
         const mod = await import("mermaid");
+        modLoaded = true;
         const mermaid = mod.default;
         mermaid.initialize({
           startOnLoad: false,
@@ -63,15 +72,21 @@ export function MermaidBlock({
             fontSize: "12px",
           },
         });
-        const { svg: out } = await mermaid.render(`tp-mb-${++seq.current}`, source);
+        const { svg: out } = await mermaid.render(id, source);
         if (!alive) return;
         _CACHE.set(key, out);
         setSvg(out);
         setErr("");
+        setLoadFailed(false);
       } catch (e) {
-        // 渲染失败**如实显示原因**：用户看到的应该是一句"这张图渲染不了"，
-        // 而不是一片空白 —— 空白会让人以为功能坏了。
-        if (alive) setErr(e instanceof Error ? e.message : String(e));
+        // 失败不能白屏：清掉可能残留的临时节点，并记录原因。
+        // 原始报错只在"详细报错"折叠面板里展示，默认给中文可操作提示。
+        dropMermaidRenderNode(id);
+        if (alive) {
+          setSvg("");
+          setErr(e instanceof Error ? e.message : String(e));
+          setLoadFailed(!modLoaded);
+        }
       }
     })();
     return () => {
@@ -81,15 +96,7 @@ export function MermaidBlock({
 
   if (!source.trim()) return null;
   if (err) {
-    return (
-      <div className="tp-alert tp-alert-warn flex items-start gap-2 px-2.5 py-2 text-[11px]">
-        <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
-        <div className="min-w-0">
-          <p className="font-medium">{t("这张图渲染不了")}</p>
-          <p className="mt-0.5 break-all text-ink-500">{err.slice(0, 200)}</p>
-        </div>
-      </div>
-    );
+    return <MermaidErrorCard detail={err} loadFailed={loadFailed} />;
   }
   if (!svg) {
     return <div className="px-2 py-4 text-center text-[11px] text-ink-400">{t("正在画图…")}</div>;

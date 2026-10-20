@@ -1,6 +1,8 @@
-import { AlertTriangle, GitBranch } from "lucide-react";
+import { GitBranch } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
+
+import { MermaidErrorCard, dropMermaidRenderNode } from "./MermaidErrorCard";
 
 /** Mermaid 图表预览（2026-10-12，用户要求「ai 给我画流程图」）。
  *
@@ -25,6 +27,8 @@ export function MermaidPreview({ html }: { html: string }) {
   const { t } = useTranslation();
   const [rendered, setRendered] = useState<Record<number, string>>({});
   const [errors, setErrors] = useState<Record<number, string>>({});
+  // mermaid 模块本身加载失败（离线/资源 404）与源码语法错误分开提示。
+  const [loadFailed, setLoadFailed] = useState(false);
   /** 点开的大图源码（null = 没开）。存 SVG 而不是下标：
    *  源码变了图会重画，存下标可能指向已经不存在的那张。 */
   const [zoom, setZoom] = useState<string | null>(null);
@@ -70,6 +74,7 @@ export function MermaidPreview({ html }: { html: string }) {
     if (!sources.length) {
       setRendered({});
       setErrors({});
+      setLoadFailed(false);
       return;
     }
     let alive = true;
@@ -98,16 +103,24 @@ export function MermaidPreview({ html }: { html: string }) {
           const { svg } = await mermaid.render(id, sources[i]);
           out[i] = svg;
         } catch (e) {
-          // 渲染失败要**如实显示原因**，不要静默吞掉：
-          // 用户看到的应该是一句"这张图渲染不了"加原因，而不是一片空白。
+          // 失败后清掉 mermaid 可能插入的临时节点；原始解析器报错留给折叠面板。
+          dropMermaidRenderNode(id);
           bad[i] = e instanceof Error ? e.message : String(e);
         }
       }
       if (!alive) return;
       setRendered(out);
       setErrors(bad);
+      setLoadFailed(false);
     })().catch((e) => {
-      if (alive) setErrors({ 0: e instanceof Error ? e.message : String(e) });
+      // import/initialize 失败：所有图都画不出来，逐个位置显示加载失败提示，
+      // 不能只标第一张 —— 否则后面的图会永远停在"正在画图…"。
+      if (!alive) return;
+      const allBad: Record<number, string> = {};
+      for (let i = 0; i < sources.length; i++) allBad[i] = "";
+      setLoadFailed(true);
+      setErrors(allBad);
+      console.error("mermaid load failed", e);
     });
     return () => {
       alive = false;
@@ -124,20 +137,8 @@ export function MermaidPreview({ html }: { html: string }) {
         {t("流程图预览（下面的图由正文里的 mermaid 源码渲染，改源码图就变）")}
       </div>
       {sources.map((_, i) =>
-        errors[i] ? (
-          <div
-            key={i}
-            className="tp-alert tp-alert-warn flex items-start gap-2 px-3 py-2 text-[12px]"
-          >
-            <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-            <div className="min-w-0">
-              <p className="font-medium">{t("这张图渲染不了")}</p>
-              <p className="mt-0.5 break-all text-ink-500">{errors[i]}</p>
-              <p className="mt-0.5 text-ink-400">
-                {t("上面编辑器里的 mermaid 源码可能写错了，改好就会自动重画。")}
-              </p>
-            </div>
-          </div>
+        errors[i] !== undefined ? (
+          <MermaidErrorCard key={i} detail={errors[i]} loadFailed={loadFailed} />
         ) : rendered[i] ? (
           <div key={i}>
             {/* ★ 点一下放大（2026-10-12 用户要求「流程图我就想点开看」）。

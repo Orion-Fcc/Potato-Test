@@ -176,7 +176,7 @@ export interface ProjectStats {
 }
 
 /** 一条"贵"的用例（见后端 app/perf_analysis.py::CostCase）。 */
-export interface CostCase {
+interface CostCase {
   case_id: number;
   tokens: number;
   calls: number;
@@ -319,7 +319,7 @@ export interface LlmPremiumStatus {
 
 // 一个用途的配置现状。model/base_url/provider 为空 = 跟随默认；
 // effective_* 永远有值，界面直接显示"这个用途现在实际用哪个模型"。
-export interface LlmRoleStatus {
+interface LlmRoleStatus {
   model: string;
   base_url: string;
   provider: string;
@@ -332,7 +332,7 @@ export interface LlmRoleStatus {
 }
 
 // 保存某个用途：留空 = 跟随默认；只换模型填 model 就够，换厂商才要 base_url/api_key。
-export interface LlmRoleIn {
+interface LlmRoleIn {
   model?: string;
   base_url?: string;
   api_key?: string;
@@ -353,7 +353,7 @@ export interface LlmSettingsIn {
 
 // 保存平台级「高端模型」。整体替换语义：发上去的就是全部。
 // 2026-10-12 起：高端模型只从模型池里选一套（pool_name），自己不存连接信息。
-export interface LlmPremiumIn {
+interface LlmPremiumIn {
   enabled: boolean;
   // 指向模型池里某个条目的 name
   pool_name?: string;
@@ -362,7 +362,7 @@ export interface LlmPremiumIn {
 
 // 池里的一套网关（多套时按顺序 429 兜底）。api_key 是只写的：留空表示
 // "保持同位置已存的那把钥匙"（界面只显示掩码，不允许被编辑动作意外清空）。
-export interface LlmPoolIn {
+interface LlmPoolIn {
   name?: string;
   base_url: string;
   model: string;
@@ -902,7 +902,7 @@ export interface ProjectDoc {
 }
 
 /** AI 生成的一节。 */
-export interface AnalyzeSection {
+interface AnalyzeSection {
   key: string;
   title: string;
   html: string;
@@ -927,7 +927,7 @@ export interface AnalyzeDocsResult {
 
 // ---- 项目概况面板（2026-10-12）--------------------------------------------
 /** 一条需求的覆盖情况。`uncovered=true`（没有任何用例引用）是最该被看见的一格。 */
-export interface RequirementCoverage {
+interface RequirementCoverage {
   req_id: string;
   /** 需求原文（从知识库里摘出来的定义行）。空串 = 需规里找不到，本身是信息。 */
   excerpt: string;
@@ -944,7 +944,7 @@ export interface RequirementCoverage {
   uncovered: boolean;
 }
 
-export interface ModuleCoverageRow {
+interface ModuleCoverageRow {
   module: string;
   case_total: number;
   /** 没有填需求 ID 的用例数 —— 追溯粒度粗不粗看这个。 */
@@ -1071,7 +1071,7 @@ export interface DecideProposalsResult {
 }
 
 /** 一个模块的覆盖率。`verified_*` 只统计人工确认过的结果。 */
-export interface ModuleCoverage {
+interface ModuleCoverage {
   module: string;
   verified_pass: number;
   verified_fail: number;

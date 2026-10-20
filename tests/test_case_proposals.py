@@ -246,7 +246,7 @@ class TestProposalCarriesFlowAndAccount:
 
         flow = 'flowchart TD\n  A["申请人 提交"] --> B{"审批人 审批"}\n  B -->|"通过"| C["结算"]'
 
-        async def fake_call(system, user, max_tokens=4000):  # noqa: ANN001
+        async def fake_call(system, user, max_tokens=4000, role=None):  # noqa: ANN001
             # 模块流程 + 一条带账号的 add 提案
             return (
                 {
@@ -291,7 +291,7 @@ class TestProposalCarriesFlowAndAccount:
         _seed_overview(client, pid, "<h2>审批模块</h2><p>x</p>")
         self._seed_credential(pid, "sittrapply")
 
-        async def fake_call(system, user, max_tokens=4000):  # noqa: ANN001
+        async def fake_call(system, user, max_tokens=4000, role=None):  # noqa: ANN001
             return (
                 {
                     "flow": 'flowchart TD\n  A["甲"] --> B["乙"]',
@@ -320,7 +320,7 @@ class TestProposalCarriesFlowAndAccount:
         _seed_overview(client, pid, "<h2>审批模块</h2><p>x</p>")
         self._seed_credential(pid, "sittrapprovea")
 
-        async def fake_call(system, user, max_tokens=4000):  # noqa: ANN001
+        async def fake_call(system, user, max_tokens=4000, role=None):  # noqa: ANN001
             return (
                 {
                     "flow": 'flowchart TD\n  A["甲"] --> B["乙"]',
@@ -367,7 +367,7 @@ class TestProposalCarriesFlowAndAccount:
 
         seen: dict = {}
 
-        async def fake_call(system, user, max_tokens=4000):  # noqa: ANN001
+        async def fake_call(system, user, max_tokens=4000, role=None):  # noqa: ANN001
             seen["user"] = user
             return ({"flow": "", "proposals": []}, {"total": 1, "calls": 1})
 

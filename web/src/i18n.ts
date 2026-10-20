@@ -1453,6 +1453,8 @@ const zh: Record<string, string> = {
   "Download and install": "下载并安装",
   "Downloading…": "下载中…",
   "Verifying…": "校验中…",
+  "Lost contact with the update task. Reopen Settings to check the progress.":
+    "与更新任务失去联系。重新打开设置页即可查看下载进度。",
   "Installing…": "正在安装…",
   "Update failed": "更新失败",
   "Open the release page": "打开发布页",

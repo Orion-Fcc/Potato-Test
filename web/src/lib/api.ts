@@ -1187,6 +1187,8 @@ export type AppUpdateInstallState = {
   downloaded: number;
   total: number;
   percent: number | null;
+  /** 下载速度（字节/秒，后端指数平滑）。0 = 还没采样 / 正在校验。 */
+  speed: number;
   error: string | null;
   message: string;
 };
@@ -1745,7 +1747,9 @@ export const api = {
     req<LlmStatus>("/admin/settings/llm", { method: "PUT", body: JSON.stringify(b) }),
   // ---- 应用更新（2026-10-17）--------------------------------------------
   /** 查最新版本。后端缓存 10 分钟，`force` 用于"再检查一次"。 */
-  getAppUpdate: (force = false) => req<AppUpdateInfo>(`/app/update${force ? "?force=true" : ""}`),
+  // 后端要依次试直连/代理，网络差时可能超过默认 30 秒。给足预算，别把慢当成失败。
+  getAppUpdate: (force = false) =>
+    req<AppUpdateInfo>(`/app/update${force ? "?force=true" : ""}`, { timeoutMs: 60_000 }),
   // ---- 文件存放位置（2026-10-19）---------------------------------------
   /** 当前存放位置 + 程序默认位置。 */
   getAppStorage: () =>

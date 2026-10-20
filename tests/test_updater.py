@@ -408,3 +408,42 @@ def test_download_resumable_falls_back_to_official(monkeypatch, tmp_path):
 
     assert seen[0] != _SETUP_URL
     assert seen[-1] == _SETUP_URL
+
+
+# ---- 8. 进度条所需的速度 / 瞬时断流续传（2026-10-20） ------------------------
+def test_progress_reports_smoothed_speed(monkeypatch):
+    """界面要显示速度，而不是只有百分比。采样窗口 <0.5s 不更新，避免数字乱跳。"""
+    now = [0.0]
+    monkeypatch.setattr(updater.time, "monotonic", lambda: now[0])
+    updater._job.update(phase="downloading")
+    updater._reset_speed(0)
+
+    now[0] = 1.0
+    updater._on_progress(1_000_000, 10_000_000)
+
+    assert updater.install_status()["speed"] > 0
+    assert updater.install_status()["percent"] == 10
+
+
+def test_download_resumable_retries_after_partial_progress(monkeypatch, tmp_path):
+    """一轮全断但有进展时要从断点再试，不能把瞬时断流当成下载失败。"""
+    calls: list[str] = []
+
+    async def _fake_stream(url, tmp, mode, on_progress=None):
+        calls.append(url)
+        if len(calls) <= 2:  # 第一轮两种连接方式都断
+            with tmp.open("ab") as fh:
+                fh.write(b"partial")
+            raise httpx.ConnectError("connection dropped")
+        tmp.write_bytes(_PAYLOAD)
+
+    async def _no_sleep(_s):
+        return None
+
+    monkeypatch.setattr(updater, "_stream_download", _fake_stream)
+    monkeypatch.setattr(updater.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr(updater, "_proxy_mode", False)
+
+    asyncio.run(updater._download_resumable([_SETUP_URL], tmp_path / "x.part"))
+
+    assert len(calls) == 3  # 第一轮 2 次失败 → 第二轮续传成功

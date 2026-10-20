@@ -29,6 +29,9 @@ export function AppUpdateCard() {
   const [installState, setInstallState] = useState<AppUpdateInstallState | null>(null);
   const pollTimer = useRef<number | null>(null);
   const pollFails = useRef(0);
+  // 最近一次成功拿到状态的时间。单次状态请求超时不等于下载失败：后端只是读内存，
+  // 偶尔忙/渲染卡顿都会让它晚一点回。连续两分钟拿不到状态才认为真的失联。
+  const lastOkAt = useRef(Date.now());
 
   const stopPolling = () => {
     if (pollTimer.current != null) {
@@ -67,6 +70,7 @@ export function AppUpdateCard() {
       try {
         const s = await api.getAppUpdateInstall();
         pollFails.current = 0;
+        lastOkAt.current = Date.now();
         setInstallState(s);
         if (s.phase === "error") {
           stopPolling();
@@ -87,13 +91,14 @@ export function AppUpdateCard() {
         }
         stopPolling();
         setInstalling(false);
-      } catch (e: any) {
-        // 校验大文件时后端可能短暂繁忙，单次失败不判死；连续 5 次才报。
+      } catch {
+        // 状态接口只是读内存。短暂超时/卡顿不是下载失败 —— 两分钟内继续静默重试，
+        // 进度条保持原位，别把「request timed out」甩到用户脸上。
         pollFails.current += 1;
-        if (pollFails.current >= 5) {
+        if (Date.now() - lastOkAt.current >= 120_000) {
           stopPolling();
           setInstalling(false);
-          fail(e);
+          fail(t("Lost contact with the update task. Reopen Settings to check the progress."));
           return;
         }
         pollProgress();
@@ -179,16 +184,38 @@ export function AppUpdateCard() {
 
       {installing && installState &&
         (installState.phase === "downloading" || installState.phase === "verifying") && (
-          <div className="text-xs text-ink-500">
-            {installState.phase === "verifying"
-              ? t("Verifying…")
-              : `${t("Downloading…")}${installState.percent != null ? ` ${installState.percent}%` : ""}`}
-            {installState.phase === "downloading" && installState.total > 0 && (
-              <>
-                {" · "}
-                {mb(installState.downloaded)} / {mb(installState.total)} MB
-              </>
-            )}
+          <div className="space-y-1.5">
+            <div className="h-2 w-full overflow-hidden rounded-full bg-[var(--panel2)]">
+              {installState.phase === "verifying" || installState.percent == null ? (
+                // 总大小未知（分块传输）或正在求哈希：给不确定态，别假装知道百分比。
+                <div className="tp-indeterminate h-full w-2/5 rounded-full bg-brand-600" />
+              ) : (
+                <div
+                  className="h-full rounded-full bg-brand-600 transition-[width] duration-500"
+                  style={{ width: `${installState.percent}%` }}
+                />
+              )}
+            </div>
+            <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 text-xs tabular-nums text-ink-500">
+              <span>
+                {installState.phase === "verifying"
+                  ? t("Verifying…")
+                  : `${t("Downloading…")}${installState.percent != null ? ` ${installState.percent}%` : ""}`}
+              </span>
+              {installState.phase === "downloading" && (
+                <span>
+                  {installState.total > 0
+                    ? `${mb(installState.downloaded)} / ${mb(installState.total)} MB`
+                    : `${mb(installState.downloaded)} MB`}
+                  {installState.speed > 0 && (
+                    <>
+                      {" · "}
+                      {mb(installState.speed)} MB/s
+                    </>
+                  )}
+                </span>
+              )}
+            </div>
           </div>
         )}
 

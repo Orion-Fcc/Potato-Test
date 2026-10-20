@@ -30,6 +30,7 @@ import logging
 import re
 import subprocess
 import sys
+import time
 from datetime import UTC, datetime, timedelta
 from typing import cast
 from pathlib import Path
@@ -275,42 +276,60 @@ async def _stream_download(
                         on_progress(done, total)
 
 
+# 一次全源失败后，只要这一轮确实下到了新字节，就再绕一圈续传，而不是立刻判死。
+# 实测这个网络每几分钟抖一次；把"抖一下"直接显示成超时，用户只会反复点重试。
+_DOWNLOAD_ROUNDS = 4
+
+
 async def _download_resumable(
     urls: list[str], tmp: Path, on_progress: Callable[[int, int], None] | None = None
 ) -> None:
     """按"镜像 → 官方"逐个尝试，每个源再试"直连/代理"；断流保留 .part 续传。
 
     换源时丢弃旧分片：不同源的 .part 不能拼，哈希虽然能拦截，但白下一两个小时。
+    一轮全失败但确实有进展时再续传几轮 —— 瞬时断流不等于下载失败。
     """
     global _proxy_mode
     last: Exception | None = None
     modes = [False, True] if _proxy_mode is None else [_proxy_mode, not _proxy_mode]
     src = tmp.with_name(tmp.name + ".src")  # 记下 .part 属于哪个源
-    for url in urls:
-        if src.exists() and src.read_text(encoding="utf-8") != url:
-            tmp.unlink(missing_ok=True)
-        for mode in modes:
-            src.write_text(url, encoding="utf-8")
-            try:
-                await _stream_download(url, tmp, mode, on_progress)
-                _proxy_mode = mode
-                src.unlink(missing_ok=True)
-                return
-            except httpx.HTTPStatusError as exc:
-                # 4xx 跟连接方式无关（资产不存在/被拒），换方式没用，换下一个源。
-                last = exc
-                if exc.response.status_code < 500:
-                    break
-            except (httpx.TimeoutException, httpx.TransportError) as exc:
-                last = exc
-            log.warning(
-                "更新包下载中断（%s，%s）：%s: %s",
-                url.split("/")[2],
-                "代理" if mode else "直连",
-                type(last).__name__,
-                last,
-            )
-            await asyncio.sleep(1)
+    for round_no in range(_DOWNLOAD_ROUNDS):
+        progressed = False
+        for url in urls:
+            if src.exists() and src.read_text(encoding="utf-8") != url:
+                tmp.unlink(missing_ok=True)
+            for mode in modes:
+                before = tmp.stat().st_size if tmp.exists() else 0
+                src.write_text(url, encoding="utf-8")
+                try:
+                    await _stream_download(url, tmp, mode, on_progress)
+                    _proxy_mode = mode
+                    src.unlink(missing_ok=True)
+                    return
+                except httpx.HTTPStatusError as exc:
+                    # 4xx 跟连接方式无关（资产不存在/被拒），换方式没用，换下一个源。
+                    last = exc
+                    if exc.response.status_code < 500:
+                        break
+                except (httpx.TimeoutException, httpx.TransportError) as exc:
+                    last = exc
+                after = tmp.stat().st_size if tmp.exists() else 0
+                if after > before:
+                    progressed = True
+                log.warning(
+                    "更新包下载中断（%s，%s）：%s: %s",
+                    url.split("/")[2],
+                    "代理" if mode else "直连",
+                    type(last).__name__,
+                    last,
+                )
+                await asyncio.sleep(1)
+        if not progressed:
+            break
+        log.warning(
+            "更新包下载中断，从断点续传（第 %d/%d 轮）", round_no + 1, _DOWNLOAD_ROUNDS
+        )
+        await asyncio.sleep(2)
     if last is None:
         raise RuntimeError("下载失败，且没有拿到具体原因")
     raise last
@@ -371,10 +390,14 @@ _job: dict[str, object] = {
     "downloaded": 0,
     "total": 0,
     "percent": None,
+    # 速度（字节/秒，指数平滑）。界面要显示"还要多久/快不快"，只有百分比不够。
+    "speed": 0,
     "error": None,
     "message": "",
 }
 _job_task: asyncio.Task | None = None
+# 速度采样点。单独放，避免把内部字段混进 install_status() 的返回形状。
+_speed_state: dict[str, float] = {"at": 0.0, "done": 0.0, "ema": 0.0}
 
 
 def install_status() -> dict:
@@ -382,25 +405,61 @@ def install_status() -> dict:
     return dict(_job)
 
 
+def _reset_speed(done: int = 0) -> None:
+    _speed_state.update(at=time.monotonic(), done=float(done), ema=0.0)
+    _job["speed"] = 0
+
+
 def _on_progress(done: int, total: int) -> None:
     _job["downloaded"] = done
     _job["total"] = total
     _job["percent"] = int(done * 100 / total) if total > 0 else None
 
+    # 速率用 0.5s 窗口 + 指数平滑：单次进度回调太密且不均匀，直接算会跳成乱码。
+    now = time.monotonic()
+    last_at, last_done = _speed_state["at"], _speed_state["done"]
+    if done < last_done:
+        # 换源 / 服务端不认 Range 整包重下：旧速率作废，绝不显示负速度。
+        _speed_state.update(at=now, done=float(done), ema=0.0)
+        _job["speed"] = 0
+        return
+    dt = now - last_at
+    if dt >= 0.5:
+        inst = (done - last_done) / dt
+        ema = _speed_state["ema"]
+        _speed_state["ema"] = inst if ema <= 0 else ema * 0.7 + inst * 0.3
+        _speed_state.update(at=now, done=float(done))
+    _job["speed"] = int(_speed_state["ema"])
+
 
 async def _run_install(url: str, dest_dir: Path) -> None:
     global _job
     try:
-        _job.update(phase="downloading", downloaded=0, total=0, percent=None, error=None)
-        path = await download_installer(
-            url, dest_dir, _on_progress, lambda: _job.update(phase="verifying")
+        _job.update(
+            phase="downloading", downloaded=0, total=0, percent=None, speed=0, error=None
         )
-        _job.update(phase="installing", percent=100)
+        _reset_speed(0)
+        path = await download_installer(
+            url,
+            dest_dir,
+            _on_progress,
+            lambda: _job.update(phase="verifying", speed=0),
+        )
+        _job.update(phase="installing", percent=100, speed=0)
         launch_installer(path)
         _job.update(phase="done", message="更新包已下载，应用即将退出并自动安装")
+    except (httpx.TimeoutException, httpx.TransportError):
+        # 一次 ReadTimeout / 断流不是"下载失败"：.part 还在，重按即可续传。
+        # 不要把 httpx 的英文异常原文甩到界面上吓用户。
+        log.warning("下载更新包失败：网络中断或超时（已保留断点）")
+        _job.update(
+            phase="error",
+            speed=0,
+            error="网络连接中断或超时。已保留下载进度，重新点击「下载并安装」会从断点继续。",
+        )
     except Exception as exc:  # noqa: BLE001 —— 失败原因要回传给前端
         log.warning("下载更新包失败：%s: %s", type(exc).__name__, exc)
-        _job.update(phase="error", error=str(exc))
+        _job.update(phase="error", speed=0, error=str(exc))
 
 
 def start_install(url: str, dest_dir: Path) -> dict:
@@ -413,9 +472,11 @@ def start_install(url: str, dest_dir: Path) -> dict:
         "downloaded": 0,
         "total": 0,
         "percent": None,
+        "speed": 0,
         "error": None,
         "message": "",
     }
+    _reset_speed(0)
     _job_task = asyncio.create_task(_run_install(url, dest_dir))
     return dict(_job)
 

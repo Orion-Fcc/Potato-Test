@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
+import sqlite3
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import datetime
+from pathlib import Path
 
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import (
@@ -102,8 +106,103 @@ def _ensure() -> async_sessionmaker[AsyncSession]:
     return _Session
 
 
+_SNAPSHOT_DIRNAME = ".potato-backups"
+_SNAPSHOT_PREFIX = "potato-"
+_SNAPSHOT_KEEP = 3
+
+
+def _snapshot_target() -> tuple[Path, Path] | None:
+    """(DB file, snapshot dir), or None for non-file SQLite / missing DB."""
+    assert _engine is not None
+    url = _engine.url
+    if url.get_backend_name() != "sqlite":
+        return None
+    raw = url.database
+    if not raw or raw == ":memory:":
+        return None
+    db_path = Path(raw)
+    if not db_path.is_absolute():
+        db_path = (Path.cwd() / db_path).resolve()
+    try:
+        if not db_path.is_file() or db_path.stat().st_size == 0:
+            return None
+    except OSError as exc:
+        raise RuntimeError(f"无法读取数据库文件 {db_path}：{exc}") from exc
+    return db_path, db_path.parent / _SNAPSHOT_DIRNAME
+
+
+def _prune_snapshots(snapshot_dir: Path) -> None:
+    """Keep the newest _SNAPSHOT_KEEP snapshots. Cleanup failure is non-fatal."""
+    try:
+        files = sorted(
+            snapshot_dir.glob(f"{_SNAPSHOT_PREFIX}*.db"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+    except OSError as exc:
+        log.warning("清理快照时读取目录失败（不影响启动）：%s", exc)
+        return
+    for old in files[_SNAPSHOT_KEEP:]:
+        try:
+            old.unlink()
+        except OSError as exc:
+            log.warning("删除旧快照失败 %s：%s", old, exc)
+
+
+def _snapshot_before_init_sync() -> None:
+    """Create a consistent copy of the SQLite DB before any schema change.
+
+    VACUUM INTO is used instead of copying the file: it runs in SQLite and includes
+    committed WAL pages, so the snapshot is a valid database even if -wal/-shm exist.
+    It must run outside a transaction, hence a plain sqlite3 connection.
+    """
+    target = _snapshot_target()
+    if target is None:
+        return
+    db_path, snapshot_dir = target
+    try:
+        snapshot_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise RuntimeError(
+            "数据库迁移前快照失败：无法创建快照目录 "
+            f"{snapshot_dir}（{exc}）。请检查磁盘空间与目录写权限后重启；未执行任何迁移。"
+        ) from exc
+
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+    dest = snapshot_dir / f"{_SNAPSHOT_PREFIX}{stamp}.db"
+    try:
+        con = sqlite3.connect(str(db_path), timeout=5)
+        try:
+            con.execute("VACUUM INTO ?", (str(dest),))
+        finally:
+            con.close()
+        if not dest.is_file() or dest.stat().st_size == 0:
+            raise RuntimeError("快照文件为空")
+    except Exception as exc:  # noqa: BLE001
+        try:
+            dest.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise RuntimeError(
+            "数据库迁移前快照失败："
+            f"{db_path} -> {dest}（{type(exc).__name__}: {exc}）。"
+            "常见原因：磁盘空间不足、快照目录不可写、数据库被其他进程长期占用。"
+            "请处理后重启；未执行任何迁移。"
+        ) from exc
+
+    _prune_snapshots(snapshot_dir)
+    log.info("数据库迁移前快照：%s", dest)
+
+
+async def _snapshot_before_init() -> None:
+    await asyncio.to_thread(_snapshot_before_init_sync)
+
+
 async def init_db() -> None:
     _ensure()
+    # Must happen before create_all / additive ALTERs: a failed migration has to be
+    # recoverable from a snapshot taken *before* any DDL ran.
+    await _snapshot_before_init()
     assert _engine is not None
     async with _engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)

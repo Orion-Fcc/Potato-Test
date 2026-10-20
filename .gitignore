@@ -7,7 +7,7 @@ __pycache__/
 *.db
 *.db-journal
 # auto-generated Fernet key (see app/crypto.py) — never commit, it decrypts stored creds
-.potato-secret.key
+.potato-secret.key*
 profiles/
 artifacts/
 auth.json
@@ -116,3 +116,7 @@ project_settings_backup.json
 # 一次性重定向事故留下的垃圾文件（BAT 的 `> 2>&1` 被误敲成 `> 3.5)`）。
 # 忽略而不是删除：删文件是不可逆操作，留在这里至少不会再污染 git status。
 3.5)
+
+# 数据库迁移前快照（app/db.py 用 VACUUM INTO 生成，启动时自动写）。
+# 里面是整库副本，可能含加密凭据与账号信息，只应留在本机 —— 不入库。
+.potato-backups/

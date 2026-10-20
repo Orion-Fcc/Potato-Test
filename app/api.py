@@ -30,7 +30,7 @@ from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sse_starlette.sse import EventSourceResponse
 
-from app import auth, docparse, excel, feishu, feishu_notify, mailer, notify
+from app import auth, docparse, excel, feishu, feishu_notify, key_store, login_state, mailer, notify
 from app.config import get_settings
 from app.crypto import decrypt, encrypt, secret_configured
 from app.gitlab_client import GitLabClient
@@ -113,6 +113,7 @@ from app.schemas import (
     RunIn,
     ResultPatch,
     RunPatch,
+    SecretKeyIn,
     SuiteAssignIn,
     SuiteIn,
     SuitePatch,
@@ -320,6 +321,64 @@ async def set_onboarded(request: Request) -> dict:
         if row.onboarded_at is None:
             row.onboarded_at = datetime.now(UTC)
         return {"onboarded_at": _iso(row.onboarded_at)}
+
+
+# ---- credential key recovery ----
+
+# The recovery page needs the state even when credentials are unusable, so these routes
+# deliberately do not call crypto/secret_configured(). The router already enforces login;
+# export/import additionally require an admin. The key itself is returned only by an
+# explicit POST and is never cached, logged, or persisted anywhere but the key file.
+
+
+@router.get("/secret-key/status")
+async def secret_key_status(request: Request) -> dict:
+    status = key_store.get_status().as_dict()
+    user = await auth.current_user(request)
+    is_admin = not get_settings().auth_enabled or bool(user and user.is_admin)
+    if not is_admin:
+        status.pop("key_file", None)
+    status["recovery_mode"] = not status["can_use_credentials"]
+    return status
+
+
+@router.post("/secret-key/export")
+async def export_secret_key(request: Request, response: Response) -> dict:
+    """One-time display of the current key. POST keeps it out of URL history/caches."""
+    await auth.require_admin(request)
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        key = key_store.export_key()
+    except key_store.SecretKeyMissing as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return {"key": key, "state": key_store.get_status().state.value}
+
+
+@router.post("/secret-key/import")
+async def import_secret_key(body: SecretKeyIn, request: Request) -> dict:
+    """Validate a backup key against stored ciphertext, then persist it atomically."""
+    await auth.require_admin(request)
+    async with db_session() as session:
+        status = await key_store.import_key(body.key, session)
+        if status.can_use_credentials:
+            # The key works again — migrate any legacy plaintext login states now
+            # instead of waiting for the next restart.
+            await login_state.backfill(session)
+    if not status.can_use_credentials:
+        raise HTTPException(
+            400,
+            detail={
+                "message": status.reason or "导入失败：密钥不可用",
+                "status": status.as_dict(),
+            },
+        )
+    return {
+        **status.as_dict(),
+        "recovery_mode": False,
+        # Credentials are usable immediately (cache cleared by import_key), but the
+        # Feishu worker / suite scheduler were not started in recovery mode.
+        "restart_required": True,
+    }
 
 
 # ---- password reset ----
@@ -1218,6 +1277,11 @@ async def list_projects(request: Request) -> list[dict]:
 
 @router.post("/projects")
 async def create_project(body: ProjectIn, request: Request) -> dict:
+    if body.login_state and not secret_configured():
+        raise HTTPException(
+            400,
+            "凭据加密密钥不可用，无法保存登录态；请先在恢复页修复密钥。",
+        )
     async with db_session() as s:
         # Seed the run-tuning fields from the server defaults instead of leaving them
         # NULL. NULL means "follow the system default", which would still work — but the
@@ -1234,7 +1298,6 @@ async def create_project(body: ProjectIn, request: Request) -> dict:
             # set_roles 早就这么做了（第 949 行），项目名以前漏了。
             name=body.name.strip(),
             base_url=body.base_url,
-            login_state=body.login_state,
             group_id=body.group_id,
             case_timeout_s=_s.case_timeout_s,
             case_max_steps=_s.case_max_steps,
@@ -1242,11 +1305,16 @@ async def create_project(body: ProjectIn, request: Request) -> dict:
         )
         s.add(p)
         await s.flush()
+        # 登录态只落加密凭据，绝不写 Project.login_state 明文列。
+        # 旧列保留一个版本只为回滚（见 app/login_state.py）。
+        if body.login_state:
+            await login_state.store(s, p.id, body.login_state)
         # the creator owns the project (so it's visible + manageable under RBAC)
         user = await auth.current_user(request)
         if user is not None:
             s.add(ProjectMember(project_id=p.id, user_id=user.id, role="owner"))
-        return _project(p)
+        await s.flush()
+        return await _project_with_counts(s, p)
 
 
 @router.put("/projects/{pid}")

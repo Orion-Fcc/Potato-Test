@@ -213,6 +213,91 @@ def test_jwt_key_survives_missing_credential_key(tmp_db, key_env):
     assert key_store.get_status().state is key_store.KeyState.MISSING
 
 
+
+
+# --------------------------------------------------------------------------- API
+
+
+@pytest.fixture
+def ready_client(tmp_db, key_env):
+    """Started app with a freshly generated key (no ciphertext yet)."""
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+
+    with TestClient(app) as c:
+        yield c
+
+
+@pytest.fixture
+def recovery_client(tmp_db, key_env):
+    """Started app whose DB has ciphertext but whose key dir is empty."""
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+
+    _, db_session, _ = tmp_db
+    right_key = Fernet.generate_key().decode()
+    token = _run(_seed_ciphertext(db_session, right_key))
+    with TestClient(app) as c:
+        yield c, right_key, token
+
+
+def test_secret_key_status_and_export_when_ready(ready_client):
+    r = ready_client.get("/api/secret-key/status")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["can_use_credentials"] is True
+    assert body["recovery_mode"] is False
+    assert body["state"] == key_store.KeyState.OK_GENERATED.value
+
+    r = ready_client.post("/api/secret-key/export")
+    assert r.status_code == 200
+    assert r.headers.get("cache-control") == "no-store"
+    assert r.json()["key"] == key_store.export_key()
+
+
+def test_recovery_mode_status_does_not_leak_key_and_blocks_export(recovery_client):
+    client, _, _ = recovery_client
+
+    r = client.get("/api/secret-key/status")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["state"] == key_store.KeyState.MISSING.value
+    assert body["can_use_credentials"] is False
+    assert body["recovery_mode"] is True
+    assert body["has_ciphertext"] is True
+
+    r = client.post("/api/secret-key/export")
+    assert r.status_code == 409
+
+
+def test_import_wrong_key_is_rejected_then_right_key_recovers(recovery_client):
+    client, right_key, token = recovery_client
+    primary = key_store.key_dir() / key_store.DPAPI_FILE
+
+    r = client.post(
+        "/api/secret-key/import", json={"key": Fernet.generate_key().decode()}
+    )
+    assert r.status_code == 400
+    detail = r.json()["detail"]
+    assert detail["status"]["state"] == key_store.KeyState.MISMATCH.value
+    assert detail["status"]["can_use_credentials"] is False
+    assert not primary.exists()
+
+    r = client.post("/api/secret-key/import", json={"key": right_key})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["can_use_credentials"] is True
+    assert body["recovery_mode"] is False
+    assert body["restart_required"] is True
+    assert primary.exists()
+
+    r = client.get("/api/secret-key/status")
+    assert r.json()["recovery_mode"] is False
+    assert crypto.decrypt(token) == "stored-secret"
+
+
 @pytest.mark.skipif(sys.platform != "win32", reason="DPAPI is Windows-only")
 def test_dpapi_roundtrip():
     raw = b"dpapi-roundtrip-check"

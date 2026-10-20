@@ -1,5 +1,5 @@
 import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
-import { api, type AuthUser } from "./api";
+import { api, type AuthUser, type SecretKeyStatus } from "./api";
 
 type AuthState = {
   loading: boolean;
@@ -14,6 +14,9 @@ type AuthState = {
    *  entirely, making the LLM config unreachable in a local install. */
   isAdmin: boolean;
   user: AuthUser | null;
+  /** null = 状态未知（请求失败或尚未登录），不据此拦截任何页面。 */
+  keyStatus: SecretKeyStatus | null;
+  refreshKeyStatus: () => Promise<void>;
   login: (email: string, password: string) => Promise<void>;
   logout: () => Promise<void>;
   refresh: () => Promise<void>;
@@ -33,6 +36,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [gitlabEnabled, setGitlabEnabled] = useState(false);
   const [feishuEnabled, setFeishuEnabled] = useState(false);
   const [user, setUser] = useState<AuthUser | null>(null);
+  const [keyStatus, setKeyStatus] = useState<SecretKeyStatus | null>(null);
+
+  const refreshKeyStatus = async () => {
+    try {
+      setKeyStatus(await api.secretKeyStatus());
+    } catch {
+      // A transient failure must not lock the whole app behind /recovery.
+      setKeyStatus(null);
+    }
+  };
 
   const refresh = async () => {
     const cfg = await api
@@ -51,6 +64,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setFeishuEnabled(cfg.feishu_enabled ?? false);
     if (cfg.auth_enabled) setUser(await api.me().catch(() => null));
     else setUser(null);
+    await refreshKeyStatus();
   };
 
   useEffect(() => {
@@ -59,10 +73,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const login = async (email: string, password: string) => {
     setUser(await api.login(email, password));
+    // The status endpoint requires a logged-in user when auth is on.
+    await refreshKeyStatus();
   };
   const logout = async () => {
     await api.logout().catch(() => {});
     setUser(null);
+    setKeyStatus(null);
   };
 
   // No-auth installs have no user row but are owned by whoever runs them, so they
@@ -80,6 +97,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         feishuEnabled,
         isAdmin,
         user,
+        keyStatus,
+        refreshKeyStatus,
         login,
         logout,
         refresh,

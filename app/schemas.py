@@ -15,6 +15,12 @@ class ProjectIn(BaseModel):
     group_id: int | None = None
 
 
+class SecretKeyIn(BaseModel):
+    """凭据加密密钥导入体。密钥只在内存中校验，不写日志。"""
+
+    key: str = Field(min_length=1, max_length=512)
+
+
 class GroupIn(BaseModel):
     """新建「大系统」（2026-10-13）。"""
 

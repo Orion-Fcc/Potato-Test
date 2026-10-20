@@ -26,6 +26,7 @@ const ProposalsPage = lazy(() =>
   import("./pages/ProposalsPage").then((m) => ({ default: m.ProposalsPage })),
 );
 const Projects = lazy(() => import("./pages/Projects").then((m) => ({ default: m.Projects })));
+const RecoveryPage = lazy(() => import("./pages/RecoveryPage").then((m) => ({ default: m.RecoveryPage })));
 const ResetPasswordPage = lazy(() => import("./pages/ResetPasswordPage").then((m) => ({ default: m.ResetPasswordPage })));
 const RunReport = lazy(() => import("./pages/RunReport").then((m) => ({ default: m.RunReport })));
 const RunsPage = lazy(() => import("./pages/RunsPage").then((m) => ({ default: m.RunsPage })));
@@ -38,6 +39,15 @@ function RequireAuth({ children }: { children: React.ReactNode }) {
   const { loading, authEnabled, user } = useAuth();
   if (loading) return <RouteFallback />;
   if (authEnabled && !user) return <Navigate to="/login" replace />;
+  return <>{children}</>;
+}
+
+/** 密钥不可用时把所有工作区页面拦到恢复页。
+ *  keyStatus 为 null 表示"还不知道"（请求失败/未登录）—— 放行，避免网络抖动把应用锁死。 */
+function RequireKeyReady({ children }: { children: React.ReactNode }) {
+  const { loading, keyStatus } = useAuth();
+  if (loading) return <RouteFallback />;
+  if (keyStatus && !keyStatus.can_use_credentials) return <Navigate to="/recovery" replace />;
   return <>{children}</>;
 }
 
@@ -72,10 +82,14 @@ const router = createBrowserRouter([
   { path: "/login", element: S(<LoginPage />) },
   { path: "/invite/:token", element: S(<InvitePage />) },
   { path: "/reset/:token", element: S(<ResetPasswordPage />) },
+  // 恢复页必须留在 RequireKeyReady 之外，否则密钥坏了就再也进不去修。
+  { path: "/recovery", element: <RequireAuth>{S(<RecoveryPage />)}</RequireAuth> },
   {
     element: (
       <RequireAuth>
-        <Layout />
+        <RequireKeyReady>
+          <Layout />
+        </RequireKeyReady>
       </RequireAuth>
     ),
     children: [

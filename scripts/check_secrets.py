@@ -48,7 +48,7 @@ from collections.abc import Iterable
 
 # 这些路径一旦进了索引，就等于把可用的凭据/数据发出去了。
 DANGEROUS_PATHS = re.compile(
-    r"(^|/)(\.env|\.potato-secret\.key|auth\.json|project_settings_backup\.json)$|"
+    r"(^|/)(\.env|\.potato-secret\.key[^/]*|auth\.json|project_settings_backup\.json)$|"
     r"\.(db|db-journal|sqlite|sqlite3)$|"
     r"\.db\.bak|\.env\.bak|"
     r"\.(pid)$|"

@@ -137,6 +137,8 @@ def test_dangerous_paths_cover_the_real_ones() -> None:
     for bad in (
         ".env",
         ".potato-secret.key",
+        ".potato-secret.key.dpapi",
+        ".potato-secret.key.bak",
         "potato.db",
         "potato.db.bak-before-defaults-align-20261004-160128",
         "profiles/project_2/slot0/Default/Cookies",

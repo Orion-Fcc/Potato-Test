@@ -26,6 +26,26 @@ export interface Project {
   } | null;
 }
 
+/** 凭据加密密钥状态（app/key_store.py::KeyStatus.as_dict）。
+ *  恢复模式下 `can_use_credentials=false`，此时凭据、后台任务都不可用。 */
+export interface SecretKeyStatus {
+  state:
+    | "ok_env"
+    | "ok_dpapi"
+    | "ok_legacy_migrated"
+    | "ok_generated"
+    | "missing"
+    | "mismatch"
+    | "invalid";
+  source: string | null;
+  reason: string | null;
+  can_use_credentials: boolean;
+  has_ciphertext: boolean;
+  /** 仅管理员可见；指向磁盘上的密钥文件。 */
+  key_file?: string | null;
+  recovery_mode?: boolean;
+}
+
 /** 「大系统」容器（2026-10-13）：把若干小模块项目归到一个大系统下面。
  *  `knowledge` 是它那份**共享需规**的大小 —— 子项目检索时都会带上它。 */
 export interface ProjectGroup {
@@ -687,6 +707,8 @@ function safeMessage(status: number, raw: string): string {
       const j = JSON.parse(msg) as Record<string, unknown>;
       const d = j.detail ?? j.message ?? j.error;
       if (typeof d === "string") msg = d;
+      else if (d && typeof d === "object" && typeof (d as Record<string, unknown>).message === "string")
+        msg = (d as Record<string, unknown>).message as string;
       else if (Array.isArray(d) && d.length > 0) {
         const first = d[0] as Record<string, unknown>;
         msg = typeof first?.msg === "string" ? first.msg : JSON.stringify(d).slice(0, 300);
@@ -1671,6 +1693,22 @@ export const api = {
     req<AuthUser>("/auth/reset", { method: "POST", body: JSON.stringify({ token, password }) }),
   changePassword: (b: { old_password: string; new_password: string }) =>
     req<{ ok: boolean }>("/auth/change-password", { method: "POST", body: JSON.stringify(b) }),
+
+  // --- credential key lifecycle ---
+  /** 恢复页可用：即使密钥不可用也要能读到状态。 */
+  secretKeyStatus: (o?: Opts) => req<SecretKeyStatus>("/secret-key/status", o),
+  /** 一次性显示当前密钥；只在 POST 响应里返回，浏览器缓存标了 no-store。 */
+  exportSecretKey: () =>
+    req<{ key: string; state: SecretKeyStatus["state"] }>("/secret-key/export", {
+      method: "POST",
+    }),
+  /** 导入备份密钥。服务端会用现有密文校验，错误密钥不会覆盖原文件。 */
+  importSecretKey: (key: string) =>
+    req<SecretKeyStatus & { restart_required: boolean }>("/secret-key/import", {
+      method: "POST",
+      body: JSON.stringify({ key }),
+      timeoutMs: 60_000,
+    }),
 
   // --- admin ---
   listUsers: (o?: Opts) => req<AdminUser[]>("/admin/users", o),

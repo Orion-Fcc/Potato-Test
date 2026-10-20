@@ -91,6 +91,28 @@ async def _backfill_knowledge_chunks() -> None:
         log.warning("knowledge backfill skipped: %s", exc)
 
 
+async def _backfill_login_states() -> None:
+    """Move legacy plaintext `Project.login_state` into encrypted credentials.
+
+    Runs once per boot and is idempotent (see app/login_state.py). A failure must
+    not block boot — the old read path still falls back to the plaintext column,
+    so a partial migration only postpones the security fix, it does not break runs.
+    """
+    import logging
+
+    from app import login_state
+    from app.db import db_session
+
+    log = logging.getLogger("potato-test.boot")
+    try:
+        async with db_session() as s:
+            moved = await login_state.backfill(s)
+        if moved:
+            log.info("login state backfill: %s project(s) migrated", moved)
+    except Exception as exc:  # noqa: BLE001 — migration failure must not block boot
+        log.warning("login state backfill skipped: %s", exc)
+
+
 async def _start_feishu_worker():
     """把飞书轮询机器人挂到本服务进程上（返回 task，或 None 表示没启动）。
 
@@ -206,6 +228,7 @@ async def lifespan(app: FastAPI):
     await _seed_admin()
     await _fail_orphaned_runs()
     await _backfill_knowledge_chunks()
+    await _backfill_login_states()
 
     # Background workers read encrypted credentials. Starting them in recovery mode would
     # only produce silent failures, so they stay off until the key is fixed.

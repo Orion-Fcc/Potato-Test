@@ -1483,6 +1483,36 @@ const zh: Record<string, string> = {
     "把现有文件也搬过去（同盘很快，跨盘要等）",
   "Takes effect after restarting the app.": "重启应用后生效。",
 
+  // ---- 密钥恢复页（2026-10-20）----------------------------------------------
+  "Credential encryption key": "凭据加密密钥",
+  "Saved logins and browser sessions are encrypted with this key. Keep a backup somewhere safe: without it, existing credentials cannot be recovered.":
+    "保存的登录态和浏览器会话都用这个密钥加密。请把备份放在安全的地方：一旦丢失，已有凭据将无法恢复。",
+  "Back up this key": "备份这个密钥",
+  "The key is shown once. Save it now if you have not already.": "密钥只显示一次。还没保存的话，现在就保存。",
+  "Anyone with this key can decrypt your saved logins. Do not share it.":
+    "拿到这个密钥的人都能解密你保存的登录态，不要分享给他人。",
+  "Export backup key": "导出备份密钥",
+  "Switch to a backup key": "使用备份密钥切换",
+  "Restore from a backup key": "从备份密钥恢复",
+  "Paste a key exported earlier. If the database already has encrypted credentials, the key must decrypt them or it will be rejected.":
+    "粘贴之前导出的密钥。如果数据库里已有加密凭据，该密钥必须能解密它们，否则会被拒绝。",
+  "Paste the key you exported from this app. It is checked against the existing encrypted credentials before anything is written.":
+    "粘贴从这个应用导出的密钥。写入任何内容之前，会先拿它校验已有的加密凭据。",
+  "Backup key": "备份密钥",
+  "Show key again": "重新显示密钥",
+  "Import key": "导入密钥",
+  "Validating…": "正在校验…",
+  "Key restored.": "密钥已恢复。",
+  "Key restored. Restart the app to start background workers.":
+    "密钥已恢复。重启应用后后台任务才会开始工作。",
+  "Only an administrator can export or import the key.": "只有管理员可以导出或导入密钥。",
+  "Key status is unavailable. Check that the backend is reachable.":
+    "无法获取密钥状态，请确认后端可访问。",
+  "Copy failed — select the text and copy it manually.":
+    "复制失败 —— 请手动选中文本后复制。",
+  "Back to workspace": "返回工作区",
+  "Hide": "隐藏",
+
 };
 
 // 只在本文件里读写（init 与 setLang），故不导出。

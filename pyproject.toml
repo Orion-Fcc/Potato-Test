@@ -7,7 +7,7 @@ packages = ["app"]  # only app/ is the package; web/alembic/artifacts are not
 
 [project]
 name = "potato"
-version = "1.0.4"
+version = "1.0.5"
 description = "Potato Test — agentic E2E test platform: NL test cases executed in a real browser, recorded, judged."
 # ★ 只认 3.13（2026-10-20）：打包产物里是 python313.dll，而这里以前写 >=3.11、
 #   CI 也跑 3.11 —— 于是"CI 绿"和"装出来的东西能用"之间没有关系。

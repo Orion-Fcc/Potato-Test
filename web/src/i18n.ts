@@ -1049,6 +1049,7 @@ const zh: Record<string, string> = {
   "显示全部用例": "显示全部用例",
   // 项目文档 / 富文本编辑器（2026-10-12）
   "Project Docs": "项目文档",
+  "Project Workspace": "项目工作台",
   "New document": "新建文档",
   "AI 读过的项目说明：总览、需求分析、流程图。可以像 Word 一样编辑。":
     "AI 读过的项目说明：总览、需求分析、流程图。可以像 Word 一样编辑。",

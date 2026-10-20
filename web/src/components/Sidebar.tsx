@@ -18,7 +18,6 @@ import {
   Settings as SettingsIcon,
   ShieldCheck,
   Sparkle,
-  Sparkles,
   Users,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
@@ -39,12 +38,10 @@ const NAV_GROUPS = [
     label: null, // the first group needs no header — it sits right under the project name
     items: [
       { key: "overview", label: "Overview", Icon: LayoutDashboard },
-      // 「项目文档」放在概览之后、助手之前（2026-10-12）。
-      // 为什么这个位置：它回答的是"这个项目是什么"——那是看任何东西之前的第一问；
-      // 而助手是"让 AI 帮你做事"，属于第二问。放在测试资产组里也不对，
-      // 因为它不是测试资产，是项目的说明材料。
-      { key: "docs", label: "Project Docs", Icon: FileText },
-      { key: "assistant", label: "Assistant", Icon: Sparkles },
+      // 「项目工作台」是文档 + AI 助手的唯一入口（2026-10-21 合并）。
+      // 文档回答"这个项目是什么"；AI 面板右侧常驻，用模式切换决定
+      // 是改当前文档，还是查项目全局（用例 / 运行 / 问题）。
+      { key: "docs", label: "Project Workspace", Icon: FileText },
     ],
   },
   {

@@ -106,7 +106,9 @@ const router = createBrowserRouter([
       { path: "/projects/:pid/overview", element: S(<OverviewPage />) },
       { path: "/projects/:pid/docs", element: S(<WorkspacePage />) },
       { path: "/projects/:pid/proposals", element: S(<ProposalsPage />) },
-      { path: "/projects/:pid/assistant", element: S(<WorkspacePage />) },
+      // 原独立「助手」页已合并进「项目工作台」右侧 AI 面板（2026-10-21）。
+      // 保留重定向，旧书签不会 404。
+      { path: "/projects/:pid/assistant", element: <Navigate to="../docs" replace /> },
       { path: "/projects/:pid/cases", element: S(<CasesPage />) },
       { path: "/projects/:pid/suites", element: S(<SuitesPage />) },
       { path: "/projects/:pid/runs", element: S(<RunsPage />) },

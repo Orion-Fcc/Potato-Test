@@ -33,6 +33,7 @@ from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 COOKIE = "tp_desktop"
 ENV_TOKEN = "POTATO_DESKTOP_TOKEN"
+HEADER = "X-Potato-Desktop-Token"
 
 # 纯内联样式（不引用任何外部资源）：被拦的是浏览器而不是窗口，此时还没有前端可加载。
 _BLOCKED_HTML = """<!doctype html>
@@ -67,6 +68,14 @@ class DesktopGate(BaseHTTPMiddleware):
 
         cookie = request.cookies.get(COOKIE, "")
         if cookie and hmac.compare_digest(cookie, token):
+            return await call_next(request)
+
+        # In-process callers (the assistant's loopback REST client) carry the
+        # same per-process token in a header. A header is deliberate: unlike a
+        # cookie the browser never attaches it automatically, so a random web
+        # page cannot ride an existing desktop session.
+        header = request.headers.get(HEADER, "")
+        if header and hmac.compare_digest(header, token):
             return await call_next(request)
 
         given = request.query_params.get("__t", "")

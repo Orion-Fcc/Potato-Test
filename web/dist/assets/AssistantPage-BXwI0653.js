@@ -1,30 +1,30 @@
-import{l as p,f as J,u as F,h as U,j as e,L as W,X,w as G,c as C,v as Q}from"./index-n72i72P5.js";import{r,c as j}from"./vendor-charts-Ci30Xjc1.js";import{T as Y}from"./trash-DqQ8l_RK.js";import"./vendor-media-KErm69Jg.js";/**
- * @license lucide-react v1.49.0 - ISC
+import{l as p,f as J,u as F,h as U,j as e,L as W,X,w as G,c as C,v as Q}from"./index-D7LvlCJe.js";import{r,c as j}from"./vendor-charts-Ci30Xjc1.js";import{T as Y}from"./trash-nqqi2hqb.js";import"./vendor-media-KErm69Jg.js";/**
+ * @license lucide-react v1.51.0 - ISC
  *
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */const I={name:"book-open",size:24,node:[["path",{d:"M12 5v16",key:"1f6ucr"}],["path",{d:"M20.001 19A2 2 0 0022 17V5a2 2 0 00-1.999-2L16 3.002A5 5 0 0012 5a5 5 0 00-4-2H4a2 2 0 00-2 2v12a2 2 0 001.999 2H8a5 5 0 014 2 5 5 0 014-2z",key:"1fyvmf"}]]};I.node;const Z=p(I);/**
- * @license lucide-react v1.49.0 - ISC
+ * @license lucide-react v1.51.0 - ISC
  *
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */const L={name:"bot",size:24,node:[["path",{d:"M12 8V4H8",key:"hb8ula"}],["rect",{width:"16",height:"12",x:"4",y:"8",rx:"2",key:"enze0r"}],["path",{d:"M2 14h2",key:"vft8re"}],["path",{d:"M20 14h2",key:"4cs60a"}],["path",{d:"M15 13v2",key:"1xurst"}],["path",{d:"M9 13v2",key:"rq6x2g"}]]};L.node;const N=p(L);/**
- * @license lucide-react v1.49.0 - ISC
+ * @license lucide-react v1.51.0 - ISC
  *
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */const P={name:"paperclip",size:24,node:[["path",{d:"m16 6-8.414 8.586a2 2 0 0 0 2.829 2.829l8.414-8.586a4 4 0 1 0-5.657-5.657l-8.379 8.551a6 6 0 1 0 8.485 8.485l8.379-8.551",key:"1miecu"}]]};P.node;const E=p(P);/**
- * @license lucide-react v1.49.0 - ISC
+ * @license lucide-react v1.51.0 - ISC
  *
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */const T={name:"send",size:24,node:[["path",{d:"M14.536 21.686a.5.5 0 0 0 .937-.024l6.5-19a.496.496 0 0 0-.635-.635l-19 6.5a.5.5 0 0 0-.024.937l7.93 3.18a2 2 0 0 1 1.112 1.11z",key:"1ffxy3"}],["path",{d:"m21.854 2.147-10.94 10.939",key:"12cjpa"}]]};T.node;const ee=p(T);/**
- * @license lucide-react v1.49.0 - ISC
+ * @license lucide-react v1.51.0 - ISC
  *
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */const R={name:"user",size:24,node:[["path",{d:"M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2",key:"975kel"}],["circle",{cx:"12",cy:"7",r:"4",key:"17ys0d"}]]};R.node;const ae=p(R);/**
- * @license lucide-react v1.49.0 - ISC
+ * @license lucide-react v1.51.0 - ISC
  *
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.

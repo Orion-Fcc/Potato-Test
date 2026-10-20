@@ -16,7 +16,7 @@ from starlette.responses import PlainTextResponse
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.desktop_gate import COOKIE, ENV_TOKEN, DesktopGate  # noqa: E402
+from app.desktop_gate import COOKIE, ENV_TOKEN, HEADER, DesktopGate  # noqa: E402
 
 TOKEN = "test-token-123"
 
@@ -86,3 +86,60 @@ def test_app_factory_actually_installs_it():
 
     app = create_app()
     assert any(m.cls is DesktopGate for m in app.user_middleware), "create_app 没装 DesktopGate"
+
+
+def test_token_header_is_accepted(monkeypatch):
+    """同进程调用（助手）带 token 头 → 放行，不需要先做 cookie 握手。"""
+    monkeypatch.setenv(ENV_TOKEN, TOKEN)
+    c = TestClient(_app())
+    r = c.get("/api/projects", headers={HEADER: TOKEN})
+    assert r.status_code == 200
+    assert r.json() == {"ok": True}
+
+
+def test_wrong_token_header_is_blocked(monkeypatch):
+    monkeypatch.setenv(ENV_TOKEN, TOKEN)
+    c = TestClient(_app())
+    assert c.get("/api/projects", headers={HEADER: "wrong-token"}).status_code == 403
+
+
+def test_assistant_self_headers_follow_env(monkeypatch):
+    from app import assistant
+
+    monkeypatch.setenv(ENV_TOKEN, TOKEN)
+    assert assistant._desktop_headers() == {HEADER: TOKEN}
+    monkeypatch.delenv(ENV_TOKEN, raising=False)
+    assert assistant._desktop_headers() == {}
+
+
+async def test_assistant_api_sends_desktop_token(monkeypatch):
+    """_api() 必须把 token 放进请求头，否则桌面版会 403。"""
+    from app import assistant
+
+    class _Resp:
+        status_code = 200
+        text = "{}"
+
+        def json(self):
+            return {"ok": True}
+
+    captured = {}
+
+    class _Client:
+        def __init__(self, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def request(self, method, url, json=None, headers=None):
+            captured.update(headers or {})
+            return _Resp()
+
+    monkeypatch.setenv(ENV_TOKEN, TOKEN)
+    monkeypatch.setattr(assistant.httpx, "AsyncClient", _Client)
+    assert await assistant._api("GET", "/api/projects") == {"ok": True}
+    assert captured == {HEADER: TOKEN}

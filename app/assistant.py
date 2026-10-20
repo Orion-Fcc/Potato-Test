@@ -58,6 +58,20 @@ def _self_base() -> str:
     return f"http://127.0.0.1:{port}"
 
 
+def _desktop_headers() -> dict[str, str]:
+    """Credential for Potato Test's own DesktopGate.
+
+    In the packaged app the gate is active and rejects every loopback REST call
+    without it -- including the OpenAPI catalog. The token is per-process and is
+    only ever sent to 127.0.0.1. A header (not a cookie) keeps it out of the URL
+    and means cross-site requests cannot carry it implicitly.
+    """
+    from app.desktop_gate import ENV_TOKEN, HEADER
+
+    token = (os.environ.get(ENV_TOKEN) or "").strip()
+    return {HEADER: token} if token else {}
+
+
 def _listening_port() -> str | None:
     """The port this very process bound. Falls back to None when undetectable."""
     try:
@@ -88,7 +102,7 @@ async def _api_catalog() -> str:
         # send 127.0.0.1 through it, and a stale proxy port turns every self-call
         # into "All connection attempts failed".
         async with httpx.AsyncClient(timeout=20, trust_env=False) as c:
-            spec = (await c.get(_self_base() + "/openapi.json")).json()
+            spec = (await c.get(_self_base() + "/openapi.json", headers=_desktop_headers())).json()
         for path, ops in sorted((spec.get("paths") or {}).items()):
             for method, meta in ops.items():
                 if method.upper() not in ("GET", "POST", "PUT", "PATCH", "DELETE"):
@@ -1059,6 +1073,7 @@ async def _api(
 ):
     # Loopback: never route through a proxy (see _api_catalog for why).
     safe = {k: _header_safe(v) for k, v in (headers or {}).items()}
+    safe.update(_desktop_headers())  # token wins over a caller-supplied value
     async with httpx.AsyncClient(timeout=60, trust_env=False) as c:
         r = await c.request(method, _self_base() + path, json=body, headers=safe)
         if r.status_code >= 400:

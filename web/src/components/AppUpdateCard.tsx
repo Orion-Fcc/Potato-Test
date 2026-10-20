@@ -1,6 +1,6 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { api, type AppUpdateInfo } from "../lib/api";
+import { api, type AppUpdateInfo, type AppUpdateInstallState } from "../lib/api";
 import { Button, Card } from "../components/ui";
 import { useErrorToast, useToast } from "../components/toast";
 
@@ -17,6 +17,8 @@ import { useErrorToast, useToast } from "../components/toast";
  *  * **查不到用灰字，不用红字**。断网 / 还没发过 Release 是正常状态，
  *    标成错误会让应用看起来坏了。
  */
+const mb = (n: number) => (n / 1024 / 1024).toFixed(1);
+
 export function AppUpdateCard() {
   const { t } = useTranslation();
   const toast = useToast();
@@ -24,6 +26,80 @@ export function AppUpdateCard() {
   const [info, setInfo] = useState<AppUpdateInfo | null>(null);
   const [checking, setChecking] = useState(false);
   const [installing, setInstalling] = useState(false);
+  const [installState, setInstallState] = useState<AppUpdateInstallState | null>(null);
+  const pollTimer = useRef<number | null>(null);
+  const pollFails = useRef(0);
+
+  const stopPolling = () => {
+    if (pollTimer.current != null) {
+      window.clearTimeout(pollTimer.current);
+      pollTimer.current = null;
+    }
+  };
+
+  // 组件卸载后别再往死状态里写（设置页切走很常见）；重新进入时若后台还在下载，
+  // 自动接上进度，而不是让用户以为任务丢了。
+  useEffect(() => {
+    let alive = true;
+    api
+      .getAppUpdateInstall()
+      .then((s) => {
+        if (!alive) return;
+        if (s.phase === "downloading" || s.phase === "verifying" || s.phase === "installing") {
+          setInstallState(s);
+          setInstalling(true);
+          pollFails.current = 0;
+          pollProgress();
+        }
+      })
+      .catch(() => {
+        /* 没有进行中的任务 / 后端还没起来：保持静默 */
+      });
+    return () => {
+      alive = false;
+      stopPolling();
+    };
+  }, []);
+
+  /** 每秒问一次后台任务。下载 480 MB 可能要几分钟，靠轮询而不是长请求扛住。 */
+  const pollProgress = () => {
+    pollTimer.current = window.setTimeout(async () => {
+      try {
+        const s = await api.getAppUpdateInstall();
+        pollFails.current = 0;
+        setInstallState(s);
+        if (s.phase === "error") {
+          stopPolling();
+          setInstalling(false);
+          fail(s.error || t("Update failed"));
+          return;
+        }
+        if (s.phase === "installing" || s.phase === "done") {
+          stopPolling();
+          toast("success", s.message || t("The app will close and install the update automatically."));
+          // 桌面版这里会退出安装；窗口关掉 = 进程结束。
+          setTimeout(() => window.close(), 800);
+          return;
+        }
+        if (s.phase === "downloading" || s.phase === "verifying") {
+          pollProgress();
+          return;
+        }
+        stopPolling();
+        setInstalling(false);
+      } catch (e: any) {
+        // 校验大文件时后端可能短暂繁忙，单次失败不判死；连续 5 次才报。
+        pollFails.current += 1;
+        if (pollFails.current >= 5) {
+          stopPolling();
+          setInstalling(false);
+          fail(e);
+          return;
+        }
+        pollProgress();
+      }
+    }, 1000);
+  };
 
   const check = async (force: boolean) => {
     setChecking(true);
@@ -40,16 +116,23 @@ export function AppUpdateCard() {
     if (!info?.download_url) return;
     setInstalling(true);
     try {
+      // 立即返回，真正的下载在后台；进度由 pollProgress 轮询。
       const r = await api.installAppUpdate(info.download_url);
-      toast("success", r.message || t("The app will close and install the update automatically."));
-      // 桌面版这里会退出安装；窗口关掉 = 进程结束。网页端不会走到这一步（后端已拒绝）。
-      setTimeout(() => window.close(), 800);
+      setInstallState(r.state);
+      pollFails.current = 0;
+      pollProgress();
     } catch (e: any) {
-      fail(e);
-    } finally {
       setInstalling(false);
+      fail(e);
     }
   };
+
+  const installLabel =
+    installState?.phase === "verifying"
+      ? t("Verifying…")
+      : installState?.phase === "installing"
+        ? t("Installing…")
+        : t("Downloading…");
 
   return (
     <Card className="max-w-2xl space-y-3 p-4">
@@ -79,7 +162,7 @@ export function AppUpdateCard() {
         <div className="flex flex-wrap items-center gap-3">
           {info.install_supported && info.download_url ? (
             <Button onClick={install} disabled={installing}>
-              {installing ? t("Downloading…") : t("Download and install")}
+              {installing ? installLabel : t("Download and install")}
             </Button>
           ) : (
             <a
@@ -93,6 +176,21 @@ export function AppUpdateCard() {
           )}
         </div>
       )}
+
+      {installing && installState &&
+        (installState.phase === "downloading" || installState.phase === "verifying") && (
+          <div className="text-xs text-ink-500">
+            {installState.phase === "verifying"
+              ? t("Verifying…")
+              : `${t("Downloading…")}${installState.percent != null ? ` ${installState.percent}%` : ""}`}
+            {installState.phase === "downloading" && installState.total > 0 && (
+              <>
+                {" · "}
+                {mb(installState.downloaded)} / {mb(installState.total)} MB
+              </>
+            )}
+          </div>
+        )}
 
       {info?.has_update && info.notes && (
         <div className="rounded-lg bg-[var(--panel2)] px-3 py-2">

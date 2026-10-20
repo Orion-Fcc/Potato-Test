@@ -5776,7 +5776,11 @@ async def app_update(force: bool = False) -> dict:
 
 @router.post("/app/update/install")
 async def app_update_install(body: dict) -> dict:
-    """下载更新包并静默安装。**仅桌面版**。"""
+    """启动后台下载更新包。**仅桌面版**。
+
+    立即返回，不等下载完 —— 安装包约 480 MB，同步等待必然撞上前端超时。
+    进度用 GET /app/update/install/status 轮询。
+    """
     import tempfile
     from pathlib import Path
 
@@ -5793,17 +5797,20 @@ async def app_update_install(body: dict) -> dict:
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
 
-    try:
-        path = await updater.download_installer(url, Path(tempfile.gettempdir()) / "potato-update")
-    except Exception as exc:  # noqa: BLE001 — 下载失败要说清原因，别让用户以为点空了
-        raise HTTPException(502, f"下载更新包失败：{exc}") from exc
-
-    updater.launch_installer(path)  # 延迟 6 秒：留给应用退出
+    state = updater.start_install(url, Path(tempfile.gettempdir()) / "potato-update")
     return {
         "started": True,
-        "installer": str(path),
-        "message": "更新包已下载，应用即将退出并自动安装",
+        "message": "正在下载更新包",
+        "state": state,
     }
+
+
+@router.get("/app/update/install/status")
+async def app_update_install_status() -> dict:
+    """后台安装任务的进度：downloading / verifying / installing / done / error。"""
+    from app import updater
+
+    return updater.install_status()
 
 
 # ---- 文件存放位置（2026-10-19 用户要求）--------------------------------------

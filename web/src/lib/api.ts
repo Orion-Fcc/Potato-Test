@@ -1180,6 +1180,17 @@ export type AppUpdateInfo = {
   error: string | null;
 };
 
+/** 后台安装任务的状态（GET /api/app/update/install/status）。
+ *  下载是异步的 —— 安装包约 480 MB，同步请求会先撞上前端超时。 */
+export type AppUpdateInstallState = {
+  phase: "idle" | "downloading" | "verifying" | "installing" | "done" | "error";
+  downloaded: number;
+  total: number;
+  percent: number | null;
+  error: string | null;
+  message: string;
+};
+
 export const api = {
   listProjects: (o?: Opts) => req<Project[]>("/projects", o),
   /** 单个项目详情。形状与 listProjects 的每一项逐字段一致（后端共用同一个 helper）。 */
@@ -1747,12 +1758,15 @@ export const api = {
       method: "PUT",
       body: JSON.stringify({ dir, move_existing: moveExisting }),
     }),
-  /** 下载并静默安装更新（仅桌面版；网页版后端会明确拒绝）。 */
+  /** 启动后台下载（仅桌面版；网页版后端会明确拒绝）。立即返回，进度另行轮询。 */
   installAppUpdate: (url: string) =>
-    req<{ started: boolean; installer: string; message: string }>("/app/update/install", {
+    req<{ started: boolean; message: string; state: AppUpdateInstallState }>("/app/update/install", {
       method: "POST",
       body: JSON.stringify({ url }),
     }),
+  /** 轮询安装进度。单次很快，超时给 15 秒足够。 */
+  getAppUpdateInstall: () =>
+    req<AppUpdateInstallState>("/app/update/install/status", { timeoutMs: 15_000 }),
   // ★ 池为空时这里回一条从 .env 读出来的**回显**条目（seeded=true），而不是空列表 ——
   // 空列表会让界面显示"没有配置"，而实际上平台正在用 .env 那一套跑。
   getLlmPool: () =>

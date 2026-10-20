@@ -1,0 +1,58 @@
+# 依赖锁文件（2026-10-20，P0-1）
+#
+# 用法（CI 与本地打包同一份）：
+#     pip install -c constraints.txt -e ".[dev,desktop]"
+#
+# ## 为什么锁的是"直接依赖"而不是 `pip freeze` 全量
+#
+# 本机 venv 里有两个包是从**本地 wheel** 装的（`opencv-python-headless`、
+# `tokenizers` 的 `@ file:///C:/tmp/...`），把它们原样冻进锁文件会让别的机器
+# 去一个不存在的路径找文件；而 venv 里还混着一堆只在本机装过、与项目无关的包
+# （anthropic / google-genai / mcp ...）。全量 freeze 既不能跨平台，也不表达
+# "项目到底依赖什么"。
+#
+# 这里锁住 `pyproject.toml` 声明的**每一个直接依赖**到本机验证过的版本，
+# 传递依赖仍由 pip 解析（`pip check` 会在 CI 里检查冲突）。新增直接依赖时
+# `tests/test_dependency_lock.py` 会失败，提醒你把版本补进来。
+#
+# 升级某个包：改 pyproject 的范围 → 在干净环境装上 → 用 `pip show` 的实际版本
+# 更新这里的 `==` → 跑测试与打包冒烟。
+
+# --- 运行时（pyproject [project].dependencies）---
+fastapi==0.142.1
+uvicorn==0.54.0
+sqlalchemy==2.1.1
+aiosqlite==0.22.1
+pydantic-settings==2.15.0
+httpx==0.28.1
+sse-starlette==3.5.0
+openai==2.26.0
+cryptography==50.0.1
+openpyxl==3.1.5
+python-multipart==0.0.32
+bcrypt==5.0.0
+pyjwt==2.15.1
+browser-use==0.13.10
+playwright==1.63.0
+python-docx==1.2.0
+pypdf==6.16.2
+beautifulsoup4==4.15.0
+lxml==6.1.3
+markdownify==1.2.2
+tokenizers==0.23.3
+opencv-python-headless==5.0.0.93
+pymupdf==1.28.2
+rapidocr==3.10.0
+pillow==12.3.0
+numpy==2.4.1
+
+# --- 开发工具（dev extra）---
+pytest==9.1.1
+pytest-asyncio==1.4.0
+pytest-cov==7.1.0
+mypy==1.20.2
+ruff==0.9.0
+
+# --- 打包桌面版（desktop extra，仅 Windows）---
+pywebview==6.2.1; sys_platform == "win32"
+pyinstaller==6.22.3; sys_platform == "win32"

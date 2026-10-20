@@ -14,6 +14,12 @@ GitHub 上必须有一个**带 `PotatoTest-Setup-*.exe` 资产**的 Release。�
     python scripts\\release.py --publish     &:: 用当前版本发 Release + 传安装包
     python scripts\\release.py --publish --notes-file notes.md
 
+## 每次发布上传两个资产
+
+`PotatoTest-Setup-x.y.z.exe` + 同名 `.sha256`。后者不是附赠品：`app/updater.py`
+拿到安装包后**必须**比对哈希，校验文件缺失或对不上就拒绝执行。`--publish` 会
+按"先校验文件、后安装包"的顺序上传，避免中途断掉留下"有包无哈希"的状态。
+
 ## 三处版本号必须一致
 
 `app/version.py` / `pyproject.toml` / `installer/potato.iss` ——
@@ -23,11 +29,11 @@ GitHub 上必须有一个**带 `PotatoTest-Setup-*.exe` 资产**的 Release。�
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
 import subprocess
-import sys
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -87,7 +93,65 @@ def verify() -> str:
     return v
 
 
-def _api(method: str, url: str, token: str, data: bytes | None = None, ctype: str = "application/json"):
+def _sha256_of(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _write_checksum(installer: Path) -> Path:
+    """写 `<安装包名>.sha256`（sha256sum 格式）。
+
+    ★ 必须有：`app/updater.py` 现在**没有校验值就拒绝安装**。这不是可选项 ——
+    漏传这个资产，用户的"一键更新"会直接报"取不到更新包校验值"。
+    """
+    digest = _sha256_of(installer)
+    out = installer.with_name(installer.name + ".sha256")
+    out.write_text(f"{digest}  {installer.name}\n", encoding="utf-8")
+    print(f"  SHA-256 {digest}")
+    return out
+
+
+def _upload_asset(upload_url: str, token: str, path: Path) -> dict:
+    """上传单个资产（curl）。返回 GitHub 的 asset 对象。
+
+    ★ 用 curl 不上 urllib：190MB+ 的包走 urllib 会 write timeout
+    （实测 5 分钟超时，而 curl 只要 20 多秒）。上次就是因为这个，旧资产删了、
+    新的没传上去。
+    """
+    up = f"{upload_url}?name={urllib.parse.quote(path.name)}"
+    r = subprocess.run(
+        [
+            # --ssl-no-revoke：本机的证书吊销列表服务器常常连不上
+            # （curl 报 CRYPT_E_REVOCATION_OFFLINE），不跳过吊销检查会直接失败。
+            "curl", "-sS", "--ssl-no-revoke", "--noproxy", "*", "-m", "1800", "-X", "POST",
+            "-H", f"Authorization: Bearer {token}",
+            "-H", "Content-Type: application/octet-stream",
+            "-H", "Accept: application/vnd.github+json",
+            "--data-binary", f"@{path}",
+            up,
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if r.returncode != 0:
+        raise SystemExit(f"上传 {path.name} 失败（curl {r.returncode}）：{(r.stderr or '')[:300]}")
+    try:
+        asset = json.loads(r.stdout)
+    except Exception:
+        raise SystemExit(f"上传 {path.name} 返回看不懂：{(r.stdout or r.stderr or '')[:300]}")
+    if not asset.get("browser_download_url"):
+        raise SystemExit(f"上传 {path.name} 没有返回下载地址：{str(asset)[:300]}")
+    return asset
+
+
+def _api(
+    method: str, url: str, token: str, data: bytes | None = None, ctype: str = "application/json"
+):
     req = urllib.request.Request(url, data=data, method=method)
     req.add_header("Authorization", f"Bearer {token}")
     req.add_header("Accept", "application/vnd.github+json")
@@ -140,37 +204,18 @@ def publish(notes: str) -> None:
         rel = _api("GET", f"{GITHUB_API}/repos/{repo}/releases/tags/{tag}", token)
     upload_url = str(rel["upload_url"]).split("{")[0]
 
+    # ★ 先传校验文件，再传安装包。顺序是有意的：安装包一直在变大，
+    #   万一传到一半断了，Release 里至少不会出现"有安装包、没校验值"的状态 ——
+    #   新版本 updater 遇到那种状态会拒绝安装（宁可不更新，也不执行未验证的 exe）。
+    checksum = _write_checksum(installer)
+    print(f"上传 {checksum.name} …")
+    _upload_asset(upload_url, token, checksum)
+
     print(f"上传 {installer.name}（{installer.stat().st_size // 1024 // 1024} MB）…")
-    # ★ 用 curl 上传，不用 urllib：190MB+ 的包走 urllib 会 write timeout
-    #（实测 5 分钟超时，而 curl 只要 20 多秒）。上次就是因为这个，旧资产删了、新的没传上去。
-    # --noproxy '*'：传大文件直连更稳（走本地代理容易被限速或中途断）。
-    up = f"{upload_url}?name={urllib.parse.quote(installer.name)}"
-    r = subprocess.run(
-        [
-            # --ssl-no-revoke：本机的证书吊销列表服务器常常连不上
-            # （curl 报 CRYPT_E_REVOCATION_OFFLINE），不跳过吊销检查会直接失败。
-            "curl", "-sS", "--ssl-no-revoke", "--noproxy", "*", "-m", "1800", "-X", "POST",
-            "-H", f"Authorization: Bearer {token}",
-            "-H", "Content-Type: application/octet-stream",
-            "-H", "Accept: application/vnd.github+json",
-            "--data-binary", f"@{installer}",
-            up,
-        ],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
-    if r.returncode != 0:
-        raise SystemExit(f"上传失败（curl {r.returncode}）：{(r.stderr or '')[:300]}")
-    try:
-        asset = json.loads(r.stdout)
-    except Exception:
-        raise SystemExit(f"上传返回看不懂：{(r.stdout or r.stderr or '')[:300]}")
-    if not asset.get("browser_download_url"):
-        raise SystemExit(f"上传没有返回下载地址：{str(asset)[:300]}")
+    asset = _upload_asset(upload_url, token, installer)
     print(f"完成：{rel.get('html_url')}")
     print(f"资产：{asset.get('browser_download_url')}")
+    print(f"校验：{checksum.name} → {_sha256_of(installer)}")
     print("\n注意：版本号已改，但代码还没提交 —— 记得 git commit + push。")
 
 

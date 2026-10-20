@@ -1,15 +1,19 @@
 """应用更新（`app/updater.py`）的测试（2026-10-17）。
 
-这组守的是三件事，缺一条这个功能就会变成风险：
+这组守的是四件事，缺一条这个功能就会变成风险：
 
 1. **版本号只有一个源** —— 三处（`app/version.py` / `pyproject.toml` /
    `installer/potato.iss`）不一致，"检查更新"就会永远判断错；
 2. **下载白名单不能漏** —— 这个接口会下载并执行一个 exe，白名单漏了就是远程代码执行；
-3. **查不到更新不能算错误** —— 断网 / 还没发 Release 都是正常状态，不该让应用显得坏了。
+3. **查不到更新不能算错误** —— 断网 / 还没发 Release 都是正常状态，不该让应用显得坏了；
+4. **哈希对不上就不执行**（2026-10-20）—— 校验清单缺失、格式不对、哈希不一致，
+   任何一种都必须拒装并删掉下载物。否则这个接口就是一个"下载什么就执行什么"的后门。
 """
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import pathlib
 import re
 import sys
@@ -174,3 +178,110 @@ def test_network_failure_is_soft(monkeypatch):
     out = asyncio.run(_run_check())
     assert out["has_update"] is False
     assert out["error"], "断网时必须有可读的提示，而不是抛异常"
+
+
+# ---- 5. 安装包完整性校验（2026-10-20） --------------------------------------
+_SETUP_URL = f"https://github.com/{GITHUB_REPO}/releases/download/v1.0.1/PotatoTest-Setup-1.0.1.exe"
+_PAYLOAD = b"MZ-fake-installer-bytes" * 100
+_DIGEST = hashlib.sha256(_PAYLOAD).hexdigest()
+
+
+def _patch_download(monkeypatch, checksum: str | Exception):
+    """把"下文件"换成写固定内容，把"取校验值"换成返回/抛出固定值。"""
+
+    async def _fake_stream(url, tmp):
+        tmp.write_bytes(_PAYLOAD)
+
+    async def _fake_checksum(url):
+        if isinstance(checksum, Exception):
+            raise checksum
+        return checksum
+
+    monkeypatch.setattr(updater, "_stream_download", _fake_stream)
+    monkeypatch.setattr(updater, "_fetch_checksum", _fake_checksum)
+
+
+def test_checksum_url_is_derived_from_installer():
+    assert updater.checksum_url_for(_SETUP_URL) == _SETUP_URL + ".sha256"
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://evil.example.com/PotatoTest-Setup-1.0.1.exe",
+        f"https://github.com/{GITHUB_REPO}/releases/download/v1.0.1/payload.exe",
+    ],
+)
+def test_checksum_url_rejects_untrusted_installers(url):
+    with pytest.raises(ValueError):
+        updater.checksum_url_for(url)
+
+
+@pytest.mark.parametrize(
+    "text,expect",
+    [
+        (f"{_DIGEST}  PotatoTest-Setup-1.0.1.exe\n", _DIGEST),  # sha256sum 格式
+        (_DIGEST.upper(), _DIGEST),  # 统一小写
+        (f"sha256: {_DIGEST}\n", _DIGEST),
+    ],
+)
+def test_parse_sha256_accepts_common_formats(text, expect):
+    assert updater._parse_sha256(text) == expect
+
+
+@pytest.mark.parametrize("text", ["", "not a checksum", "abc123"])
+def test_parse_sha256_rejects_garbage(text):
+    with pytest.raises(ValueError):
+        updater._parse_sha256(text)
+
+
+def test_download_installer_accepts_matching_hash(monkeypatch, tmp_path):
+    _patch_download(monkeypatch, f"{_DIGEST}  {_SETUP_URL.rsplit('/', 1)[-1]}\n")
+
+    out = asyncio.run(updater.download_installer(_SETUP_URL, tmp_path))
+
+    assert out.is_file()
+    assert out.read_bytes() == _PAYLOAD
+    assert out.name == "PotatoTest-Setup-1.0.1.exe"
+    assert not (tmp_path / f"{out.name}.part").exists()
+
+
+def test_download_installer_rejects_wrong_hash(monkeypatch, tmp_path):
+    """★ 哈希不一致 = 文件可能在通道里被换过 —— 必须删掉，不能留一个"看起来完整"的 exe。"""
+    _patch_download(monkeypatch, "0" * 64)
+
+    with pytest.raises(ValueError, match="校验失败"):
+        asyncio.run(updater.download_installer(_SETUP_URL, tmp_path))
+
+    assert not (tmp_path / "PotatoTest-Setup-1.0.1.exe").exists()
+    assert not (tmp_path / "PotatoTest-Setup-1.0.1.exe.part").exists()
+
+
+def test_download_installer_rejects_missing_checksum(monkeypatch, tmp_path):
+    """取不到校验值也要拒装 —— 不能因为"查不到"就放行未验证的 exe。"""
+    _patch_download(monkeypatch, ValueError("取不到更新包校验值（HTTP 404）"))
+
+    with pytest.raises(ValueError, match="取不到"):
+        asyncio.run(updater.download_installer(_SETUP_URL, tmp_path))
+
+    assert not (tmp_path / "PotatoTest-Setup-1.0.1.exe").exists()
+    assert not (tmp_path / "PotatoTest-Setup-1.0.1.exe.part").exists()
+
+
+def test_download_installer_rejects_untrusted_url(monkeypatch, tmp_path):
+    """白名单在下载之前就要拦，不能先落盘再说。"""
+    called = {"n": 0}
+
+    async def _fake_stream(url, tmp):
+        called["n"] += 1
+        tmp.write_bytes(_PAYLOAD)
+
+    monkeypatch.setattr(updater, "_stream_download", _fake_stream)
+
+    with pytest.raises(ValueError):
+        asyncio.run(
+            updater.download_installer(
+                "https://evil.example.com/PotatoTest-Setup-1.0.1.exe", tmp_path
+            )
+        )
+    assert called["n"] == 0

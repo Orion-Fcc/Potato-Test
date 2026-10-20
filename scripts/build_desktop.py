@@ -52,7 +52,7 @@ _PRUNE = [
 ]
 
 
-def _prune_bundle(dist: pathlib.Path) -> None:
+def _prune_bundle(dist: Path) -> None:
     total = 0
     for pat, why in _PRUNE:
         for f in dist.glob(pat):

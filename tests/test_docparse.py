@@ -86,6 +86,24 @@ def test_scanned_pdf_page_is_reported_with_advice(monkeypatch):
     assert "md" in joined, "只说了读不到，没给可执行的建议"
 
 
+def test_html_falls_back_to_plain_text_when_markdownify_fails(monkeypatch):
+    """★ HTML 转 markdown 失败时要**退回纯文本**，而不是把上传搞挂。
+
+    原来这里写的是 `except Exception as e` 却使用 `exc` —— 一旦 markdownify 真的抛异常，
+    降级分支会先抛 NameError，用户看到 500。这条钉住"内容还在，格式丢了"的承诺。
+    """
+    import markdownify as mdpkg
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("markdownify 内部错误")
+
+    monkeypatch.setattr(mdpkg, "markdownify", _boom)
+    warns: list[str] = []
+    out = docparse._from_html("<h2>标题</h2><p>关键内容</p>".encode("utf-8"), warns)
+    assert "关键内容" in out, "降级后正文必须还在"
+    assert any("HTML 转 markdown 失败" in w for w in warns), warns
+
+
 def test_broken_pdf_does_not_crash(monkeypatch):
     """★ 坏 PDF（打不开 / 不是 PDF）不能把整份上传搞挂。
 

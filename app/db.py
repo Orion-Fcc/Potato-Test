@@ -7,7 +7,13 @@ import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy import event
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 from sqlalchemy.pool import NullPool
 
 from app.config import get_settings
@@ -17,6 +23,40 @@ log = logging.getLogger("potato-test.db")
 
 _engine = None
 _Session: async_sessionmaker[AsyncSession] | None = None
+
+# ★ SQLite 并发配置（2026-10-20）。原来的默认配置在并发下会直接失败：
+# 执行器每个用例一个浏览器 + SSE 每秒查库，写锁一撞就是 "database is locked"。
+#   WAL            —— 读不再阻塞写（持久属性，设一次就留在库文件里）
+#   busy_timeout   —— 撞锁时最多等 5 秒，而不是立刻报错
+#   synchronous    —— NORMAL：WAL 下的常规选择，比 FULL 快、比 OFF 安全
+_SQLITE_PRAGMAS = (
+    "PRAGMA journal_mode=WAL",
+    "PRAGMA busy_timeout=5000",
+    "PRAGMA synchronous=NORMAL",
+)
+
+
+def _set_sqlite_pragmas(dbapi_conn, _connection_record) -> None:
+    """每个新连接都设一遍。NullPool 下连接不复用，所以每条都会走到这里。"""
+    cur = dbapi_conn.cursor()
+    try:
+        for stmt in _SQLITE_PRAGMAS:
+            cur.execute(stmt)
+    finally:
+        cur.close()
+
+
+def _create_engine(url: str) -> AsyncEngine:
+    """建 engine，并给 SQLite 挂上并发 PRAGMA。
+
+    抽成函数**只为可测**：`tests/test_sqlite_pragmas.py` 需要在不碰 `_ensure()`
+    （它会读 settings、进而可能指向真库）的前提下，验证"每条新连接都设过 PRAGMA"。
+    非 SQLite 的 URL 不加监听 —— 那些 PRAGMA 是 SQLite 方言的，换个库会直接报错。
+    """
+    eng = create_async_engine(url, future=True, poolclass=NullPool)
+    if url.startswith("sqlite"):
+        event.listen(eng.sync_engine, "connect", _set_sqlite_pragmas)
+    return eng
 
 
 def _ensure() -> async_sessionmaker[AsyncSession]:
@@ -56,8 +96,9 @@ def _ensure() -> async_sessionmaker[AsyncSession]:
                 "tests/conftest.py 的 bind_temp_db / tmp_db。\n"
                 "拒绝继续：再走下去就会污染用户的真实数据库。"
             )
-        _engine = create_async_engine(url, future=True, poolclass=NullPool)
-        _Session = async_sessionmaker(_engine, expire_on_commit=False)
+        eng = _create_engine(url)
+        _engine = eng
+        _Session = async_sessionmaker(eng, expire_on_commit=False)
     return _Session
 
 

@@ -38,6 +38,7 @@ import subprocess
 import sys
 import threading
 import time
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -72,7 +73,12 @@ def _setup_logging() -> logging.Logger:
     # （pythonw 下没有控制台，加 StreamHandler 会直接抛异常）。
     log_path = _root_dir() / "logs" / LOG_NAME
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    handlers: list[logging.Handler] = [logging.FileHandler(log_path, encoding="utf-8")]
+    # ★ 滚动而不是无限增长（2026-10-20）：桌面版是常驻应用，用户常年开着，
+    # FileHandler 会让 desktop.log 一路涨到几百 MB，既占盘又拖慢打开日志排错。
+    # 10MB × (1 当前 + 5 备份) = 最多约 60MB，够留几次故障现场。
+    handlers: list[logging.Handler] = [
+        RotatingFileHandler(log_path, maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8")
+    ]
     if sys.stdout is not None:
         handlers.append(logging.StreamHandler(sys.stdout))
     logging.basicConfig(

@@ -9,7 +9,10 @@
 
 ## 1. 打包（生成程序目录）
 
+先装打包工具链（`pywebview` / `pyinstaller`，只有 Windows 需要），版本同样由锁文件固定：
+
 ```bat
+.venv\Scripts\pip install -c constraints.txt -e ".[desktop]"
 .venv\Scripts\python scripts\build_desktop.py
 ```
 
@@ -73,7 +76,10 @@ python scripts\release.py --publish          &:: 建 Release + 上传安装包
 
 - **只有桌面版能装**（`sys.frozen`）；网页/源码模式一律 400；
 - **下载地址白名单**：必须 `https://github.com/<本仓库>/releases/download/` 且文件名匹配
-  `PotatoTest-Setup-*.exe` —— 这个接口会执行下载下来的 exe，不能放开。
+  `PotatoTest-Setup-*.exe` —— 这个接口会执行下载下来的 exe，不能放开；
+- **SHA-256 校验**：同一 Release 里必须有 `<安装包名>.sha256`（`release.py` 会生成并**先上传
+  校验文件、再传 exe**）。哈希不一致、校验文件缺失或格式不对 —— 一律删掉下载物并拒绝安装，
+  提示用户到 Release 页面手动下载。
 
 > 安装包没有代码签名：用户**首次手动双击**时 Windows 可能提示"未知发布者"。
 > 但应用内更新下载的文件不带网络来源标记，一般不会触发这个提示。

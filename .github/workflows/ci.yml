@@ -12,9 +12,21 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          # ★ 必须与打包产物一致（2026-10-20）。以前这里是 3.11，而 PyInstaller
+          #   打出来的是 3.13 —— CI 绿不代表装出来的东西能用。
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            constraints.txt
       - name: Install
-        run: pip install -e ".[dev]"
+        run: |
+          python -m pip install --upgrade pip
+          pip install -c constraints.txt -e ".[dev]"
+      # 锁住了直接依赖，但传递依赖仍由 pip 解析。`pip check` 至少能拦住
+      # "装上了但彼此要求冲突"（那种环境下运行时才炸，很难查）。
+      - name: Check dependency consistency
+        run: pip check
       - name: Lint
         run: ruff check .
       # 严格类型子集：这几个模块是纯函数 + 标注已经写满，能做到零错误，就用它们当门禁。
@@ -58,6 +70,49 @@ jobs:
             tail -80 "$RUNNER_TEMP/pytest.log"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+  # 打包 + 冒烟（2026-10-20，P0-1）。必须跑在 Windows 上：PyInstaller 只能打
+  # 宿主平台的产物，Linux 上的"打包通过"证明不了发布出去的 exe 能启动。
+  #
+  # 这一步比单测慢，但它拦的是最难发现的一类偏差 —— 依赖/解释器/Hook 任何一处
+  # 漂移，表现都是"CI 全绿、用户双击没反应"。冒烟用 desktop.py 已有的
+  # POTATO_DESKTOP_HEADLESS 自检：起服务、挂 SPA、然后自己退出。
+  desktop:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            constraints.txt
+      - name: Install (with desktop toolchain)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -c constraints.txt -e ".[dev,desktop]"
+          python -m pip check
+      - name: Build (PyInstaller)
+        run: python scripts/build_desktop.py
+      - name: Smoke test (headless self-check)
+        shell: pwsh
+        env:
+          POTATO_DESKTOP_HEADLESS: "1"
+        run: |
+          $exe = "dist_desktop/PotatoTest/PotatoTest.exe"
+          if (!(Test-Path $exe)) { throw "找不到打包产物 $exe" }
+          # GUI 子系统的 exe 用 `&` 调不会可靠地等待，必须显式 WaitForExit。
+          $p = Start-Process -FilePath $exe -PassThru
+          if (-not $p.WaitForExit(180000)) {
+            $p.Kill()
+            throw "桌面版 180 秒内没有退出（自检应 15 秒后自行退出）"
+          }
+          if ($p.ExitCode -ne 0) {
+            $log = "dist_desktop/PotatoTest/logs/desktop.log"
+            if (Test-Path $log) { Get-Content $log -Tail 80 }
+            throw "桌面版自检失败，退出码 $($p.ExitCode)"
+          }
 
   web:
     runs-on: ubuntu-latest

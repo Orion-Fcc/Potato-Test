@@ -41,15 +41,17 @@ Agent 自己想清楚该点哪里；裁判读截图和动作记录下结论，**
 
 ### 从源码跑（开发用）
 
-需要 Python ≥ 3.11：
+需要 Python **3.13**（与发布出来的安装包同一个解释器版本；3.11 / 3.12 不再验证）：
 
 ```bat
 git clone https://github.com/Orion-Fcc/Potato-Test.git
 cd Potato-Test
 python -m venv .venv
-.venv\Scripts\pip install -e .
+.venv\Scripts\pip install -c constraints.txt -e .
 .venv\Scripts\python desktop.py
 ```
+
+`constraints.txt` 锁住的是本机验证过的直接依赖版本，CI 与打包用的是同一份。
 
 首次装依赖约 5-10 分钟（`browser-use` 依赖树 + OCR 模型较大）。
 `web/dist`（界面构建产物）**随仓库发布**，所以不需要 Node / pnpm。
@@ -203,7 +205,7 @@ tail -f logs/feishu_poll.log
 桌面版被占用时会自动换一个空闲端口；要固定就设环境变量 `POTATO_DESKTOP_PORT=19000`。
 
 **点「运行」报 `No module named 'browser_use'`？**
-依赖没装全。执行 `.venv\Scripts\python -m pip install -e .` 补齐。
+依赖没装全。执行 `.venv\Scripts\python -m pip install -c constraints.txt -e .` 补齐。
 这类依赖是懒加载的，所以缺了不影响服务启动，只在真正跑用例时才暴露。
 
 **跑用例报「找不到浏览器」？**

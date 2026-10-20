@@ -8,16 +8,22 @@ Release 的 `latest` 接口天然给到"版本号 + 更新说明 + 资产下载�
 
 1. **只有桌面版能一键安装**。网页版跑在服务器上 —— 它读不到用户的文件系统，
    也不该能往用户机器上装东西。`install_supported()` 用 `sys.frozen` 判断。
-2. **只允许从本仓库的 Release 下载**。这个接口会"下载一个 exe 并执行"，
-   如果不校验来源，它就等于一个远程代码执行入口。所以下载地址必须匹配
-   `https://github.com/<本仓库>/releases/download/`，且资产名必须是
-   `PotatoTest-Setup-*.exe`。校验失败直接拒绝，不做任何"尽力而为"。
+2. **只允许从本仓库的 Release 下载，且必须校验 SHA-256**。这个接口会
+   "下载一个 exe 并执行"，如果不校验来源与内容，它就等于一个远程代码执行入口。
+   所以下载地址必须匹配 `https://github.com/<本仓库>/releases/download/`，资产名
+   必须是 `PotatoTest-Setup-*.exe`，而且同一次 Release 里必须有配套的
+   `<安装包名>.sha256`（`scripts/release.py` 会生成并先上传它）。地址不对、校验
+   文件缺失、哈希对不上 —— 一律拒绝，不做任何"尽力而为"。
+
+   ★ 哈希清单和安装包走同一个下载通道，只能防"传输损坏/镜像被换"，**挡不住
+   整包替换**。要挡那个，得给 exe 做 Authenticode 签名并校验签名 —— 当前未做。
 3. **检查失败不算错误**。断网、GitHub 抽风、还没发过 Release —— 都不是用户的问题，
    返回 `error` 字段让界面温和提示即可，绝不抛 500 让应用显得坏了。
 """
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 import subprocess
@@ -35,6 +41,8 @@ API = "https://api.github.com"
 _TIMEOUT = 8.0  # 检查更新是"顺手看一眼"，不能拖住界面
 _CACHE_TTL = timedelta(minutes=10)
 _ASSET_RE = re.compile(r"^PotatoTest-Setup-.*\.exe$", re.I)
+# 校验文件与安装包**同名**，只多一个 .sha256 后缀（release.py 与本文件的约定）。
+_CHECKSUM_RE = re.compile(r"^PotatoTest-Setup-.*\.exe\.sha256$", re.I)
 # 下载白名单：只认本仓库 release 资产（GitHub 会 302 到 objects.githubusercontent.com，
 # httpx 跟随重定向，但那已经是我们放行的地址之后的跳转，可以接受）
 _ALLOWED_PREFIX = f"https://github.com/{GITHUB_REPO}/releases/download/"
@@ -164,13 +172,34 @@ def validate_download_url(url: str) -> str:
     return u
 
 
-async def download_installer(url: str, dest_dir: Path) -> Path:
-    """把安装包下到临时目录。返回本地路径。"""
-    url = validate_download_url(url)
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    name = url.rsplit("/", 1)[-1]
-    dest = dest_dir / name
-    tmp = dest.with_suffix(dest.suffix + ".part")
+def checksum_url_for(installer_url: str) -> str:
+    """安装包对应的 `.sha256` 资产地址（release.py 与本文件的约定：同名 + .sha256）。
+
+    同样走白名单：校验文件也只能来自本仓库的 Release。
+    """
+    u = validate_download_url(installer_url) + ".sha256"
+    if not _CHECKSUM_RE.match(u.rsplit("/", 1)[-1]):
+        raise ValueError("校验文件地址不合法，已拒绝下载")
+    return u
+
+
+def _parse_sha256(text: str) -> str:
+    """从校验文件里取 64 位十六进制。兼容 `sha256sum` 的 `<hex>  <name>` 格式。"""
+    m = re.search(r"\b([0-9a-fA-F]{64})\b", text or "")
+    if not m:
+        raise ValueError("更新包的校验文件里没有 SHA-256 值，已拒绝安装")
+    return m.group(1).lower()
+
+
+def _sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+async def _stream_download(url: str, tmp: Path) -> None:
     # 用 check() 定下来的方式（直连还是走代理），否则"检查得通、下载连不上"
     async with httpx.AsyncClient(
         timeout=120.0, follow_redirects=True, trust_env=bool(_proxy_mode)
@@ -180,7 +209,42 @@ async def download_installer(url: str, dest_dir: Path) -> Path:
             with tmp.open("wb") as fh:
                 async for chunk in r.aiter_bytes(1 << 16):
                     fh.write(chunk)
-    tmp.replace(dest)  # 下完才改名：中途断了不会留下一个"看起来完整"的半个 exe
+
+
+async def _fetch_checksum(url: str) -> str:
+    """取安装包对应的 SHA-256。拿不到就当成校验失败（不能"没有哈希就放行"）。"""
+    r = await _request(url, headers={"User-Agent": f"PotatoTest/{APP_VERSION}"})
+    if r.status_code != 200:
+        page = f"https://github.com/{GITHUB_REPO}/releases"
+        raise ValueError(
+            f"取不到更新包校验值（HTTP {r.status_code}），已拒绝安装。请到 {page} 手动下载。"
+        )
+    return r.text
+
+
+async def download_installer(url: str, dest_dir: Path) -> Path:
+    """把安装包下到临时目录，**校验 SHA-256 通过后**才返回本地路径。"""
+    url = validate_download_url(url)
+    sha_url = checksum_url_for(url)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    name = url.rsplit("/", 1)[-1]
+    dest = dest_dir / name
+    tmp = dest.with_suffix(dest.suffix + ".part")
+    try:
+        # 下载也放进 try：中途断网会留下半个 .part，同样是"未验证的文件"，一并清掉。
+        await _stream_download(url, tmp)
+        expected = _parse_sha256(await _fetch_checksum(sha_url))
+        actual = _sha256_file(tmp)
+        if actual != expected:
+            raise ValueError(
+                "更新包校验失败（SHA-256 不一致），已拒绝安装。"
+                f"请到 https://github.com/{GITHUB_REPO}/releases 手动下载。"
+            )
+    except Exception:
+        # 校验不通过/取不到校验值：删掉下载物，绝不把未验证的 exe 留给后面的 launch
+        tmp.unlink(missing_ok=True)
+        raise
+    tmp.replace(dest)  # 校验通过才改名：中途断了不会留下一个"看起来完整"的半个 exe
     return dest
 
 

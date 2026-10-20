@@ -367,7 +367,7 @@ def _from_html(data: bytes, w: list[str]) -> str:
         from markdownify import markdownify
 
         return markdownify(str(soup), heading_style="ATX").strip()
-    except Exception as e:  # noqa: BLE001 — malformed HTML still has text
+    except Exception as exc:  # noqa: BLE001 — malformed HTML still has text
         w.append(f"HTML 转 markdown 失败（{type(exc).__name__}），已退回纯文本 —— 内容还在，格式丢了")
         return soup.get_text("\n")
 

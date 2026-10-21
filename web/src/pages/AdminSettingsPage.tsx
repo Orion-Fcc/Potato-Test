@@ -2,7 +2,7 @@
 import type { ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { ChevronDown, ChevronRight } from "lucide-react";
-import { api, type FeishuStatus, type LlmPoolEntry, type LlmRouting, type LlmStatus, type LlmTestReport, type LlmTestResult } from "../lib/api";
+import { api, type FeishuStatus, type LlmPoolEntry, type LlmRouting, type LlmTestReport, type LlmTestResult } from "../lib/api";
 import { useAuth } from "../lib/auth";
 import { Button, Card, Checkbox, Field, Input, Select } from "../components/ui";
 import { useToast, useErrorToast } from "../components/toast";
@@ -115,10 +115,10 @@ export function AdminSettingsPage() {
   const [token, setToken] = useState("");
   const [saving, setSaving] = useState(false);
 
-  // LLM model（只读展示真实生效值 + 连通性测试；编辑入口在下面的模型池里）
-  const [llm, setLlm] = useState<LlmStatus | null>(null);
+  // 连通性测试：按钮与结果都放在下面「模型池」卡片的工具栏里。
   const [testingLlm, setTestingLlm] = useState(false);
   const [llmTest, setLlmTest] = useState<LlmTestReport | null>(null);
+  const [showLlmTest, setShowLlmTest] = useState(false);
   // 每行「探测」：精测模型池里单一条目（按 name 走后端过滤），结果就地显示在该行。
   const [rowTests, setRowTests] = useState<Record<number, { loading: boolean; result?: LlmTestResult }>>({});
   const [loadError, setLoadError] = useState("");
@@ -173,9 +173,6 @@ export function AdminSettingsPage() {
       .then((s) => {
         setLoadError("");
         setTokenSet(s.gitlab_token_set);
-        // s.llm 现在是**真实生效**的那一套（池的第 1 条），不再是 env/旧单值字段。
-        // 所以下面这块面板显示的模型名与实际调用逐字节一致。
-        setLlm(s.llm);
         // 回显「特定环节覆盖」：优先取逐环节配置；旧版 premium 接管过的环节
         // 也迁移成逐环节下拉框的值 —— 新版保存后 premium 会被关闭，行为不变。
         const nextRoles: Record<string, string> = {};
@@ -253,6 +250,8 @@ export function AdminSettingsPage() {
           vision: r.vision !== false,
           tools: r.tools !== false,
           enabled: r.enabled !== false,
+          price_in: (r.price_in || "").trim(),
+          price_out: (r.price_out || "").trim(),
           // 留空 → 后端保持同位置已存的那把钥匙
           api_key: r.api_key.trim() || undefined,
         }));
@@ -321,12 +320,14 @@ export function AdminSettingsPage() {
     try {
       const r = await api.testLlmSettings();
       setLlmTest(r);
+      setShowLlmTest(true);
     } catch (e: any) {
       setLlmTest({
         ok: false,
         all_ok: false,
         results: [{ name: "—", ok: false, error: e?.message || String(e) }],
       });
+      setShowLlmTest(true);
     } finally {
       setTestingLlm(false);
     }
@@ -421,6 +422,8 @@ export function AdminSettingsPage() {
         provider: "auto",
         api_key_set: false,
         api_key: "",
+        price_in: "",
+        price_out: "",
       },
     ]);
     setPoolDirty(true);
@@ -710,6 +713,27 @@ export function AdminSettingsPage() {
                 />
               </label>
             </div>
+            <div className="grid grid-cols-2 gap-2">
+              <label className="space-y-1 text-[11px] text-ink-500">
+                <span>{t("Input price (¥ per million tokens)")}</span>
+                <Input
+                  value={row.price_in || ""}
+                  onChange={(e) => setRow(i, { price_in: e.target.value })}
+                  placeholder={t("Unset")}
+                />
+              </label>
+              <label className="space-y-1 text-[11px] text-ink-500">
+                <span>{t("Output price (¥ per million tokens)")}</span>
+                <Input
+                  value={row.price_out || ""}
+                  onChange={(e) => setRow(i, { price_out: e.target.value })}
+                  placeholder={t("Unset")}
+                />
+              </label>
+            </div>
+            <div className="text-[11px] text-ink-500">
+              {t("Prices are manually configured and only used to estimate cost on the AI usage page.")}
+            </div>
             {row.proxy_mode === "custom" && (
               <Input
                 value={row.proxy_url || ""}
@@ -747,110 +771,6 @@ export function AdminSettingsPage() {
           {t("Could not load settings:")} {loadError}
         </div>
       )}
-
-      {/* 真实生效的那一套（只读）。
-          ★ 2026-10-11 修正：这块面板以前读的是 env / 旧单值字段，而配了池之后
-          它们**完全不参与运行** —— 也就是说它会显示一个没在跑的模型名，且不报错。
-          现在后端直接回解析后的最终结果（把高端模型/按用途覆盖都算进去），并把来源
-          一并回出来，让"我在编辑的那一层是不是生效的那一层"当场可见。
-          2026-10-11 简化：标题从「LLM model」改成「当前生效」—— 原标题和下面那张
-          「模型池」的关系说不清，用户会以为这里也能改。这是只读面板。 */}
-      <Card className="max-w-2xl space-y-3 p-4">
-        <CardTitle
-          title={t("Currently in use (agent)")}
-          hint={t("The model the browser agent actually calls. Edit it in the model pool below — there is exactly one place to set it, so what you save is what runs.")}
-          right={
-            /* 来源要按**优先级**说，不能只看池：高端模型或某个用途的覆盖一旦接管 agent，
-               实际模型就不是池第 1 套了 —— 那时还说"来自模型池"就成了新的假信息
-               （这正是这一版要消灭的那类错觉）。 */
-            llm?.roles?.agent?.source === "premium"
-              ? t("from the premium model")
-              : llm?.roles?.agent?.source === "override"
-                ? t("from the execution row in “Model per purpose”")
-                : llm?.pool_source === "env"
-                  ? t("from environment defaults — no pool saved yet")
-                  : t("from the pool ({{n}} set(s))", { n: llm?.pool_count ?? 1 })
-          }
-        />
-
-        <div className="rounded-lg bg-[var(--panel2)] px-3 py-2 text-xs text-ink-700">
-          <div className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5">
-            <span className="text-ink-500">{t("Endpoint")}</span>
-            <span className="break-all font-mono">{llm?.base_url || t("(not set)")}</span>
-            <span className="text-ink-500">{t("Agent model")}</span>
-            <span className="break-all font-mono">
-              {llm?.agent_model || llm?.model || t("(not set)")}
-              {!llm?.agent_model && llm?.model ? t(" (inherited)") : ""}
-            </span>
-            <span className="text-ink-500">{t("API key")}</span>
-            <span className="font-mono">
-              {llm?.api_key_set ? t("set") : t("not set — calls will likely be rejected")}
-            </span>
-            <span className="text-ink-500">{t("Protocol")}</span>
-            <span className="font-mono">
-              {llm?.provider || "auto"}
-              {llm?.provider === "auto" ? t(" (detected by probe)") : ""}
-            </span>
-          </div>
-        </div>
-
-        <div className="flex flex-wrap items-center gap-3">
-          <Button variant="ghost" onClick={testLlm} disabled={testingLlm}>
-            {testingLlm ? t("Testing all models…") : t("Test all models")}
-          </Button>
-          <span className="inline-flex items-center text-xs text-ink-500">
-            {t("Tests every model the platform may call — all pool entries and any per-purpose override — and lists each.")}
-          </span>
-        </div>
-        {llmTest && (
-          <div className="space-y-2">
-            <div
-              className={`rounded-lg px-3 py-2 text-xs ${
-                llmTest.all_ok
-                  ? "bg-[var(--ok-bg,#e8f7ee)] text-[var(--ok-fg,#1a7f4b)]"
-                  : "bg-[var(--bad-bg,#fee)] text-[var(--bad-fg)]"
-              }`}
-            >
-              {llmTest.all_ok
-                ? t("All {{n}} model(s) connected.", { n: llmTest.results.length })
-                : t("{{ok}} of {{n}} model(s) connected — the rest failed.", {
-                    ok: llmTest.results.filter((r) => r.ok).length,
-                    n: llmTest.results.length,
-                  })}
-            </div>
-            <div className="space-y-1.5">
-              {llmTest.results.map((r, i) => (
-                <div
-                  key={`${r.name}-${i}`}
-                  className="rounded-lg border border-[var(--line)] px-3 py-2 text-[11px]"
-                >
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span className="font-mono font-medium text-ink-900">{r.name}</span>
-                    <span className="text-ink-500">{r.model}</span>
-                    <span className={r.ok ? "text-[var(--ok-fg,#1a7f4b)]" : "text-[var(--bad-fg)]"}>
-                      {r.ok ? "✓" : "✕"}
-                    </span>
-                  </div>
-                  {r.ok ? (
-                    // 实测能力：换厂商后"能不能跑"就看这几个值，不用去翻日志找 400。
-                    // json_schema=false 是正常情况（如 DeepSeek）—— 代理会自动改走
-                    // system prompt 里的 schema，不需要用户做任何事。
-                    <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 font-mono text-ink-500">
-                      <span>{t("Protocol")}: {r.protocol}</span>
-                      <span>{t("JSON object")}: {mark(!!r.json_object)}</span>
-                      <span>{t("JSON schema")}: {mark(!!r.json_schema)}</span>
-                      <span>{t("Tools")}: {mark(!!r.tools)}</span>
-                      <span>{t("Vision")}: {mark(!!r.vision)}</span>
-                    </div>
-                  ) : (
-                    <div className="mt-1 break-all text-[var(--bad-fg)]">{r.error}</div>
-                  )}
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-      </Card>
 
       {/* 模型池 —— 唯一的模型配置入口。
           每个条目就是一张卡片：配置名称、厂商/模型、Base URL、API Key、拉取模型。
@@ -921,7 +841,73 @@ export function AdminSettingsPage() {
                   </Button>
                 </>
               )}
+              <Button
+                variant="ghost"
+                className="h-7 text-[11px]"
+                onClick={() => (llmTest ? setShowLlmTest((v) => !v) : testLlm())}
+                disabled={testingLlm}
+              >
+                {testingLlm ? t("Testing all models…") : t("Test all model connectivity")}
+              </Button>
+              {llmTest && (
+                <Button
+                  variant="ghost"
+                  className="h-7 text-[11px]"
+                  onClick={() => setShowLlmTest((v) => !v)}
+                >
+                  {showLlmTest ? t("Hide results") : t("Show results")}
+                </Button>
+              )}
             </div>
+
+            {llmTest && showLlmTest && (
+              <div className="space-y-2 rounded-lg border border-[var(--line)] p-3">
+                <div className="text-[11px] text-ink-500">
+                  {t("Tests every model the platform may call — all pool entries and any per-purpose override — and lists each.")}
+                </div>
+                <div
+                  className={`rounded-lg px-3 py-2 text-xs ${
+                    llmTest.all_ok
+                      ? "bg-[var(--ok-bg,#e8f7ee)] text-[var(--ok-fg,#1a7f4b)]"
+                      : "bg-[var(--bad-bg,#fee)] text-[var(--bad-fg)]"
+                  }`}
+                >
+                  {llmTest.all_ok
+                    ? t("All {{n}} model(s) connected.", { n: llmTest.results.length })
+                    : t("{{ok}} of {{n}} model(s) connected — the rest failed.", {
+                        ok: llmTest.results.filter((r) => r.ok).length,
+                        n: llmTest.results.length,
+                      })}
+                </div>
+                <div className="space-y-1.5">
+                  {llmTest.results.map((r, i) => (
+                    <div
+                      key={`${r.name}-${i}`}
+                      className="rounded-lg border border-[var(--line)] px-3 py-2 text-[11px]"
+                    >
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="font-mono font-medium text-ink-900">{r.name}</span>
+                        <span className="text-ink-500">{r.model}</span>
+                        <span className={r.ok ? "text-[var(--ok-fg,#1a7f4b)]" : "text-[var(--bad-fg)]"}>
+                          {r.ok ? "✓" : "✕"}
+                        </span>
+                      </div>
+                      {r.ok ? (
+                        <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 font-mono text-ink-500">
+                          <span>{t("Protocol")}: {r.protocol}</span>
+                          <span>{t("JSON object")}: {mark(!!r.json_object)}</span>
+                          <span>{t("JSON schema")}: {mark(!!r.json_schema)}</span>
+                          <span>{t("Tools")}: {mark(!!r.tools)}</span>
+                          <span>{t("Vision")}: {mark(!!r.vision)}</span>
+                        </div>
+                      ) : (
+                        <div className="mt-1 break-all text-[var(--bad-fg)]">{r.error}</div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
 
             {/* 模型卡片列表：点「+ 新增模型」就多一张。 */}
             <div className="space-y-2">

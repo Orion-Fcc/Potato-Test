@@ -468,6 +468,13 @@ export function Sidebar({
                   label={t("System settings")}
                   collapsed={collapsed}
                 />
+                <Item
+                  to="/admin/llm-usage"
+                  active={false}
+                  Icon={Sparkle}
+                  label={t("AI usage")}
+                  collapsed={collapsed}
+                />
               </>
             )}
           </>

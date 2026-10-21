@@ -8,7 +8,7 @@ import csv
 import io
 import re
 import time
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 from urllib.parse import unquote
 
@@ -646,6 +646,8 @@ async def _merge_into_pool_head(
         "vision": head.vision if head else True,
         "tools": head.tools if head else True,
         "enabled": head.enabled if head else True,
+        "price_in": head.price_in if head else "",
+        "price_out": head.price_out if head else "",
     }
     if not entry["base_url"] or not entry["model"] or not entry["api_key"]:
         logging.getLogger("potato-test.api").warning(
@@ -669,6 +671,8 @@ async def _merge_into_pool_head(
                 "vision": p.vision,
                 "tools": p.tools,
                 "enabled": p.enabled,
+                "price_in": p.price_in,
+                "price_out": p.price_out,
             }
             for p in profiles[1:]
         ]
@@ -756,6 +760,11 @@ async def set_admin_llm(body: LlmSettingsIn) -> dict:
                         "vision": p.vision if p.vision is not None else (prev.vision if prev else True),
                         "tools": p.tools if p.tools is not None else (prev.tools if prev else True),
                         "enabled": p.enabled if p.enabled is not None else (prev.enabled if prev else True),
+                        # None = 保留；"" = 显式清空（价格可以真的为空）。
+                        "price_in": (p.price_in if p.price_in is not None
+                                     else (prev.price_in if prev else "")).strip(),
+                        "price_out": (p.price_out if p.price_out is not None
+                                      else (prev.price_out if prev else "")).strip(),
                     }
                 )
             if missing:
@@ -933,6 +942,8 @@ async def get_admin_llm_pool() -> dict:
             "vision": p.vision,
             "tools": p.tools,
             "enabled": p.enabled,
+            "price_in": p.price_in,
+            "price_out": p.price_out,
             "api_key_set": bool(p.api_key),
             # 只回掩码：前端永远拿不到明文钥匙。
             "api_key_masked": _mask_key(p.api_key),
@@ -972,6 +983,8 @@ def _pool_entry(p) -> dict:
         "vision": p.vision,
         "tools": p.tools,
         "enabled": p.enabled,
+        "price_in": p.price_in,
+        "price_out": p.price_out,
     }
 
 
@@ -1111,6 +1124,8 @@ async def add_llm_pool_batch(body: LlmBatchAddIn) -> dict:
                 "vision": True if body.vision is None else bool(body.vision),
                 "tools": True if body.tools is None else bool(body.tools),
                 "enabled": True,
+                "price_in": "",
+                "price_out": "",
             }
         )
         if not first_name:
@@ -1224,6 +1239,195 @@ async def get_admin_llm_token_share() -> dict:
         "has_data": runs > 0,
         "runs": runs,
         "total_tokens": total,
+    }
+
+
+@router.get("/admin/llm/usage", dependencies=[Depends(auth.require_admin)])
+async def get_admin_llm_usage(
+    days: int = 30,
+    role: str | None = None,
+    model: str | None = None,
+) -> dict:
+    """AI 用量：按天 / 角色 / 模型聚合 RunResult.timing 里的 token 账本。
+
+    数据来源只有一处：`RunResult.timing["usage"]["by_role"]`。日期取该结果所属
+    `Run.created_at`。老运行没有 by_role → 不进入统计（不是 0，是"没记录"）；
+    老账本没有 model 字段 → 归到「未记录」，绝不猜一个模型名。
+
+    cost 只用模型池里**手工填写**的 `price_in/price_out`（¥/百万 token）估算。
+    池里一个价格都没填时返回 `unpriced=true`，前端显示「未配置价格」而不是 ¥0。
+    """
+    from app import llm as llm_mod
+
+    if days not in (0, 7, 30, 90):
+        days = 30
+    role_filter = (role or "").strip()
+    model_filter = (model or "").strip()
+
+    def _num(v: Any) -> float | None:
+        try:
+            f = float(str(v).strip())
+        except (TypeError, ValueError):
+            return None
+        return f if f >= 0 else None
+
+    def _norm(v: Any) -> str:
+        return str(v or "").strip().lower()
+
+    def _blank() -> dict:
+        return {"prompt": 0, "completion": 0, "cached": 0, "total": 0, "calls": 0, "cost": 0.0}
+
+    # 模型池：价格 + 名称→模型名（下拉里选的是池条目名）。
+    pool = await llm_mod._load_saved_pool()
+    price_by_model: dict[str, tuple[float, float]] = {}
+    model_by_name: dict[str, str] = {}
+    priced = False
+    for p in pool:
+        pin, pout = _num(p.price_in), _num(p.price_out)
+        if pin is not None or pout is not None:
+            priced = True
+            pair = (pin or 0.0, pout or 0.0)
+            price_by_model.setdefault(_norm(p.model), pair)
+            price_by_model.setdefault(_norm(p.name), pair)
+        model_by_name[_norm(p.name)] = _norm(p.model)
+
+    today = datetime.now(UTC).date()
+    cutoff = today - timedelta(days=days - 1) if days > 0 else None
+
+    # 过滤模型：可以直接选账本里的模型名，也可以选池条目名（映射到它当前的模型）。
+    wanted: set[str] = set()
+    if model_filter:
+        wanted.add(_norm(model_filter))
+        if _norm(model_filter) in model_by_name:
+            wanted.add(model_by_name[_norm(model_filter)])
+
+    async with db_session() as s:
+        rows: Any = (
+            await s.execute(
+                select(RunResult.timing, Run.created_at).join(
+                    Run, RunResult.run_id == Run.id, isouter=True
+                )
+            )
+        ).all()
+
+    series_map: dict[str, dict] = {}
+    by_role: dict[str, dict] = {}
+    by_model: dict[str, dict] = {}
+    totals = _blank()
+    # 下拉选项按**全部数据**生成，不受当前筛选影响 —— 否则选了角色后列表只剩它自己。
+    all_roles: set[str] = set()
+    all_models: set[str] = set()
+    all_unrecorded = False
+
+    def _cost_of(model_name: Any, b: dict) -> float:
+        pair = price_by_model.get(_norm(model_name))
+        if pair is None:
+            return 0.0
+        pin, pout = pair
+        return (b["prompt"] / 1_000_000.0) * pin + (b["completion"] / 1_000_000.0) * pout
+
+    def _date_of(dt: Any) -> Any:
+        if isinstance(dt, datetime):
+            return (dt.astimezone(UTC) if dt.tzinfo else dt).date()
+        if isinstance(dt, date):
+            return dt
+        return None
+
+    for timing, created_at in rows:
+        if not isinstance(timing, dict):
+            continue
+        date = _date_of(created_at)
+        if date is None:
+            continue
+        if cutoff is not None and date < cutoff:
+            continue
+        buckets = (timing.get("usage") or {}).get("by_role") or {}
+        if not isinstance(buckets, dict) or not buckets:
+            continue
+        for r, u in buckets.items():
+            if not isinstance(u, dict):
+                continue
+            r = str(r)
+            m = str(u.get("model") or "").strip()
+            all_roles.add(r)
+            if m:
+                all_models.add(m)
+            else:
+                all_unrecorded = True
+            if role_filter and r != role_filter:
+                continue
+            if wanted and _norm(m) not in wanted and not (m == "" and "未记录" in wanted):
+                continue
+            calls = int(u.get("calls") or 0)
+            prompt = int(u.get("prompt") or 0)
+            completion = int(u.get("completion") or 0)
+            cached = int(u.get("cached") or 0)
+            total = int(u.get("total") or 0)
+            b = {
+                "prompt": prompt,
+                "completion": completion,
+                "cached": cached,
+                "total": total,
+                "calls": calls,
+                "cost": 0.0,
+            }
+            b["cost"] = _cost_of(m, b)
+
+            day_key = date.isoformat()
+            ds = series_map.setdefault(day_key, _blank())
+            rb = by_role.setdefault(str(r), _blank())
+            mb = by_model.setdefault(m or "未记录", _blank())
+            for target in (ds, rb, mb, totals):
+                target["prompt"] += prompt
+                target["completion"] += completion
+                target["cached"] += cached
+                target["total"] += total
+                target["calls"] += calls
+                target["cost"] += b["cost"]
+
+    # 补零：固定区间必须每个日期都有点，否则折线会把"没有运行"画成"跳到下一天"。
+    if cutoff is not None:
+        d = cutoff
+        while d <= today:
+            series_map.setdefault(d.isoformat(), _blank())
+            d += timedelta(days=1)
+    series = [{"date": k, **v} for k, v in sorted(series_map.items())]
+    for v in series:
+        v["cost"] = round(v["cost"], 6)
+    for bucket in (by_role, by_model, totals):
+        if bucket is totals:
+            bucket["cost"] = round(bucket["cost"], 6)
+        else:
+            for v in bucket.values():
+                v["cost"] = round(v["cost"], 6)
+
+    # 下拉选项：池条目名在前（用户认得），再补账本里出现但池里已没有的模型名。
+    model_options: list[str] = []
+    for p in pool:
+        if p.name and p.name not in model_options:
+            model_options.append(p.name)
+    for m in sorted(all_models):
+        if m not in model_options:
+            model_options.append(m)
+
+    role_labels = {r: llm_mod.ROLE_LABELS_ZH.get(r, r) for r in all_roles}
+    role_options = [
+        {"key": r, "label": role_labels.get(r, r)}
+        for r in llm_mod.ROLES
+        if r in all_roles
+    ]
+    return {
+        "days": days,
+        "series": series,
+        "by_role": by_role,
+        "by_model": by_model,
+        "totals": totals,
+        "unpriced": not priced,
+        "has_data": totals["calls"] > 0,
+        "has_unrecorded": all_unrecorded,
+        "models": model_options,
+        "roles": role_options,
+        "role_labels": role_labels,
     }
 
 

@@ -372,6 +372,9 @@ class LlmProfileIn(BaseModel):
     vision: bool | None = None
     tools: bool | None = None
     enabled: bool | None = None
+    # 手工价格（¥ / 百万 token）。None = 保留原值；"" = 显式清空。
+    price_in: str | None = None
+    price_out: str | None = None
 
 
 class LlmRoutingIn(BaseModel):

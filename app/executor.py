@@ -2587,6 +2587,16 @@ async def execute_case(spec: CaseSpec, on_step=None, should_abort=None) -> Resul
             res.usage = safe(lambda: _usage_payload(getattr(history, "usage", None))) or {}
             if res.usage:
                 by_role["agent"] = dict(res.usage)
+                # 账本补记模型名：browser-use 实际用的是 role_profile("agent") 解析出的
+                # 那一套（可能来自用途覆盖/高端模型，不一定是池第 1 条）。
+                # 解析失败不影响账本本身 —— 留空即可，UI 会显示「未记录」。
+                try:
+                    from app.llm import role_profile as _role_profile
+
+                    _rp = await _role_profile("agent")
+                    by_role["agent"]["model"] = _rp.effective_model or _rp.model or ""
+                except Exception:
+                    by_role["agent"]["model"] = ""
             res.final_answer = safe(lambda: history.final_result()) or ""
             res.steps = safe(lambda: history.action_names()) or []
             # P3: we restored a session but the agent ended on a login page → session dead.
@@ -2842,8 +2852,11 @@ async def execute_case(spec: CaseSpec, on_step=None, should_abort=None) -> Resul
                         continue
                     _b = by_role.setdefault(
                         _role,
-                        {"prompt": 0, "completion": 0, "cached": 0, "total": 0, "calls": 0},
+                        {"prompt": 0, "completion": 0, "cached": 0, "total": 0, "calls": 0, "model": ""},
                     )
+                    # 判定器账本也带模型名（judge 与 judge_escalate 可能用不同模型）。
+                    if _u.get("model"):
+                        _b["model"] = str(_u.get("model"))
                     for k in ("prompt", "completion", "cached", "total", "calls"):
                         _b[k] = int(_b.get(k, 0)) + int(_u.get(k, 0))
                 res.usage = _au

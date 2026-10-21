@@ -13,6 +13,7 @@ import { RouteFallback } from "./components/ui";
 // Every page is split into its own chunk so heavy deps (recharts, vidstack,
 // radix, papaparse) only load when the user actually visits that route.
 const AdminSettingsPage = lazy(() => import("./pages/AdminSettingsPage").then((m) => ({ default: m.AdminSettingsPage })));
+const LlmUsagePage = lazy(() => import("./pages/LlmUsagePage").then((m) => ({ default: m.LlmUsagePage })));
 const AdminUsersPage = lazy(() => import("./pages/AdminUsersPage").then((m) => ({ default: m.AdminUsersPage })));
 const CasesPage = lazy(() => import("./pages/CasesPage").then((m) => ({ default: m.CasesPage })));
 const ComparePage = lazy(() => import("./pages/ComparePage").then((m) => ({ default: m.ComparePage })));
@@ -103,6 +104,7 @@ const router = createBrowserRouter([
         ),
       },
       { path: "/admin/settings", element: <RequireAdmin>{S(<AdminSettingsPage />)}</RequireAdmin> },
+      { path: "/admin/llm-usage", element: <RequireAdmin>{S(<LlmUsagePage />)}</RequireAdmin> },
       { path: "/projects/:pid", element: <Navigate to="overview" replace /> },
       { path: "/projects/:pid/overview", element: S(<OverviewPage />) },
       { path: "/projects/:pid/docs", element: S(<WorkspacePage />) },

@@ -242,6 +242,9 @@ class LLMProfile:
     vision: bool = True
     tools: bool = True
     enabled: bool = True
+    # 手工价格（¥ / 百万 token）。空 = 未配置；只用于「AI 用量」页估算成本。
+    price_in: str = ""
+    price_out: str = ""
 
     @property
     def effective_model(self) -> str:
@@ -395,6 +398,9 @@ async def _load_saved_pool() -> list[LLMProfile]:
                 vision=bool(it.get("vision", True)),
                 tools=bool(it.get("tools", True)),
                 enabled=bool(it.get("enabled", True)),
+                # 旧数据没有价格字段 → 空字符串，绝不 KeyError。
+                price_in=str(it.get("price_in") or "").strip(),
+                price_out=str(it.get("price_out") or "").strip(),
             )
         )
     return profiles

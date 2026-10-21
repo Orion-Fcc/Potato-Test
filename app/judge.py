@@ -363,8 +363,12 @@ async def judge(
         for k in ("prompt", "completion", "total", "cached"):
             _usage[k] += int(u.get(k, 0) or 0)
         _bucket = _usage_by_role.setdefault(
-            role, {"prompt": 0, "completion": 0, "cached": 0, "total": 0, "calls": 0}
+            role,
+            {"prompt": 0, "completion": 0, "cached": 0, "total": 0, "calls": 0, "model": ""},
         )
+        # 记模型名：用量页按模型维度出图。旧数据没有这个字段 → 页面显示「未记录」。
+        if res.model:
+            _bucket["model"] = res.model
         _bucket["calls"] += int(u.get("calls", 1) or 1)
         for k in ("prompt", "completion", "total", "cached"):
             _bucket[k] += int(u.get(k, 0) or 0)

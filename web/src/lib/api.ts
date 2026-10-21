@@ -391,6 +391,9 @@ export interface LlmPoolIn {
   vision?: boolean;
   tools?: boolean;
   enabled?: boolean;
+  /** 手工价格：¥ / 百万 token。空串 = 未配置。 */
+  price_in?: string;
+  price_out?: string;
 }
 
 export interface LlmPoolEntry {
@@ -406,6 +409,8 @@ export interface LlmPoolEntry {
   vision?: boolean;
   tools?: boolean;
   enabled?: boolean;
+  price_in?: string;
+  price_out?: string;
   api_key_set: boolean;
   /** 后端只回掩码，明文永远不出后端。 */
   api_key_masked?: string;
@@ -461,6 +466,34 @@ export interface LlmTestReport {
   ok: boolean;
   all_ok: boolean;
   results: LlmTestResult[];
+}
+
+export interface LlmUsageBucket {
+  prompt: number;
+  completion: number;
+  cached: number;
+  total: number;
+  calls: number;
+  /** 仅按模型池里手工填写的价格估算；未配置价格时恒为 0，由 unpriced 区分。 */
+  cost: number;
+}
+
+export interface LlmUsageDay extends LlmUsageBucket {
+  date: string;
+}
+
+export interface LlmUsageReport {
+  days: number;
+  series: LlmUsageDay[];
+  by_role: Record<string, LlmUsageBucket>;
+  by_model: Record<string, LlmUsageBucket>;
+  totals: LlmUsageBucket;
+  unpriced: boolean;
+  has_data: boolean;
+  has_unrecorded: boolean;
+  models: string[];
+  roles: { key: string; label: string }[];
+  role_labels: Record<string, string>;
 }
 
 export interface FeishuStatus {
@@ -1840,6 +1873,15 @@ export const api = {
     req<{ pool: LlmPoolEntry[]; count: number; source: "pool" | "env"; configured: boolean }>(
       "/admin/settings/llm/pool",
     ),
+  /** AI 用量：按天 / 角色 / 模型聚合账本。days=0 表示全部历史。 */
+  getLlmUsage: (p: { days?: number; role?: string; model?: string; signal?: AbortSignal } = {}) => {
+    const q = new URLSearchParams();
+    if (p.days !== undefined) q.set("days", String(p.days));
+    if (p.role) q.set("role", p.role);
+    if (p.model) q.set("model", p.model);
+    const qs = q.toString();
+    return req<LlmUsageReport>(`/admin/llm/usage${qs ? `?${qs}` : ""}`, { signal: p.signal });
+  },
   testLlmSettings: (names?: string[]) =>
     req<LlmTestReport>("/admin/settings/llm/test", {
       method: "POST",

@@ -16,7 +16,11 @@ import { api, type AssistantAttachment } from "../../lib/api";
 import { markdownToHtml } from "../../lib/markdown";
 import { latestMermaidSource, mermaidHtml } from "../../lib/mermaidSource";
 import { readSSE, type SSEEvent } from "../../lib/sse";
-import { EMPTY_SELECTION, useWorkspace, type SelectionInfo } from "../../state/WorkspaceContext";
+import {
+  EMPTY_SELECTION,
+  useWorkspaceStore,
+  type SelectionInfo,
+} from "../../state/workspaceStore";
 import { Button } from "../ui";
 import { useToast } from "../toast";
 import { MarkdownBody } from "./MarkdownBody";
@@ -117,7 +121,11 @@ export function AssistantSidebar() {
   const { pid: pidRaw } = useParams();
   const pid = Number(pidRaw);
   const toast = useToast();
-  const { doc, selection, setStreaming, apiRef, flowTriggerRef } = useWorkspace();
+  // 按字段订阅：正文逐键变化不会触发侧栏重渲染。
+  const doc = useWorkspaceStore((s) => s.currentDoc);
+  const selection = useWorkspaceStore((s) => s.selection);
+  const setStreaming = useWorkspaceStore((s) => s.setStreaming);
+  const setFlowTrigger = useWorkspaceStore((s) => s.setFlowTrigger);
 
   const [turns, setTurns] = useState<Turn[]>(() => loadTurns(pid));
   const [input, setInput] = useState("");
@@ -208,7 +216,7 @@ export function AssistantSidebar() {
     async (kind: "chat" | "flow" | "global", message: string) => {
       if (busyRef.current || !Number.isFinite(pid)) return;
       const isGlobal = kind === "global";
-      const ctx = isGlobal ? null : apiRef.current?.getContext();
+      const ctx = isGlobal ? null : useWorkspaceStore.getState().getContext();
       const docMeta = ctx?.doc ?? docRef.current;
       const sel: SelectionInfo = ctx?.selection ?? EMPTY_SELECTION;
       const sentAtts = isGlobal ? atts : [];
@@ -382,7 +390,7 @@ export function AssistantSidebar() {
         abortRef.current = null;
       }
     },
-    [apiRef, atts, patchTurn, pid, setStreaming, t],
+    [atts, patchTurn, pid, setStreaming, t],
   );
 
   const stop = useCallback(() => abortRef.current?.abort(), []);
@@ -392,14 +400,14 @@ export function AssistantSidebar() {
   const beginRef = useRef(begin);
   beginRef.current = begin;
   useEffect(() => {
-    flowTriggerRef.current = (instruction?: string) => {
+    setFlowTrigger((instruction?: string) => {
       const text = (instruction ?? "").trim() || t("请根据左侧文档和项目需规，画一张主要业务流程图。");
       void beginRef.current("flow", text);
-    };
+    });
     return () => {
-      flowTriggerRef.current = null;
+      setFlowTrigger(null);
     };
-  }, [flowTriggerRef, t]);
+  }, [setFlowTrigger, t]);
 
   const startFlow = () => {
     if (busy) return;
@@ -417,8 +425,8 @@ export function AssistantSidebar() {
 
   const apply = useCallback(
     (turn: Turn, applyMode: "replace" | "insert") => {
-      const api = apiRef.current;
-      if (!api || !turn.content.trim()) return;
+      const api = useWorkspaceStore.getState();
+      if (!turn.content.trim()) return;
       if (applyMode === "replace" && !window.confirm(t("这会替换左侧文档的当前正文，确定吗？"))) return;
 
       const html =
@@ -435,7 +443,7 @@ export function AssistantSidebar() {
       }
       patchTurn(turn.id, { applied: applyMode });
     },
-    [apiRef, patchTurn, t, toast],
+    [patchTurn, t, toast],
   );
 
   const applyRef = useRef(apply);

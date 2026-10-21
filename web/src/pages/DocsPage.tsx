@@ -1,12 +1,12 @@
 import { ExternalLink, FileText, GitBranch, Loader2, Lock, Plus, RefreshCw, Save, Sparkles, Trash2, Unlock, Upload } from "lucide-react";
-import type { Editor } from "@tiptap/react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useParams } from "react-router-dom";
 import { api, type KnowledgeFormats, type ProjectDoc, type VerifiedCoverage } from "../lib/api";
-import { Badge, Button, Card, Input, Select } from "../components/ui";
+import { Badge, Button, Card, Input } from "../components/ui";
+import { Tabs, TabsList, TabsTrigger } from "../components/ui/tabs";
 import { RichTextEditor } from "../components/RichTextEditor";
-import { EMPTY_SELECTION, useWorkspace, type SelectionInfo } from "../state/WorkspaceContext";
+import { useWorkspaceStore, type SelectionInfo } from "../state/workspaceStore";
 import { SourceViewer } from "../components/SourceViewer";
 import { InsightsPanel } from "../components/InsightsPanel";
 import { Empty, PageSkeleton } from "../components/feedback";
@@ -233,86 +233,43 @@ export function DocsPage() {
     setDirty(false);
   }, [active]);
 
-  // 工作区状态（2026-10-20）：AI 侧栏要实时知道"现在编辑哪份文档、用户选了哪段"。
-  // 正文不逐键推给 Context —— getContext 从 ref 现取，避免长文档每敲一个字
-  // 就让整棵工作区树重渲染。
-  const { setDoc, setSelection, apiRef, flowTriggerRef } = useWorkspace();
-  const editorRef = useRef<Editor | null>(null);
-  const lastSelRef = useRef<SelectionInfo>(EMPTY_SELECTION);
-  const htmlRef = useRef(html);
-  htmlRef.current = html;
-  const activeRef = useRef<ProjectDoc | null>(active);
-  activeRef.current = active;
+  // 工作区状态（2026-10-21）：全局状态迁到 Zustand。
+  // 侧栏只按字段订阅 currentDoc / selection / streaming，正文逐键变化不触发它重渲染；
+  // 发送时用 getContext() 从 store / 编辑器现取。
+  const setCurrentDoc = useWorkspaceStore((s) => s.setCurrentDoc);
+  const setEditorContent = useWorkspaceStore((s) => s.setEditorContent);
+  const setSelection = useWorkspaceStore((s) => s.setSelection);
+  const resetSelection = useWorkspaceStore((s) => s.resetSelection);
+  const setEditor = useWorkspaceStore((s) => s.setEditor);
+  const contentWrite = useWorkspaceStore((s) => s.contentWrite);
+  const lastWriteSeq = useRef(useWorkspaceStore.getState().contentWrite?.seq ?? 0);
 
   useEffect(() => {
-    setDoc(active ? { id: active.id, kind: active.kind, title } : null);
-  }, [active, title, setDoc]);
+    setCurrentDoc(active ? { id: active.id, kind: active.kind, title } : null);
+    setEditorContent(active?.html ?? "");
+  }, [active, title, setCurrentDoc, setEditorContent]);
 
   // 切文档时清掉上一份的选区 —— 否则侧栏会把旧文档的字数当成新文档的上下文。
   useEffect(() => {
-    lastSelRef.current = EMPTY_SELECTION;
-    setSelection(EMPTY_SELECTION);
-  }, [active?.id, active?.kind, setSelection]);
+    resetSelection();
+  }, [active?.id, active?.kind, resetSelection]);
 
-  // 侧栏的写入通道。注册一次，用 ref 取实时值。
+  // 侧栏写入正文后刷新本地 html，并标记未保存。
   useEffect(() => {
-    const write = (next: string) => {
-      const ed = editorRef.current;
-      if (!ed) {
-        setHtml(next);
-      } else {
-        // 用「全选 + 插入」而不是 setContent：前者走正常的 ProseMirror 事务，
-        // 整篇替换后仍可 Ctrl+Z 撤销，也不会清空撤销历史。
-        const ok = ed.chain().focus().selectAll().insertContent(next).run();
-        if (!ok) ed.commands.setContent(next, { emitUpdate: false });
-        setHtml(ed.getHTML());
-      }
-      setDirty(true);
-    };
-    apiRef.current = {
-      getContext: () => ({
-        doc: activeRef.current
-          ? {
-              id: activeRef.current.id,
-              kind: activeRef.current.kind,
-              title: activeRef.current.title,
-            }
-          : null,
-        html: htmlRef.current,
-        selection: lastSelRef.current,
-      }),
-      replaceContent: write,
-      insertContent: (next: string) => {
-        const ed = editorRef.current;
-        if (!ed || activeRef.current?.kind === "flow") return false;
-        // 取编辑器实时选区，而不是缓存的最后一次选区：用户点侧栏输入框后
-        // ProseMirror 的 selection 仍然保留，而缓存可能是旧文档/旧位置。
-        const pos = Math.min(ed.state.selection.to, ed.state.doc.content.size);
-        // 传 HTML 字符串给 insertContentAt，TipTap 会解析成节点（标题、列表、
-        // 加粗、表格等），不是 insertText 的纯文本。updateSelection 让光标
-        // 落到插入内容末尾，用户可以直接接着改。
-        const ok = ed
-          .chain()
-          .focus()
-          .insertContentAt(pos, next, { updateSelection: true })
-          .run();
-        if (!ok) return false;
-        setHtml(ed.getHTML());
-        setDirty(true);
-        return true;
-      },
-    };
-    return () => {
-      apiRef.current = null;
-    };
-  }, [apiRef]);
+    if (!contentWrite || contentWrite.seq === lastWriteSeq.current) return;
+    lastWriteSeq.current = contentWrite.seq;
+    setHtml(contentWrite.html);
+    setDirty(true);
+  }, [contentWrite]);
 
-  const handleSelection = useCallback((sel: SelectionInfo) => {
-    // 拖拽/键入过程中会有空选区；保留最后一次**非空**选区，
-    // 这样用户选中一段、再点侧栏输入框时 AI 仍知道他说的是哪段。
-    if (!sel.empty && sel.text.trim()) lastSelRef.current = sel;
-    setSelection(sel);
-  }, [setSelection]);
+  useEffect(() => () => setEditor(null), [setEditor]);
+
+  const handleSelection = useCallback(
+    (sel: SelectionInfo) => {
+      setSelection(sel);
+    },
+    [setSelection],
+  );
 
   // 上传需规 / 资料（2026-10-13）：同时走两条路 —— 知识库（AI 检索分块）+ 一份项目文档
   // （和别的文档一样可读可改）。默认「允许助手修改」，上传后可在该文档上随时切换。
@@ -503,26 +460,27 @@ export function DocsPage() {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-3">
-      {/* 顶部：文档下拉选择（左）+ 操作区（右，固定不换行）。
-          2026-10-21 用户要求把横向 Tab 换成下拉框：文档一多 Tab 会溢出、
-          两端出现滚动箭头，且挤占顶部横向空间。下拉使用 Radix Portal
-          （挂到 body），展开时不会挤压右侧 AI 面板的 Flex 宽度。
-          切换时只换 `active`，编辑器由 key 强制重挂载。 */}
+      {/* 顶部：文档 Tabs（左）+ 操作区（右，固定不换行）。
+          2026-10-21 用户要求改回横向 Tabs。文档多时 TabsList 横向滚动，
+          不会把右侧操作区挤出视口；切换只换 `active`，编辑器由 key 强制重挂载。 */}
       <div className="flex flex-wrap items-center gap-2 rounded-lg border border-[var(--line)] bg-[var(--panel)] px-2 py-1.5">
-        <Select
+        <Tabs
           value={active ? `${active.kind}:${active.id}` : ""}
           onValueChange={(v) => {
             const d = docs.find((x) => `${x.kind}:${x.id}` === v);
             if (d) setActive(d);
           }}
-          placeholder={t("Project Docs")}
-          className="h-8 w-auto min-w-[200px] max-w-[320px]"
+          className="min-w-0 flex-1"
         >
-          {docs.map((d) => {
-            const Icon = KIND_ICON[d.kind] ?? FileText;
-            return (
-              <option key={`${d.kind}-${d.id}`} value={`${d.kind}:${d.id}`}>
-                <span className="inline-flex max-w-[260px] items-center gap-1.5">
+          <TabsList className="max-w-full justify-start overflow-x-auto border-0 bg-transparent p-0">
+            {docs.map((d) => {
+              const Icon = KIND_ICON[d.kind] ?? FileText;
+              return (
+                <TabsTrigger
+                  key={`${d.kind}-${d.id}`}
+                  value={`${d.kind}:${d.id}`}
+                  className="max-w-[240px]"
+                >
                   <Icon className="h-3.5 w-3.5 shrink-0" />
                   <span className="truncate">{d.title}</span>
                   {d.origin === "ai" && (
@@ -538,11 +496,11 @@ export function DocsPage() {
                       <Lock className="h-3 w-3 text-[var(--warn-fg)]" />
                     </span>
                   )}
-                </span>
-              </option>
-            );
-          })}
-        </Select>
+                </TabsTrigger>
+              );
+            })}
+          </TabsList>
+        </Tabs>
 
         <div className="flex shrink-0 items-center gap-1.5">
           <input
@@ -592,8 +550,8 @@ export function DocsPage() {
                 size="sm"
                 disabled={generating}
                 onClick={() => {
-                  if (active.kind === "flow" && flowTriggerRef.current) {
-                    flowTriggerRef.current();
+                  if (active.kind === "flow" && useWorkspaceStore.getState().flowTrigger) {
+                    useWorkspaceStore.getState().flowTrigger?.();
                   } else {
                     analyze(false);
                   }
@@ -818,12 +776,11 @@ export function DocsPage() {
                   value={html}
                   onChange={(v) => {
                     setHtml(v);
+                    setEditorContent(v);
                     setDirty(true);
                   }}
                   onUploadImage={async (f) => (await api.uploadDocImage(pid, f)).url}
-                  onReady={(ed) => {
-                    editorRef.current = ed;
-                  }}
+                  onReady={(ed) => setEditor(ed)}
                   onSelectionChange={handleSelection}
                   placeholder={
                     active.kind === "flow"

@@ -37,19 +37,9 @@ build/
 dist_desktop/
 web/tsconfig.tsbuildinfo
 
-# web/dist IS committed on purpose (2026-10-06).
-#
-# Why the change: it used to be ignored, so anyone who cloned this repo got the API
-# and no UI at all — `git clone && run_server.py` served a 404 on "/" and the tool
-# looked broken. Building it requires Node + pnpm, which a tester's machine often
-# does not have. The bundle is 1.7 MB / 38 files; shipping a prebuilt SPA is what
-# most self-hosted tools do, and it is the difference between "one command and it
-# works" and "install Node first".
-#
-# The rule that goes with it: whoever changes web/src must run `pnpm build` in web/
-# and commit the new dist in the same commit, otherwise the shipped UI silently
-# falls behind the code. scripts/deploy.* rebuilds it automatically when Node is
-# present, so a developer's checkout never uses a stale bundle. 
+# web/dist 是构建产物，不提交（2026-10-21 用户要求）。
+# 部署/打包时由 scripts/deploy.* 或 `cd web && npm run build` 重新生成。
+web/dist/
 
 # background server runtime state: PID file + uvicorn logs
 .potato.pid

@@ -1,10 +1,11 @@
+import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
 
 // Dev proxy: the SPA calls /api and /artifacts on its own origin; Vite forwards
 // them to the FastAPI backend on :8099.
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), tailwindcss()],
   server: {
     port: 5180,
     proxy: {
@@ -31,7 +32,7 @@ export default defineConfig({
           // charts: only Overview and RunReport use it, and it is by far the
           // heaviest dependency in the app (~368 kB). Isolating it keeps it off
           // every other route and lets the browser cache it across deploys.
-          if (id.includes("recharts") || id.includes("victory-vendor") || /[\\/]d3-/.test(id))
+          if (id.includes("recharts") || id.includes("victory-vendor") || /[\/]d3-/.test(id))
             return "vendor-charts";
           return;
         },

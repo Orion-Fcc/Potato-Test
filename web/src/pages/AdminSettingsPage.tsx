@@ -1,8 +1,8 @@
-import { useEffect, useState } from "react";
+﻿import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import { useTranslation } from "react-i18next";
-import { ChevronRight } from "lucide-react";
-import { api, type FeishuStatus, type LlmPoolEntry, type LlmPremiumStatus, type LlmStatus, type LlmTestReport, type LlmTestResult } from "../lib/api";
+import { ChevronDown, ChevronRight } from "lucide-react";
+import { api, type FeishuStatus, type LlmPoolEntry, type LlmRouting, type LlmStatus, type LlmTestReport, type LlmTestResult } from "../lib/api";
 import { useAuth } from "../lib/auth";
 import { Button, Card, Checkbox, Field, Input, Select } from "../components/ui";
 import { useToast, useErrorToast } from "../components/toast";
@@ -11,22 +11,33 @@ import { StorageCard } from "../components/StorageCard";
 
 // 协议取值与后端 app/llm_protocol.py 的 normalize_provider 对齐。
 // auto = 自动识别（先看地址线索，再依次小请求探测），绝大多数国产网关是 OpenAI 兼容。
-const PROVIDERS = ["auto", "openai", "anthropic", "google", "ollama"] as const;
-const PROVIDER_LABEL: Record<string, string> = {
-  auto: "Auto-detect",
-  openai: "OpenAI-compatible",
-  anthropic: "Anthropic (Claude)",
-  google: "Google (Gemini)",
-  ollama: "Ollama (local)",
-};
+// 快捷厂商预设：选厂商 → 自动填 Base URL + 默认模型 → 粘 Key → 保存即可用。
+// 这是「默认极简」那一半；高级字段（代理/上下文/能力）收在每张卡的高级设置里。
+const VENDORS = [
+  { id: "deepseek", label: "DeepSeek", base_url: "https://api.deepseek.com", model: "deepseek-chat" },
+  { id: "openai", label: "OpenAI", base_url: "https://api.openai.com/v1", model: "gpt-4o-mini" },
+  { id: "zhipu", label: "智谱 GLM", base_url: "https://open.bigmodel.cn/api/paas/v4", model: "glm-4-flash" },
+  { id: "kimi", label: "Kimi (Moonshot)", base_url: "https://api.moonshot.cn/v1", model: "moonshot-v1-8k" },
+  { id: "qwen", label: "阿里通义", base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1", model: "qwen-plus" },
+  { id: "ollama", label: "本地 Ollama", base_url: "http://127.0.0.1:11434/v1", model: "qwen2.5:7b" },
+  { id: "custom", label: "自定义", base_url: "", model: "" },
+] as const;
 
 type PoolRow = LlmPoolEntry & { api_key: string };
+
+// 模型名列表缓存：同一个 Base URL 拉过一次，之后直接给下拉选项。
+const MODEL_CACHE_KEY = "potato.llm.models";
+const modelKey = (baseUrl: string) => (baseUrl || "").trim().toLowerCase().replace(/\/+$/, "");
 
 // 用途清单与后端 app/llm.py::ROLES 对齐。顺序按"花费从大到小"排：
 // 真库实测 agent 每步调用占全部 token 的约 95%，所以"执行"这一行是省钱的唯一大旋钮，
 // 判定/生成量小而质量敏感，值得留强模型。
 // judge_escalate 是复核层：只有初判 failed 或确定性闸门报警时才调用，
 // 所以它可以放比 judge 更贵的模型 —— 没触发就一分钱不花。
+// 这两个用途的"默认值"就是第一层的两个全局下拉框，单独列出来是同一配置出现两遍。
+// 只在用户**已经单独配过**（存在非空覆盖）时才显示，避免老配置凭空消失。
+const BASE_MIRROR_ROLES = ["agent", "assistant"];
+
 const ROLE_LABEL: Record<string, string> = {
   agent: "Execution (agent, every step)",
   judge: "Judging (once per case)",
@@ -80,56 +91,6 @@ function Hint({ text }: { text: string }) {
   );
 }
 
-/**
- * 折叠区。默认收起 —— 这个页面的问题从来不是"功能缺失"，而是默认视图里塞了
- * 四十多个控件和八段解释。折叠让默认视图只回答两个问题：现在跑的是哪一套 /
- * 要不要为质量多加一支贵模型；真要逐项微调的人再展开。
- *
- * 标题用 <button>、提示用**同级**的 <Hint>（不是嵌在按钮里）—— 按钮套按钮是非法
- * HTML，点击行为也会互相打架。右侧 summary 显示"收起来的时候你错过了什么"，
- * 免得折叠等于藏东西。
- */
-function Fold({
-  open,
-  onToggle,
-  title,
-  badge,
-  hint,
-  summary,
-  children,
-}: {
-  open: boolean;
-  onToggle: () => void;
-  title: string;
-  badge?: string;
-  hint?: string;
-  summary?: ReactNode;
-  children: ReactNode;
-}) {
-  return (
-    <div>
-      <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
-        <div className="flex flex-wrap items-baseline gap-x-2">
-          <button
-            type="button"
-            onClick={onToggle}
-            className="inline-flex items-center gap-1.5 text-sm font-medium text-ink-900 outline-none transition-colors hover:text-brand-700 focus-visible:ring-2 focus-visible:ring-brand-100"
-          >
-            <ChevronRight
-              className={`h-4 w-4 shrink-0 text-ink-400 transition-transform duration-150${open ? " rotate-90" : ""}`}
-            />
-            {title}
-          </button>
-          {badge && <span className="text-[11px] font-normal text-ink-400">{badge}</span>}
-          {hint && <Hint text={hint} />}
-        </div>
-        {summary && <div className="text-[11px] text-ink-500">{summary}</div>}
-      </div>
-      {open && <div className="mt-3 space-y-3">{children}</div>}
-    </div>
-  );
-}
-
 /** 卡片标题行：左边标题（可挂 ? 提示），右边一句"现在的状态"。 */
 function CardTitle({ title, hint, right }: { title: string; hint?: string; right?: ReactNode }) {
   return (
@@ -161,109 +122,6 @@ const PREMIUM_ROLES = [
   "assistant",
   "agent",
 ] as const;
-// 一开开关默认勾上的用途：量小、质量关键的那些。judge 不在内 ——
-// 初判刻意留给便宜模型，那正是两级判定的意义。
-const PREMIUM_DEFAULT_ROLES = ["judge_escalate", "specgen", "narrative"];
-
-// 一个高端模型配置在"还没从后端拿到"时的空壳。
-function emptyPremium(): LlmPremiumStatus {
-  return {
-    enabled: false,
-    pool_name: "",
-    resolved_model: "",
-    roles: [],
-    usable: false,
-    applies_to: [],
-  };
-}
-
-/**
- * 「高端模型」卡里的建议块：直接告诉用户哪些环节该上高端模型。
- *
- * 依据（和 ROLE_TOKEN_SHARE_ESTIMATE 一致）：agent 占全部 token 的约 94%，把执行步
- * 换贵等于把"省钱主旋钮"关掉，所以**不推荐**；其余用途都是"质量敏感、量小"——
- * 判定/复核决定用例成败、需规/叙述决定交付物质量、助手偶发——用更好的模型性价比最高。
- *
- * 占比数字优先用真实实测（tokenShare.measured），无数据回退结构估算并标 ≈，
- * 与「勾选项旁占比」同一套口径，绝不把估算冒充实测。
- */
-function PremiumSuggestion({
-  poolEmpty,
-  suggested,
-  selected,
-  tokenShare,
-  onApply,
-}: {
-  poolEmpty: boolean;
-  suggested: readonly string[];
-  selected: string[];
-  tokenShare: {
-    measured: Record<string, number>;
-    estimate: Record<string, number>;
-    has_data: boolean;
-    runs: number;
-  } | null;
-  onApply: () => void;
-}) {
-  const { t } = useTranslation();
-
-  const pctOf = (r: string): { pct: number; real: boolean } | null => {
-    if (!tokenShare) return null;
-    if (tokenShare.has_data && tokenShare.measured[r] != null) {
-      return { pct: tokenShare.measured[r], real: true };
-    }
-    return { pct: tokenShare.estimate[r] ?? 0, real: false };
-  };
-  const agentPct = pctOf("agent");
-  const suggestedPct = suggested.reduce((s, r) => s + (pctOf(r)?.pct ?? 0), 0);
-  const allSelected = suggested.every((r) => selected.includes(r));
-
-  return (
-    <div className="rounded-lg border border-[var(--line)] bg-[var(--panel2)] p-3">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="text-[12px] font-medium text-ink-900">
-          {t("Suggested: give the premium model to quality-sensitive, low-volume steps")}
-        </div>
-        <Button
-          variant="ghost"
-          className="h-7 text-[11px]"
-          disabled={poolEmpty || allSelected}
-          onClick={onApply}
-        >
-          {allSelected ? t("Suggestion applied") : t("Apply suggestion")}
-        </Button>
-      </div>
-      <div className="mt-1.5 space-y-0.5">
-        {suggested.map((r) => {
-          const tp = pctOf(r);
-          return (
-            <div key={r} className="flex items-center gap-2 text-[11px] text-ink-600">
-              <span className="text-ink-700">{t(ROLE_LABEL[r])}</span>
-              {tp && (
-                <span className={tp.real ? "text-ink-500" : "text-ink-400"}>
-                  {tp.real ? `· ${tp.pct}%` : `· ≈${tp.pct}%`}
-                </span>
-              )}
-            </div>
-          );
-        })}
-      </div>
-      <div className="mt-1.5 text-[11px] text-ink-400">
-        {t(
-          "These add up to about {{pct}}% of tokens — small volume, so the premium model is cheap here. Execution is ~{{agent}}% of tokens, so it is deliberately not recommended.",
-          { pct: Math.round(suggestedPct), agent: agentPct ? Math.round(agentPct.pct) : "—" },
-        )}
-        {poolEmpty && (
-          <>
-            {" "}
-            {t("Add at least one model to the pool first, then pick it above as the premium model.")}
-          </>
-        )}
-      </div>
-    </div>
-  );
-}
-
 function RowTestResult({ result }: { result: LlmTestResult }) {
   const { t } = useTranslation();
   const mark = (b?: boolean) => (b ? "✓" : "✕");
@@ -299,31 +157,36 @@ export function AdminSettingsPage() {
   const [rowTests, setRowTests] = useState<Record<number, { loading: boolean; result?: LlmTestResult }>>({});
   const [loadError, setLoadError] = useState("");
 
-  // LLM 池（多套网关，按顺序 429 兜底）—— 这是**唯一**的网关配置入口。
+  // LLM 模型池（多张模型卡片，按顺序 429 兜底）—— 这是**唯一**的模型配置入口。
   const [pool, setPool] = useState<PoolRow[] | null>(null);
-  // 池为空时后端会回一条从 .env 读出来的回显条目（seeded=true）。界面要如实说明
-  // "这条还没进池"，否则用户会以为已经保存过了。
-  const [poolSeeded, setPoolSeeded] = useState(false);
   const [savingPool, setSavingPool] = useState(false);
+  // 全局路由：默认对话 / 默认 Agent / 自动降级。
+  const [routing, setRouting] = useState<LlmRouting>({ chat: "", agent: "", failover: true });
+  const [poolDirty, setPoolDirty] = useState(false);
 
-  // 平台级「高端模型」（贵、聪明，可选）。默认关。
-  // 有意的设计：整个平台"要不要为质量多花钱"只在这里回答一次（2026-10-12 简化后，
-  // 这是唯一的模型分配控件，不再有"逐环节指定"那张子卡）。空壳用 emptyPremium()，
-  // 字段与后端 premium_for_ui() 对齐。
-  const [premium, setPremium] = useState<LlmPremiumStatus>(emptyPremium);
+  // 批量管理 & 新增模型（拉取多选）
+  const [batchMode, setBatchMode] = useState(false);
+  const [batchSelected, setBatchSelected] = useState<Set<string>>(new Set());
+  const [advancedOpen, setAdvancedOpen] = useState<Set<number>>(new Set());
+
+
+  // 每张卡「拉取模型」的结果缓存（按 Base URL 分桶，落 localStorage）：
+  // 拉过一次之后，模型名就从手打变成可选列表；刷新页面也不丢。
+  const [modelCache, setModelCache] = useState<Record<string, string[]>>(() => {
+    try {
+      return JSON.parse(window.localStorage.getItem(MODEL_CACHE_KEY) || "{}") || {};
+    } catch {
+      return {};
+    }
+  });
+  const [pullingRow, setPullingRow] = useState<Set<number>>(new Set());
+  const [modelMenu, setModelMenu] = useState<number | null>(null);
+
+  // 特定环节覆盖：key 存在 = 勾选；value = 模型池条目的 name（"" = 勾了但还没选）。
+  // 未勾选的环节静默跟随第一层「基础运行模型」，不报错、不提示。
+  const [roleModels, setRoleModels] = useState<Record<string, string>>({});
   // 「模型分配」只用这一个保存按钮和一个 saving 标记。
   const [savingModels, setSavingModels] = useState(false);
-
-  // 折叠态（2026-10-11 简化）。默认视图只留"最常用的两件事"，其余收起来：
-  //   showExtraGateways —— 模型池里第 2 套以后的兜底网关（只有一套网关时纯噪音）
-  const [showExtraGateways, setShowExtraGateways] = useState(false);
-  // 各角色 token 占比（设置页展示用）。measured=真实实测，estimate=结构估算兜底。
-  const [tokenShare, setTokenShare] = useState<{
-    measured: Record<string, number>;
-    estimate: Record<string, number>;
-    has_data: boolean;
-    runs: number;
-  } | null>(null);
 
   // Feishu
   const [fs, setFs] = useState<FeishuStatus | null>(null);
@@ -345,9 +208,23 @@ export function AdminSettingsPage() {
         // s.llm 现在是**真实生效**的那一套（池的第 1 条），不再是 env/旧单值字段。
         // 所以下面这块面板显示的模型名与实际调用逐字节一致。
         setLlm(s.llm);
-        setPremium(s.llm.premium || emptyPremium());
-        // 各角色 token 占比：与上面的设置加载并行，互不依赖。
-        api.getLlmTokenShare().then(setTokenShare).catch(() => {});
+        // 回显「特定环节覆盖」：优先取逐环节配置；旧版 premium 接管过的环节
+        // 也迁移成逐环节下拉框的值 —— 新版保存后 premium 会被关闭，行为不变。
+        const nextRoles: Record<string, string> = {};
+        for (const [role, r] of Object.entries(s.llm.roles || {})) {
+          if (r.source === "override") nextRoles[role] = r.pool_name || r.model || "";
+        }
+        if (s.llm.premium?.usable) {
+          for (const role of s.llm.premium.applies_to || []) {
+            if (!(role in nextRoles)) nextRoles[role] = s.llm.premium.pool_name;
+          }
+        }
+        setRoleModels(nextRoles);
+        setRouting({
+          chat: s.llm.routing?.chat || "",
+          agent: s.llm.routing?.agent || "",
+          failover: s.llm.routing?.failover !== false,
+        });
         setFs(s.feishu);
         setAppId(s.feishu.app_id);
         setApiBase(s.feishu.api_base);
@@ -359,8 +236,10 @@ export function AdminSettingsPage() {
     api
       .getLlmPool()
       .then((r) => {
+        // 后端只回用户真实保存过的条目；池为空就是空列表，不再有 .env 假卡片。
         setPool(r.pool.map((p) => ({ ...p, api_key: "" })));
-        setPoolSeeded(!!r.seeded);
+        setPoolDirty(false);
+        setBatchSelected(new Set());
         setRowTests({}); // 重新装载后旧的逐行结果可能对不上条目，清掉
       })
       .catch((e) => setLoadError(e?.message || String(e)));
@@ -375,14 +254,30 @@ export function AdminSettingsPage() {
     if (!pool) return;
     setSavingPool(true);
     try {
+      // 配置名称是用户自己的标识（模型分配/用途覆盖都按它引用），
+      // 不再自动生成 llm1、llm2 这类没有意义的名字。
+      const unnamed = pool.find(
+        (r) => r.base_url.trim() && r.model.trim() && !r.name.trim(),
+      );
+      if (unnamed) {
+        toast("error", t("Give each model a configuration name."));
+        return;
+      }
       const rows = pool
         .filter((r) => r.base_url.trim() && r.model.trim())
-        .map((r, i) => ({
-          name: (r.name || `llm${i + 1}`).trim(),
+        .map((r) => ({
+          name: r.name.trim(),
           base_url: r.base_url.trim(),
           model: r.model.trim(),
           agent_model: (r.agent_model || "").trim(),
           provider: r.provider || "auto",
+          vendor: r.vendor || "",
+          proxy_mode: r.proxy_mode || "system",
+          proxy_url: (r.proxy_url || "").trim(),
+          context_tokens: r.context_tokens || 4096,
+          vision: r.vision !== false,
+          tools: r.tools !== false,
+          enabled: r.enabled !== false,
           // 留空 → 后端保持同位置已存的那把钥匙
           api_key: r.api_key.trim() || undefined,
         }));
@@ -390,7 +285,17 @@ export function AdminSettingsPage() {
         toast("error", t("Fill in at least one entry (base URL + model)."));
         return;
       }
-      await api.setLlmSettings({ pool: rows });
+      // 后端会丢弃"新条目但没有 key"的记录。以前是静默丢弃 → 池里只剩 env 回显，
+      // 探测结果看起来像是别的厂商在报错（1.0.8 现场：选 DeepSeek 却报 Gemini）。
+      // 这里提前拦住，并点名哪一条，绝不让配置无声消失。
+      const missingKey = pool.find(
+        (r) => r.base_url.trim() && r.model.trim() && !r.api_key.trim() && !r.api_key_set,
+      );
+      if (missingKey) {
+        toast("error", t("API key is required for {{name}}.", { name: missingKey.name || missingKey.vendor }));
+        return;
+      }
+      await api.setLlmSettings({ pool: rows, routing });
       await loadPool();
       toast("success", t("Saved"));
     } catch (e: any) {
@@ -400,20 +305,28 @@ export function AdminSettingsPage() {
     }
   };
 
-  // 保存「模型分配」= 只提交平台级「高端模型接管」（2026-10-12 简化：砍掉合并时的
-  // 逐环节覆盖 / 两级判定两张子卡，只留这一个机制）。一次 PUT，后端整体替换 premium。
-  // 2026-10-12 起：高端模型只从模型池里选一套（pool_name），不再自己提交连接信息。
-  // 注意：逐环节覆盖（后端 roles 字段）不在界面暴露后这里不提交它 —— 后端保持原值，
-  // 已存的逐环节覆盖仍按"更具体者胜"生效，只是不再可编辑；需要清空告诉我即可。
+  // 保存「模型分配」：基础的对话/执行路由 + 特定环节覆盖一次提交。
+  // 环节覆盖按模型池条目 name 提交，后端取该条目的整条凭据（网关/钥匙/协议），
+  // 避免"换了模型却沿用另一家网关的钥匙"。旧 premium 槽位同时清空 ——
+  // 新版界面不再有这层，留着会让它继续悄悄接管环节。
   const saveModels = async () => {
     setSavingModels(true);
     try {
+      const roles: Record<string, { pool_name?: string; model?: string }> = {};
+      for (const [role, value] of Object.entries(roleModels)) {
+        const v = value.trim();
+        if (!v) {
+          // 勾了却没选：行内已经标红；保存时明确拦住，绝不静默丢掉这一行。
+          toast("error", t("Select a model for this step."));
+          return;
+        }
+        // 池条目 → 用 pool_name 引用整条凭据；旧式覆盖只剩模型名 → 原样保留。
+        roles[role] = poolNames.includes(v) ? { pool_name: v } : { model: v };
+      }
       await api.setLlmSettings({
-        premium: {
-          enabled: premium.enabled,
-          pool_name: premium.pool_name.trim(),
-          roles: [...premium.roles],
-        },
+        routing,
+        roles,
+        premium: { enabled: false, pool_name: "", roles: [] },
       });
       await load();
       await loadPool();
@@ -461,6 +374,136 @@ export function AdminSettingsPage() {
     }
   };
 
+  const setRow = (i: number, patch: Partial<PoolRow>) => {
+    setPool((pool || []).map((r, j) => {
+      if (j !== i) return r;
+      const next = { ...r, ...patch };
+      // 换了 Base URL 就不再沿用旧钥匙/旧掩码：否则保存时后端匹配不到同一条目，
+      // 这一行会被静默丢弃（看起来像"保存成功但模型没进池"）。
+      if (patch.base_url !== undefined && patch.base_url.trim() !== (r.base_url || "").trim()) {
+        next.api_key = "";
+        next.api_key_set = false;
+      }
+      return next;
+    }));
+    setPoolDirty(true);
+  };
+
+  const applyVendor = (i: number, vendorId: string) => {
+    const v = VENDORS.find((x) => x.id === vendorId);
+    if (!v) return;
+    // 自定义厂商保留用户已填的地址/模型；预设厂商才覆盖。
+    setRow(i, {
+      vendor: v.id,
+      ...(v.id === "custom" ? {} : { base_url: v.base_url, model: v.model }),
+      provider: "auto",
+    });
+  };
+
+  const toggleAdvanced = (i: number) =>
+    setAdvancedOpen((prev) => {
+      const next = new Set(prev);
+      if (next.has(i)) next.delete(i);
+      else next.add(i);
+      return next;
+    });
+
+  const refreshAll = async () => {
+    await Promise.all([load(), loadPool()]);
+  };
+
+  const runBatch = async (action: "enable" | "disable" | "delete") => {
+    const names = [...batchSelected];
+    if (!names.length) {
+      toast("error", t("Select at least one model."));
+      return;
+    }
+    if (action === "delete" && !window.confirm(t("Delete the selected models from the pool?"))) return;
+    try {
+      await api.batchActionLlmPool(names, action);
+      await refreshAll();
+      setBatchSelected(new Set());
+      toast("success", t("Done"));
+    } catch (e: any) {
+      fail(e);
+    }
+  };
+
+  const poolNames = (pool || []).map((p) => p.name).filter(Boolean);
+
+  // 池条目增删同样要标脏：否则黄色提示不出现，用户会以为已经保存。
+  const addEmptyRow = () => {
+    const rows = pool || [];
+    setPool([
+      ...rows,
+      {
+        name: "",
+        base_url: "",
+        model: "",
+        agent_model: "",
+        provider: "auto",
+        api_key_set: false,
+        api_key: "",
+      },
+    ]);
+    setPoolDirty(true);
+  };
+
+  const removeRow = (i: number) => {
+    setPool((pool || []).filter((_r, j) => j !== i));
+    setPoolDirty(true);
+  };
+
+  const rememberModels = (baseUrl: string, models: string[]) => {
+    const key = modelKey(baseUrl);
+    if (!key || !models.length) return;
+    setModelCache((prev) => {
+      const next = { ...prev, [key]: [...new Set([...(prev[key] || []), ...models])].sort() };
+      try {
+        window.localStorage.setItem(MODEL_CACHE_KEY, JSON.stringify(next));
+      } catch {
+        /* 存不下不影响本次会话使用 */
+      }
+      return next;
+    });
+  };
+
+  // 单卡拉取：用这张卡自己的地址/钥匙/代理。拉完立刻记缓存，模型名变成可选列表。
+  const pullRowModels = async (i: number, row: PoolRow) => {
+    if (!row.base_url.trim()) {
+      toast("error", t("Base URL is required."));
+      return;
+    }
+    setPullingRow((prev) => new Set(prev).add(i));
+    try {
+      const r = await api.pullLlmModels({
+        base_url: row.base_url.trim(),
+        api_key: row.api_key.trim() || undefined,
+        proxy_mode: row.proxy_mode || "system",
+        proxy_url: row.proxy_mode === "custom" ? (row.proxy_url || "").trim() || undefined : undefined,
+      });
+      rememberModels(row.base_url, r.models);
+      if (!row.model.trim() && r.models[0]) setRow(i, { model: r.models[0] });
+      toast("success", t("Found {{n}} models.", { n: r.count }));
+    } catch (e: any) {
+      fail(e);
+    } finally {
+      setPullingRow((prev) => {
+        const next = new Set(prev);
+        next.delete(i);
+        return next;
+      });
+    }
+  };
+
+  // 可选项 = 厂商默认模型 + 该地址拉取过的模型 + 当前值。未拉取时至少给厂商默认，
+  // 拉取过就成了一份可直接点选的清单（输入框同时支持打字过滤）。
+  const modelOptions = (row: PoolRow) => {
+    const preset = VENDORS.find((v) => v.id === row.vendor)?.model || "";
+    const cached = modelCache[modelKey(row.base_url)] || [];
+    return [...new Set([preset, ...cached, row.model].filter(Boolean))];
+  };
+
   const save = async () => {
     setSaving(true);
     try {
@@ -496,93 +539,228 @@ export function AdminSettingsPage() {
     }
   };
 
-  // 高端模型的表单态判断（不看服务端回值，否则"改了还没保存"时提示是错的）。
-  // 高端模型"真的能用" = 开了 + 选的池条目确实存在于模型池 + 勾了至少一步。
-  const premiumResolved = pool != null && pool.some((p) => p.name === premium.pool_name);
-  const premiumResolvedModel = pool?.find((p) => p.name === premium.pool_name)?.model ?? "";
-  const premiumReady = premium.enabled && premiumResolved && premium.roles.length > 0;
-  const premiumOnAgent = premium.enabled && premium.roles.includes("agent");
-  // 已保存且真的在生效的用途（用服务端回值，避免把未保存的编辑当成现状）
-  const premiumLiveRoles = (llm?.premium?.applies_to || [])
-    .map((r) => `${t(ROLE_LABEL[r] || r)}`)
-    .join(" / ");
+  // 第一层「基础运行模型」的下拉框显示：优先显示池条目的模型名。
+  const modelOf = (name: string) =>
+    (pool || []).find((p) => p.name === name)?.model || name;
+  const baseAgentModel = routing.agent
+    ? modelOf(routing.agent)
+    : (pool?.[0]?.model || llm?.agent_model || llm?.model || "—");
 
-  // 池条目的编辑块。抽成函数是因为它现在出现在两处：默认展开的第 1 套，
-  // 以及折叠区里的第 2 套以后（两处必须长得一模一样，否则用户会以为"兜底的"是另一套东西）。
-  const poolEntry = (row: PoolRow, i: number) => (
-    <div key={i} className="space-y-2 rounded-lg border border-[var(--line)] p-2.5">
-      <div className="flex items-center gap-2">
-        <span className="w-6 text-center font-mono text-xs text-ink-500">{i + 1}</span>
-        <Input
-          value={row.name}
-          onChange={(e) => setPool((pool || []).map((r, j) => (j === i ? { ...r, name: e.target.value } : r)))}
-          placeholder={t("Name")}
-          className="w-40"
-        />
-        <Select
-          value={row.provider || "auto"}
-          onChange={(e) =>
-            setPool((pool || []).map((r, j) => (j === i ? { ...r, provider: e.target.value } : r)))
-          }
-          className="w-44"
-        >
-          {PROVIDERS.map((p) => (
-            <option key={p} value={p}>
-              {t(PROVIDER_LABEL[p])}
-            </option>
-          ))}
-        </Select>
-        <Button
-          variant="ghost"
-          className="h-7 text-[11px]"
-          onClick={() => testRow(i, row.name)}
-          disabled={rowTests[i]?.loading}
-          title={t("Probe this entry (uses the saved config)")}
-        >
-          {rowTests[i]?.loading ? t("Probing…") : t("Probe")}
-        </Button>
-        {/* 第 1 套不给"移除"：它是 agent 实际在跑的那一套，清掉整池就空了。
-            想换掉它就直接改地址/模型。 */}
-        {i > 0 && (
-          <Button variant="ghost" onClick={() => setPool((pool || []).filter((_r, j) => j !== i))}>
+  // 一张卡片 = 一次完整配置。固定四行：
+  //   ① 厂商预设 + 模型名称  ② Base URL  ③ API Key  ④ 拉取模型
+  // 顶部只留用户自定义的「配置名称」和行操作。没有序号，也没有自动生成的 llm1。
+  const poolEntry = (row: PoolRow, i: number) => {
+    const adv = advancedOpen.has(i);
+    const enabled = row.enabled !== false;
+    const checked = batchSelected.has(row.name);
+    return (
+      <div
+        key={`row-${i}`}
+        className={`space-y-2 rounded-lg border border-[var(--line)] p-2.5 ${enabled ? "" : "opacity-60"}`}
+      >
+        {/* 卡片头：配置名称（用户自己起名，模型分配/环节覆盖都按它引用）。 */}
+        <div className="flex flex-wrap items-center gap-2">
+          {batchMode && (
+            <Checkbox
+              checked={checked}
+              disabled={!row.name}
+              onChange={(e) =>
+                setBatchSelected((prev) => {
+                  const next = new Set(prev);
+                  if (e.target.checked) next.add(row.name);
+                  else next.delete(row.name);
+                  return next;
+                })
+              }
+            />
+          )}
+          <Input
+            value={row.name}
+            onChange={(e) => setRow(i, { name: e.target.value })}
+            placeholder={t("Configuration name (e.g. Daily driver)")}
+            className="w-56"
+          />
+          {!batchMode && (
+            <label className="flex items-center gap-1.5 text-[11px] text-ink-600">
+              <Checkbox checked={enabled} onChange={(e) => setRow(i, { enabled: e.target.checked })} />
+              {t("Enabled")}
+            </label>
+          )}
+          <span className="flex-1" />
+          <Button
+            variant="ghost"
+            className="h-7 text-[11px]"
+            onClick={() => testRow(i, row.name)}
+            disabled={rowTests[i]?.loading}
+            title={t("Probe this entry (uses the saved config)")}
+          >
+            {rowTests[i]?.loading ? t("Probing…") : t("Probe")}
+          </Button>
+          <Button variant="ghost" className="h-7 text-[11px]" onClick={() => setRow(i, { enabled: !enabled })}>
+            {enabled ? t("Disable") : t("Enable")}
+          </Button>
+          <Button variant="ghost" className="h-7 text-[11px]" onClick={() => removeRow(i)}>
             {t("Remove")}
           </Button>
-        )}
-      </div>
-      <Input
-        value={row.base_url}
-        onChange={(e) =>
-          setPool((pool || []).map((r, j) => (j === i ? { ...r, base_url: e.target.value } : r)))
-        }
-        placeholder="https://api.deepseek.com/v1"
-      />
-      <div className="grid grid-cols-3 gap-2">
+        </div>
+
+        {/* 第一行：厂商预设 + 模型名称（可打字过滤，也可展开已拉取的列表）。 */}
+        <div className="grid grid-cols-2 gap-2">
+          <Select
+            value={row.vendor || "custom"}
+            onChange={(e) => applyVendor(i, e.target.value)}
+            aria-label={t("Vendor preset")}
+          >
+            {VENDORS.map((v) => (
+              <option key={v.id} value={v.id}>
+                {v.label}
+              </option>
+            ))}
+          </Select>
+          <div className="relative min-w-0">
+            <Input
+              value={row.model}
+              onChange={(e) => {
+                setRow(i, { model: e.target.value });
+                setModelMenu(i);
+              }}
+              onFocus={() => setModelMenu(i)}
+              onBlur={() => window.setTimeout(() => setModelMenu((cur) => (cur === i ? null : cur)), 150)}
+              placeholder={t("Model name")}
+              title={t("Type to filter, or click to pick from the pulled list")}
+              className="pr-7"
+            />
+            <button
+              type="button"
+              tabIndex={-1}
+              className="absolute inset-y-0 right-1 flex w-6 items-center justify-center text-ink-400 hover:text-ink-700"
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => setModelMenu((cur) => (cur === i ? null : i))}
+              aria-label={t("Model name")}
+            >
+              <ChevronDown size={14} />
+            </button>
+            {modelMenu === i && modelOptions(row).length > 0 && (() => {
+              const opts = modelOptions(row);
+              const q = row.model.trim().toLowerCase();
+              const shown = q && !opts.some((m) => m.toLowerCase() === q)
+                ? opts.filter((m) => m.toLowerCase().includes(q))
+                : opts;
+              if (!shown.length) return null;
+              return (
+                <div
+                  className="absolute left-0 right-0 top-full z-50 mt-1 max-h-52 overflow-auto rounded-md border border-[var(--line)] bg-[var(--panel)] p-1 shadow-lg"
+                  onMouseDown={(e) => e.preventDefault()}
+                >
+                  {shown.map((m) => (
+                    <button
+                      key={m}
+                      type="button"
+                      className={`block w-full truncate rounded px-2 py-1.5 text-left text-xs hover:bg-[var(--panel2)] ${m === row.model ? "font-medium text-ink-900" : "text-ink-600"}`}
+                      onClick={() => {
+                        setRow(i, { model: m });
+                        setModelMenu(null);
+                      }}
+                    >
+                      {m}
+                    </button>
+                  ))}
+                </div>
+              );
+            })()}
+          </div>
+        </div>
+
+        {/* 第二行：Base URL。 */}
         <Input
-          value={row.model}
-          onChange={(e) =>
-            setPool((pool || []).map((r, j) => (j === i ? { ...r, model: e.target.value } : r)))
-          }
-          placeholder={t("Model")}
+          value={row.base_url}
+          onChange={(e) => setRow(i, { base_url: e.target.value })}
+          placeholder="https://api.deepseek.com"
+          aria-label="Base URL"
         />
-        <Input
-          value={row.agent_model}
-          onChange={(e) =>
-            setPool((pool || []).map((r, j) => (j === i ? { ...r, agent_model: e.target.value } : r)))
-          }
-          placeholder={t("Agent model")}
-        />
+
+        {/* 第三行：API Key。 */}
         <Input
           type="password"
           value={row.api_key}
-          onChange={(e) =>
-            setPool((pool || []).map((r, j) => (j === i ? { ...r, api_key: e.target.value } : r)))
-          }
-          placeholder={row.api_key_set ? t("•••••••• (kept)") : "sk-…"}
+          onChange={(e) => setRow(i, { api_key: e.target.value })}
+          placeholder={row.api_key_set ? t("•••••••• (kept, {{mask}})", { mask: row.api_key_masked || "" }) : "sk-…"}
+          aria-label="API Key"
         />
+
+        {/* 第四行：用这张卡自己的地址/钥匙拉取模型，结果进入上方模型下拉框。 */}
+        <div className="flex flex-wrap items-center gap-2">
+          <Button
+            variant="ghost"
+            className="h-7 text-[11px]"
+            onClick={() => pullRowModels(i, row)}
+            disabled={pullingRow.has(i)}
+            title={t("Pull the model list for this entry's Base URL")}
+          >
+            {pullingRow.has(i) ? t("Pulling…") : t("Pull models")}
+          </Button>
+          <span className="text-[11px] text-ink-500">
+            {t("Pulled models appear in the model list above.")}
+          </span>
+        </div>
+
+        <button
+          type="button"
+          className="flex items-center gap-1 text-[11px] text-ink-500 hover:text-ink-700"
+          onClick={() => toggleAdvanced(i)}
+        >
+          <ChevronRight className={`h-3 w-3 transition-transform ${adv ? "rotate-90" : ""}`} />
+          {t("Advanced settings")}
+        </button>
+
+        {adv && (
+          <div className="space-y-2 rounded-md bg-[var(--panel2)] p-2.5">
+            <div className="grid grid-cols-2 gap-2">
+              <label className="space-y-1 text-[11px] text-ink-500">
+                <span>{t("Network proxy")}</span>
+                <Select
+                  value={row.proxy_mode || "system"}
+                  onChange={(e) => setRow(i, { proxy_mode: e.target.value as PoolRow["proxy_mode"] })}
+                >
+                  <option value="system">{t("Follow system")}</option>
+                  <option value="direct">{t("Force direct")}</option>
+                  <option value="custom">{t("Custom proxy")}</option>
+                </Select>
+              </label>
+              <label className="space-y-1 text-[11px] text-ink-500">
+                <span>{t("Max context Tokens")}</span>
+                <Input
+                  type="number"
+                  min={256}
+                  value={row.context_tokens || 4096}
+                  onChange={(e) => setRow(i, { context_tokens: Number(e.target.value) || 4096 })}
+                />
+              </label>
+            </div>
+            {row.proxy_mode === "custom" && (
+              <Input
+                value={row.proxy_url || ""}
+                onChange={(e) => setRow(i, { proxy_url: e.target.value })}
+                placeholder="http://127.0.0.1:7877"
+              />
+            )}
+            <div className="flex items-center gap-4 text-[11px] text-ink-600">
+              <label className="flex items-center gap-1.5">
+                <Checkbox checked={row.vision !== false} onChange={(e) => setRow(i, { vision: e.target.checked })} />
+                Vision
+              </label>
+              <label className="flex items-center gap-1.5">
+                <Checkbox checked={row.tools !== false} onChange={(e) => setRow(i, { tools: e.target.checked })} />
+                Tools
+              </label>
+            </div>
+          </div>
+        )}
+
+        {rowTests[i]?.result && <RowTestResult result={rowTests[i]!.result!} />}
       </div>
-      {rowTests[i]?.result && <RowTestResult result={rowTests[i]!.result!} />}
-    </div>
-  );
+    );
+  };
 
   return (
     <div className="space-y-6">
@@ -607,7 +785,7 @@ export function AdminSettingsPage() {
       <Card className="max-w-2xl space-y-3 p-4">
         <CardTitle
           title={t("Currently in use (agent)")}
-          hint={t("The gateway the browser agent actually calls. Edit it in the model pool below — there is exactly one place to set it, so what you save is what runs.")}
+          hint={t("The model the browser agent actually calls. Edit it in the model pool below — there is exactly one place to set it, so what you save is what runs.")}
           right={
             /* 来源要按**优先级**说，不能只看池：高端模型或某个用途的覆盖一旦接管 agent，
                实际模型就不是池第 1 套了 —— 那时还说"来自模型池"就成了新的假信息
@@ -701,16 +879,13 @@ export function AdminSettingsPage() {
         )}
       </Card>
 
-      {/* 池：多套网关按顺序兜底。**这里是唯一的网关配置入口** ——
-          2026-10-11 起把原来那张"基层模型"卡的输入框合并到这里了：那张卡的字段在池非空时
-          完全不生效（load_pool 会整体取代它们），留着只会让人改了模型发现没变。
-          顺序即优先级，429（配额耗尽）自动换下一套。
-          2026-10-11 简化：默认只摊开第 1 套（真正在跑的那一套），第 2 套以后收进折叠区 ——
-          只有一套网关时那部分纯属噪音。 */}
+      {/* 模型池 —— 唯一的模型配置入口。
+          每个条目就是一张卡片：配置名称、厂商/模型、Base URL、API Key、拉取模型。
+          没有顶部快捷表单，也没有“网关”这一层；高级字段收在每张卡的「高级设置」里。 */}
       <Card className="max-w-2xl space-y-3 p-4">
         <CardTitle
           title={t("Model pool (fallback order)")}
-          hint={t("Several gateways tried in order: index 1 is preferred and is what the agent uses by default, the next one takes over when a key is rate-limited (429) or misconfigured. Leave an API key blank to keep the stored one.")}
+          hint={t("The first enabled card is preferred. On timeout, 5xx or connection failure the next enabled card takes over automatically. Leave an API key blank to keep the stored one.")}
           right={
             pool && pool.length > 1
               ? t("{{n}} sets configured.", { n: pool.length })
@@ -718,267 +893,221 @@ export function AdminSettingsPage() {
           }
         />
 
-        {poolSeeded && (
+        {poolDirty && (
           <div className="tp-alert tp-alert-warn text-[11px]">
-            {t("No pool saved yet — the row below is only a read-back of .env. Press Save to make it the real configuration; until then .env stays in charge.")}
+            {t("有未保存的改动。点击下方「保存模型池」后生效。")}
           </div>
         )}
 
         {pool === null ? (
           <div className="text-xs text-ink-500">{t("Loading…")}</div>
         ) : (
-          <div className="space-y-2">
-            {pool.length > 0 && poolEntry(pool[0], 0)}
-
-            {pool.length > 1 ? (
-              <Fold
-                open={showExtraGateways}
-                onToggle={() => setShowExtraGateways((v) => !v)}
-                title={t("Fallback gateways")}
-                hint={t("Only set 1 runs by default — the extras are tried in order when set 1 is rate-limited (429) or misconfigured. Keep them folded if you run a single gateway.")}
-                summary={t("{{n}} extra gateway(s) configured for fallback.", { n: pool.length - 1 })}
+          <>
+            {/* 工具栏：批量管理 + 新增模型。 */}
+            <div className="flex flex-wrap items-center gap-2">
+              <Button
+                variant={batchMode ? "primary" : "ghost"}
+                className="h-7 text-[11px]"
+                onClick={() => {
+                  setBatchMode((v) => !v);
+                  setBatchSelected(new Set());
+                }}
               >
-                {pool.map((row, i) => (i > 0 ? poolEntry(row, i) : null))}
-                <Button
-                  variant="ghost"
-                  onClick={() =>
-                    setPool([
-                      ...pool,
-                      {
-                        name: `llm${pool.length + 1}`,
-                        base_url: "",
-                        model: "",
-                        agent_model: "",
-                        provider: "auto",
-                        api_key_set: false,
-                        api_key: "",
-                      },
-                    ])
-                  }
-                >
-                  {t("Add a gateway")}
-                </Button>
-              </Fold>
-            ) : (
-              <div>
-                <Button
-                  variant="ghost"
-                  onClick={() => {
-                    // 点了就直接展开 —— 加完还收着的话，用户会以为没加上。
-                    setPool([
-                      ...pool,
-                      {
-                        name: `llm${pool.length + 1}`,
-                        base_url: "",
-                        model: "",
-                        agent_model: "",
-                        provider: "auto",
-                        api_key_set: false,
-                        api_key: "",
-                      },
-                    ]);
-                    setShowExtraGateways(true);
-                  }}
-                >
-                  {t("Add a gateway")}
-                </Button>
-              </div>
-            )}
+                {batchMode ? t("Exit batch mode") : t("Batch manage")}
+              </Button>
+              {batchMode && (
+                <>
+                  <Button
+                    variant="ghost"
+                    className="h-7 text-[11px]"
+                    onClick={() => setBatchSelected(new Set(pool.map((p) => p.name).filter(Boolean)))}
+                  >
+                    {t("Select all")}
+                  </Button>
+                  <Button variant="ghost" className="h-7 text-[11px]" onClick={() => setBatchSelected(new Set())}>
+                    {t("Clear selection")}
+                  </Button>
+                  <Button className="h-7 text-[11px]" onClick={() => runBatch("enable")} disabled={!batchSelected.size}>
+                    {t("Batch enable")}
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    className="h-7 text-[11px]"
+                    onClick={() => runBatch("disable")}
+                    disabled={!batchSelected.size}
+                  >
+                    {t("Batch disable")}
+                  </Button>
+                  <Button
+                    variant="danger"
+                    className="h-7 text-[11px]"
+                    onClick={() => runBatch("delete")}
+                    disabled={!batchSelected.size}
+                  >
+                    {t("Batch delete")}
+                  </Button>
+                </>
+              )}
+            </div>
 
-            <div className="flex items-center gap-3">
+            {/* 模型卡片列表：点「+ 新增模型」就多一张。 */}
+            <div className="space-y-2">
+              {pool.length === 0 && (
+                <div className="flex flex-col items-center gap-3 rounded-lg border border-dashed border-[var(--line)] bg-[var(--panel2)] px-4 py-8 text-center">
+                  <div className="text-xs text-ink-500">
+                    {t("当前未配置任何模型，系统将使用 .env 默认配置，或请点击下方【新增模型】。")}
+                  </div>
+                  <Button className="h-7 text-[11px]" onClick={addEmptyRow}>
+                    {t("+ Add model")}
+                  </Button>
+                </div>
+              )}
+              {pool.map((row, i) => poolEntry(row, i))}
+            </div>
+
+            <div className="flex flex-wrap items-center gap-3">
+              <Button variant="ghost" onClick={addEmptyRow}>
+                {t("+ Add model")}
+              </Button>
               <Button onClick={savePool} disabled={savingPool}>
                 {savingPool ? t("Saving…") : t("Save pool")}
               </Button>
             </div>
-          </div>
+          </>
         )}
       </Card>
 
-      {/* 「模型分配」一张卡（2026-10-12 三次简化）。
-          2026-10-11 把「高端模型」与「按用途分模型」并成一张卡消掉"二选一"的暗示；
-          2026-10-12 用户要求"只留一个"——删掉「逐环节指定模型」子卡，只保留
-          「高端模型接管」这一支粗粒度机制。每个用途勾选项右侧显示该角色占全部 token
-          的百分比（真实实测优先，无数据回退结构估算并标 ≈），让用户一眼看清"勾哪个最烧钱"。 */}
+      {/* 「模型分配」三层结构（2026-10-21 重构）：
+          ① 基础运行模型：全局对话 / 全局执行。绝大多数任务只用这一层。
+          ② 特定环节模型覆盖：勾选才出现下拉框；未勾选的环节静默跟随第一层。
+          ③ 勾了却没选模型 → 只在该行标红，不再有底部黄框。 */}
       <Card className="max-w-2xl space-y-4 p-4">
         <CardTitle
           title={t("Model assignment")}
-          hint={t("One switch decides quality vs cost: turn it on and the steps you tick use the premium model; leave it off and every step falls back to the pool's set 1 — no extra spend at all.")}
-          right={t("Now: every step uses {{model}}", { model: llm?.agent_model || llm?.model || "—" })}
+          right={t("Current global default: {{model}}", { model: baseAgentModel })}
         />
 
-        {/* 已是「单个机制」，不再需要"不是二选一"的兜底说明。一句话讲清语义即可。 */}
-        <div className="rounded-lg bg-[var(--panel2)] px-3 py-2 text-[11px] text-ink-600">
-          {t("This is the only model-assignment control. Tick a step to give it the premium model; everything you leave unticked keeps using the cheap pool.")}
-        </div>
-
-        <div className="space-y-4">
-          {/* ── 高端模型接管（粗粒度）：一支贵模型接管若干环节 ── */}
-          <div>
-            <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
-              <div className="text-[13px] font-medium text-ink-900">
-                {t("Give some steps a better model")}
-                <Hint text={t("Pick one expensive, smart model from the pool below and tick exactly which steps may use it. Off means every step falls back to the pool's set 1 — no extra spend at all.")} />
-              </div>
-              <div className="text-[11px] text-ink-500">
-                {llm?.premium?.usable
-                  ? t("In effect: {{roles}}", { roles: premiumLiveRoles || "—" })
-                  : t("Off — nothing takes over.")}
-              </div>
-            </div>
-
-        <label className="mt-2 flex cursor-pointer items-center gap-2">
-          <Checkbox
-            checked={premium.enabled}
-            onChange={(e) => {
-              const on = e.target.checked;
-              setPremium({
-                ...premium,
-                enabled: on,
-                // 第一次打开时预勾"量小、质量关键"的那几个 —— 而不是让用户对着六个空勾选框发呆。
-                // 刻意不含 agent 与 judge：前者是省钱主旋钮，后者初判就该留给便宜模型。
-                roles:
-                  on && premium.roles.length === 0 ? [...PREMIUM_DEFAULT_ROLES] : premium.roles,
-              });
-            }}
-          />
-          <span className="text-[13px] font-medium text-ink-900">{t("Use a premium model")}</span>
-        </label>
-
-        {premium.enabled && (
-          <>
-            {/* 高端模型 = 从模型池里选一套（连接信息只在池里填） */}
-            <div className="flex flex-wrap items-center gap-2">
+        {/* ── 第一层：基础运行模型（绝对主力） ── */}
+        <div className="space-y-2 rounded-lg border border-[var(--line)] p-3">
+          <div className="text-[13px] font-medium text-ink-900">
+            {t("Base run model")}
+          </div>
+          <div className="grid gap-2 sm:grid-cols-2">
+            <label className="space-y-1 text-[11px] text-ink-500">
+              <span>{t("Global chat model")}</span>
               <Select
-                value={premium.pool_name}
-                onChange={(e) => setPremium({ ...premium, pool_name: e.target.value })}
-                className="h-9 w-72"
+                value={routing.chat}
+                onChange={(e) => setRouting((r) => ({ ...r, chat: e.target.value }))}
               >
-                <option value="">{t("— pick a model from the pool —")}</option>
-                {(pool || []).map((p) => (
-                  <option key={p.name} value={p.name}>
-                    {p.name} · {p.model}
+                <option value="">{t("Automatic (pool entry 1)")}</option>
+                {poolNames.map((n) => (
+                  <option key={n} value={n}>
+                    {n} · {modelOf(n)}
                   </option>
                 ))}
+                {routing.chat && !poolNames.includes(routing.chat) && (
+                  <option value={routing.chat}>{routing.chat}</option>
+                )}
               </Select>
-              {premium.pool_name && (
-                <span className="text-[11px] text-ink-500">
-                  {premiumResolvedModel
-                    ? `${t("Premium model")}: ${premiumResolvedModel}`
-                    : t("(not found in pool)")}
-                </span>
-              )}
-            </div>
-            <div className="text-[11px] text-ink-400">
-              {t("The premium model is one of the pool entries below — its gateway, key and protocol are configured there, not here.")}
-            </div>
-
-            {!premiumResolved && premium.pool_name && (
-              <div className="tp-alert tp-alert-warn text-[11px]">
-                {t("That pool entry no longer exists — pick another one, or the premium model will not take effect.")}
-              </div>
-            )}
-
-            {/* 建议：哪些环节该上高端模型（质量敏感、量小；agent 量大不推荐） */}
-            <PremiumSuggestion
-              poolEmpty={!pool || pool.length === 0}
-              suggested={PREMIUM_ROLES.filter((r) => r !== "agent")}
-              selected={premium.roles}
-              tokenShare={tokenShare}
-              onApply={() =>
-                setPremium((p) => ({
-                  ...p,
-                  enabled: true,
-                  roles: PREMIUM_ROLES.filter((r) => r !== "agent"),
-                }))
-              }
-            />
-
-            <div className="space-y-1.5 rounded-lg border border-[var(--line)] p-3">
-              <div className="text-[13px] font-medium text-ink-900">
-                {t("Which steps may use it")}
-                <Hint text={t("Judge escalation is only called when the cheap judge says failed or a gate warns — it can be the priciest model, because a routine pass never calls it.")} />
-              </div>
-              {/* 每个用途一行：勾选框 + 名称 + 该角色占全部 token 的百分比。
-                  右侧百分比优先用真实实测（tokenShare.measured），无数据则回退结构估算并标 ≈。 */}
-              <div className="space-y-1">
-                {PREMIUM_ROLES.map((r) => {
-                  const tp =
-                    tokenShare != null
-                      ? tokenShare.has_data && tokenShare.measured[r] != null
-                        ? { pct: tokenShare.measured[r], real: true }
-                        : { pct: tokenShare.estimate[r] ?? 0, real: false }
-                      : null;
-                  return (
-                    <label key={r} className="flex w-full cursor-pointer items-center gap-2">
-                      <Checkbox
-                        checked={premium.roles.includes(r)}
-                        onChange={(e) =>
-                          setPremium({
-                            ...premium,
-                            roles: e.target.checked
-                              ? [...premium.roles, r]
-                              : premium.roles.filter((x) => x !== r),
-                          })
-                        }
-                      />
-                      <span className="text-[12px] text-ink-700">{t(ROLE_LABEL[r])}</span>
-                      {tp && (
-                        <span
-                          className={
-                            tp.real
-                              ? "ml-auto text-[11px] tabular-nums text-ink-500"
-                              : "ml-auto text-[11px] tabular-nums text-ink-400"
-                          }
-                          title={
-                            tp.real
-                              ? t("Based on measured runs")
-                              : t("No measured data for this step yet — structural estimate")
-                          }
-                        >
-                          {tp.real ? `${tp.pct}%` : `≈${tp.pct}%`}
-                        </span>
-                      )}
-                    </label>
-                  );
-                })}
-              </div>
-              {tokenShare && !tokenShare.has_data && (
-                <div className="text-[11px] text-ink-400">
-                  {t("No run data yet — the ratios above are structural estimates (agent dominates). They become measured once you run cases after this update.")}
-                </div>
-              )}
-              {tokenShare && tokenShare.has_data && (
-                <div className="text-[11px] text-ink-400">
-                  {t("Token share from {{n}} measured run(s).", { n: tokenShare.runs })}
-                </div>
-              )}
-            </div>
-
-            {premiumOnAgent && (
-              <div className="tp-alert tp-alert-warn text-[11px]">
-                {t("The execution step is about 95% of all tokens. Sending it to the premium model removes the main cost lever — the other steps are small-volume, so that is where the money actually goes.")}
-              </div>
-            )}
-            {!premiumReady && (
-              <div className="tp-alert tp-alert-warn text-[11px]">
-                {t("Not in effect yet: pick a model from the pool and tick at least one step.")}
-              </div>
-            )}
-          </>
-        )}
+            </label>
+            <label className="space-y-1 text-[11px] text-ink-500">
+              <span>{t("Global execution / Agent model")}</span>
+              <Select
+                value={routing.agent}
+                onChange={(e) => setRouting((r) => ({ ...r, agent: e.target.value }))}
+              >
+                <option value="">{t("Automatic (pool entry 1)")}</option>
+                {poolNames.map((n) => (
+                  <option key={n} value={n}>
+                    {n} · {modelOf(n)}
+                  </option>
+                ))}
+                {routing.agent && !poolNames.includes(routing.agent) && (
+                  <option value={routing.agent}>{routing.agent}</option>
+                )}
+              </Select>
+            </label>
           </div>
-
-          {/* ── 第 2 步（逐环节指定模型）已于 2026-10-12 删除：用户要求"只留一个" ── */}
-
+          <label className="flex items-center gap-2 text-[11px] text-ink-600">
+            <Checkbox
+              checked={routing.failover}
+              onChange={(e) => setRouting((r) => ({ ...r, failover: e.target.checked }))}
+            />
+            {t("Failover on timeout / 5xx / connection failure")}
+          </label>
         </div>
 
-        {/* 整张卡只有一个保存按钮 */}
+        {/* ── 第二层：特定环节模型覆盖 ── */}
+        <div className="space-y-2 rounded-lg border border-[var(--line)] p-3">
+          <div className="text-[13px] font-medium text-ink-900">
+            {t("Specific step model overrides")}
+          </div>
+          <div className="text-[11px] text-ink-500">
+            {t("Unchecked steps follow the base run model.")}
+          </div>
+          <div className="space-y-1.5">
+            {PREMIUM_ROLES.filter(
+              // agent / assistant 不勾选时本来就跟随第一层，默认不重复展示；
+              // 只要 state 里存在这个 key，就说明用户配过（或正在配），保留该行。
+              (r) => !BASE_MIRROR_ROLES.includes(r) || r in roleModels,
+            ).map((r) => {
+              const checked = r in roleModels;
+              const value = roleModels[r] ?? "";
+              const missing = checked && !value.trim();
+              return (
+                <div key={r} className="flex flex-wrap items-center gap-2">
+                  <label className="flex cursor-pointer items-center gap-2">
+                    <Checkbox
+                      checked={checked}
+                      onChange={(e) =>
+                        setRoleModels((prev) => {
+                          const next = { ...prev };
+                          if (e.target.checked) next[r] = "";
+                          else delete next[r];
+                          return next;
+                        })
+                      }
+                    />
+                    <span className="text-[12px] text-ink-700">{t(ROLE_LABEL[r])}</span>
+                  </label>
+                  {checked && (
+                    <>
+                      <Select
+                        value={value}
+                        onChange={(e) =>
+                          setRoleModels((prev) => ({ ...prev, [r]: e.target.value }))
+                        }
+                        className="ml-auto h-8 w-64"
+                      >
+                        <option value="">{t("— select a model —")}</option>
+                        {poolNames.map((n) => (
+                          <option key={n} value={n}>
+                            {n} · {modelOf(n)}
+                          </option>
+                        ))}
+                        {value && !poolNames.includes(value) && (
+                          <option value={value}>{value}</option>
+                        )}
+                      </Select>
+                      {missing && (
+                        <span className="text-[11px] text-[var(--bad-fg)]">
+                          {t("Select a model for this step.")}
+                        </span>
+                      )}
+                    </>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
         <div className="flex flex-wrap items-center gap-3 border-t border-[var(--line)] pt-3">
           <Button onClick={saveModels} disabled={savingModels}>
             {savingModels ? t("Saving…") : t("Save model assignment")}
           </Button>
           <span className="text-[11px] text-ink-500">
-            {t("One save submits the premium-model assignment.")}
+            {t("One save submits the base model and step overrides.")}
           </span>
         </div>
       </Card>

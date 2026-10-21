@@ -99,19 +99,19 @@ harvest 排除：`logs` / `artifacts` / `profiles` / `__pycache__` / `.pytest_ca
 > **1.0.6 → 1.0.7 必须手动装一次**：1.0.6 的更新器只认 `.exe` 资产，看不到
 > `.msi`。从 1.0.7 起应用内更新可以正常下载并静默安装 MSI。
 
-NSIS 脚本 `installer\potato.nsi` 仅作回退保留，正常发布不再编译它。
+旧 NSIS 脚本已删除；安装包只由 WiX 生成。
 
 ## 3. 发布（让"检查更新"有东西可查）
 
 ```bat
-python scripts\release.py --bump 1.0.7       &:: 四处版本号一起改
+python scripts\release.py --bump 1.0.7       &:: 三处版本号一起改
 :: 重新打包 + 编译 MSI（上面 1、2 两步）
 set GITHUB_TOKEN=ghp_xxx                     &:: 需要 repo 权限的 token
 python scripts\release.py --publish          &:: 建 Release + 上传 MSI
 ```
 
-版本号有**四个地方**必须一致（`app/version.py` / `pyproject.toml` /
-`installer/potato.nsi` / `web/package.json`）—— `tests/test_updater.py` 会检查，
+版本号有**三个地方**必须一致（`app/version.py` / `pyproject.toml` /
+`web/package.json`）—— `tests/test_updater.py` 会检查，
 `release.py` 也会在发布前再校验一次。
 
 `release.py` 上传 `PotatoTest-Setup-<版本>.msi` 和同名 `.sha256`，顺序是先校验文件、

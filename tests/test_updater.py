@@ -2,8 +2,8 @@
 
 这组守的是四件事，缺一条这个功能就会变成风险：
 
-1. **版本号只有一个源** —— 四处（`app/version.py` / `pyproject.toml` /
-   `installer/potato.nsi` / `web/package.json`）不一致，"检查更新"就会永远判断错；
+1. **版本号只有一个源** —— 三处（`app/version.py` / `pyproject.toml` /
+   `web/package.json`）不一致，"检查更新"就会永远判断错；
 2. **下载白名单不能漏** —— 这个接口会下载并执行一个安装包，白名单漏了就是远程代码执行；
 3. **查不到更新不能算错误** —— 断网 / 还没发 Release 都是正常状态，不该让应用显得坏了；
 4. **哈希对不上就不执行**（2026-10-20）—— 校验清单缺失、格式不对、哈希不一致，
@@ -42,13 +42,6 @@ def test_version_matches_pyproject():
     m = re.search(r'^version = "([^"]+)"', text, flags=re.M)
     assert m, "pyproject.toml 里没有 version"
     assert m.group(1) == APP_VERSION, "pyproject 与 app/version.py 版本不一致"
-
-
-def test_version_matches_installer():
-    text = (ROOT / "installer" / "potato.nsi").read_text(encoding="utf-8-sig")
-    m = re.search(r'!define\s+AppVer\s+"([^"]+)"', text)
-    assert m, "potato.nsi 里没有 !define AppVer"
-    assert m.group(1) == APP_VERSION, "安装包与 app/version.py 版本不一致"
 
 
 def test_version_matches_web_package():

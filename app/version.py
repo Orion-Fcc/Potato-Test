@@ -7,7 +7,7 @@
 约定：
   * 这里是唯一手写的地方；
   * `pyproject.toml` 的 `version` 必须与之一致（`tests/test_updater.py` 会查）；
-  * `installer/potato.nsi` 的 `!define AppVer` 也必须一致（同上，会查）。
+  * `web/package.json` 的 `version` 也必须一致（同上，会查）。
 
 改版本号的正确姿势：`python scripts/release.py --bump 1.0.1`（会同时改这三处 + 打标签）。
 """

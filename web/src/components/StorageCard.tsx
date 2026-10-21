@@ -12,12 +12,25 @@ import { useErrorToast, useToast } from "../components/toast";
  * 运行中改它只会让新旧文件散在两个地方）。
  *
  * 几个刻意的选择：
- *  * **不提供文件夹选择对话框**：桌面窗口是 WebView2，原生选目录要走 pywebview 暴露的 API，
- *    那条链路一断就是"点按钮没反应"。一个可粘贴的路径输入框反而更可靠（也能填 UNC 路径）。
+ *  * **原生文件夹选择 + 可编辑文本框**：窗口由 pywebview 创建，`desktop.py` 通过 js_api
+ *    暴露 `pick_folder`，点「浏览…」走系统原生选择框，初始目录就是当前路径。
+ *    文本框仍然保留：兜底窗口（Edge --app / 浏览器）没有 pywebview API，而且用户可能
+ *    要粘贴 UNC 路径（\\server\share\...）或手输网络位置，这些原生对话框不一定方便选。
+ *  * **选完只回填、不自动保存**：保存仍由用户点「保存」，避免误改路径。
  *  * **留空 = 恢复默认**：不需要额外的"重置"按钮，语义也直白。
  *  * **「把现有文件也搬过去」默认不勾**：搬可能要很久（跨盘 = 复制），
  *    不该在用户只想想改个路径时顺手干这么重的事。
  */
+declare global {
+  interface Window {
+    pywebview?: {
+      api?: {
+        pick_folder?: (start?: string) => Promise<string>;
+      };
+    };
+  }
+}
+
 type StorageInfo = {
   storage_dir: string;
   artifact_dir: string;
@@ -34,6 +47,7 @@ export function StorageCard() {
   const [dir, setDir] = useState("");
   const [move, setMove] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [picking, setPicking] = useState(false);
 
   const load = async () => {
     try {
@@ -48,6 +62,29 @@ export function StorageCard() {
   useEffect(() => {
     void load();
   }, []);
+
+  const pickFolder = async () => {
+    const picker = window.pywebview?.api?.pick_folder;
+    if (!picker) {
+      toast(
+        "error",
+        t("Folder picker is only available in the desktop app window. Type or paste the path instead."),
+      );
+      return;
+    }
+    setPicking(true);
+    try {
+      // 输入框空着表示「用默认位置」，此时仍要以当前实际存放目录作为对话框起点。
+      const picked = await picker(dir.trim() || info?.artifact_dir || "");
+      // 取消时 pywebview 返回空串：保持输入框原值，不报错。
+      if (typeof picked === "string" && picked.trim()) setDir(picked);
+    } catch (e) {
+      // 弹窗失败也必须让用户知道，并且输入框继续可用（可手输/粘贴 UNC 路径）。
+      fail(e, t("Could not open the folder picker"));
+    } finally {
+      setPicking(false);
+    }
+  };
 
   const save = async () => {
     setSaving(true);
@@ -84,11 +121,17 @@ export function StorageCard() {
       </div>
 
       <Field label={t("New location (blank = back to default)")}>
-        <Input
-          value={dir}
-          onChange={(e) => setDir(e.target.value)}
-          placeholder={info?.default_dir || "D:\\PotatoTestData"}
-        />
+        <div className="flex items-center gap-2">
+          <Input
+            className="min-w-0 flex-1"
+            value={dir}
+            onChange={(e) => setDir(e.target.value)}
+            placeholder={info?.default_dir || "D:\\PotatoTestData"}
+          />
+          <Button type="button" variant="outline" onClick={pickFolder} disabled={picking}>
+            {picking ? t("Opening…") : t("Browse…")}
+          </Button>
+        </div>
       </Field>
 
       <label className="flex items-center gap-2 text-sm text-ink-700">

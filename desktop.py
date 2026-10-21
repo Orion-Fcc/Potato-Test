@@ -133,6 +133,65 @@ def _edge_exe() -> str | None:
     return None
 
 
+class _DesktopApi:
+    """暴露给前端的 js_api（挂在 `window.pywebview.api` 上）。
+
+    只做原生弹窗这一件事：前端拿到路径后仍走原来的 HTTP 保存接口，
+    配置写盘、搬文件等重活都不在这里做。
+    """
+
+    def pick_folder(self, start: str = "") -> str:
+        """打开原生文件夹选择框，返回所选路径；取消返回空串。"""
+        import webview
+
+        win = webview.windows[0]
+        # ★ 前端拿到的是后端返回的 POSIX 风格路径（C:/...）。Windows 的文件对话框
+        #   解析 InitialDirectory 时对正斜杠不可靠，会悄悄退回到「文档」。这里统一转成反斜杠。
+        start = (start or "").strip()
+        if sys.platform == "win32" and start:
+            start = os.path.normpath(start)
+
+        def show():
+            return win.create_file_dialog(
+                webview.FileDialog.FOLDER,
+                directory=start,
+                allow_multiple=False,
+            )
+
+        # ★ pywebview 的 js_api 调用跑在子线程里，而 Windows 的文件夹对话框必须在
+        #   UI 线程上创建。直接调用会卡在 COM 弹窗前：按钮一直「正在打开…」，窗口也不响应。
+        #   这里把弹窗调度回 WinForms 的 UI 线程，等它返回。
+        if sys.platform == "win32" and threading.current_thread() is not threading.main_thread():
+            from System.Windows.Forms import MethodInvoker
+            from webview.platforms import winforms
+
+            view = winforms.BrowserView.instances.get(win.uid)
+            if view is not None:
+                box: dict[str, object] = {}
+
+                def call() -> None:
+                    try:
+                        box["value"] = show()
+                    except BaseException as exc:  # noqa: BLE001 — 传回调用线程再抛
+                        box["error"] = exc
+
+                view.Invoke(MethodInvoker(call))
+                if "error" in box:
+                    raise box["error"]  # type: ignore[misc]
+                res = box.get("value")
+            else:  # 非 WinForms 后端（理论上到不了这里）
+                res = show()
+        else:
+            res = show()
+
+        # pywebview 6.2.1 的签名是 Sequence[str] | None，但个别后端会直接返回 str。
+        if isinstance(res, str):
+            return res
+        if res:
+            return str(res[0])
+        return ""
+
+
 def _run_window(url: str, log: logging.Logger) -> None:
     """开窗口，并**阻塞到用户把它关掉**。"""
     try:
@@ -143,7 +202,14 @@ def _run_window(url: str, log: logging.Logger) -> None:
     if webview is not None:
         log.info("窗口后端：pywebview（WebView2）")
         try:
-            webview.create_window(APP_NAME, url, width=1440, height=900, min_size=(1100, 700))
+            webview.create_window(
+                APP_NAME,
+                url,
+                js_api=_DesktopApi(),
+                width=1440,
+                height=900,
+                min_size=(1100, 700),
+            )
             webview.start()  # 阻塞到最后一个窗口关闭
             return
         except Exception as exc:  # noqa: BLE001

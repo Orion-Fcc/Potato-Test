@@ -1512,6 +1512,11 @@ const zh: Record<string, string> = {
   "Also move the existing files (fast on the same drive, slow across drives)":
     "把现有文件也搬过去（同盘很快，跨盘要等）",
   "Takes effect after restarting the app.": "重启应用后生效。",
+  "Browse…": "浏览…",
+  "Opening…": "正在打开…",
+  "Could not open the folder picker": "无法打开文件夹选择框",
+  "Folder picker is only available in the desktop app window. Type or paste the path instead.":
+    "文件夹选择框只在桌面应用窗口中可用，请直接输入或粘贴路径。",
 
   // ---- 密钥恢复页（2026-10-20）----------------------------------------------
   "Credential encryption key": "凭据加密密钥",

@@ -542,7 +542,7 @@ export function Projects() {
                 <Input
                   value={draft.name}
                   onChange={(e) => setDraft({ ...draft, name: e.target.value })}
-                  placeholder="e.g. Web regression"
+                  placeholder={t("e.g. Web regression")}
                   autoFocus
                 />
               </Field>

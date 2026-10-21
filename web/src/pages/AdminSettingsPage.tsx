@@ -720,11 +720,11 @@ export function AdminSettingsPage() {
             <div className="flex items-center gap-4 text-[11px] text-ink-600">
               <label className="flex items-center gap-1.5">
                 <Checkbox checked={row.vision !== false} onChange={(e) => setRow(i, { vision: e.target.checked })} />
-                Vision
+                {t("Vision")}
               </label>
               <label className="flex items-center gap-1.5">
                 <Checkbox checked={row.tools !== false} onChange={(e) => setRow(i, { tools: e.target.checked })} />
-                Tools
+                {t("Tools")}
               </label>
             </div>
           </div>
@@ -768,7 +768,7 @@ export function AdminSettingsPage() {
               : llm?.roles?.agent?.source === "override"
                 ? t("from the execution row in “Model per purpose”")
                 : llm?.pool_source === "env"
-                  ? t("from .env — no pool saved yet")
+                  ? t("from environment defaults — no pool saved yet")
                   : t("from the pool ({{n}} set(s))", { n: llm?.pool_count ?? 1 })
           }
         />
@@ -928,11 +928,8 @@ export function AdminSettingsPage() {
               {pool.length === 0 && (
                 <div className="flex flex-col items-center gap-3 rounded-lg border border-dashed border-[var(--line)] bg-[var(--panel2)] px-4 py-8 text-center">
                   <div className="text-xs text-ink-500">
-                    {t("当前未配置任何模型，系统将使用 .env 默认配置，或请点击下方【新增模型】。")}
+                    {t("当前未配置任何模型，所有 AI 功能都不可用。点击下方【新增模型】添加第一套。")}
                   </div>
-                  <Button className="h-7 text-[11px]" onClick={addEmptyRow}>
-                    {t("+ Add model")}
-                  </Button>
                 </div>
               )}
               {pool.map((row, i) => poolEntry(row, i))}

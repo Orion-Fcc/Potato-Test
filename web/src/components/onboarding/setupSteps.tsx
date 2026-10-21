@@ -138,7 +138,7 @@ export function ProjectStep({ s, onSubmit }: { s: Setup; onSubmit: () => void })
         <Input
           value={s.name}
           onChange={(e) => s.setName(e.target.value)}
-          placeholder="e.g. Web regression"
+          placeholder={t("e.g. Web regression")}
           autoFocus
           disabled={!!s.project}
           onKeyDown={(e) => e.key === "Enter" && onSubmit()}

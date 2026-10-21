@@ -368,7 +368,7 @@ export function SettingsPage() {
           )}
           <div className="flex items-end gap-2">
             <Field label={lang === "zh" ? "名称" : "Name"}>
-              <Input value={newEnvName} onChange={(e) => setNewEnvName(e.target.value)} placeholder="test / prod" className="w-32" />
+              <Input value={newEnvName} onChange={(e) => setNewEnvName(e.target.value)} placeholder={t("test / prod")} className="w-32" />
             </Field>
             <div className="flex-1">
               <Field label={t("Base URL")}>
@@ -431,7 +431,7 @@ export function SettingsPage() {
               value={newRole}
               onChange={(e) => setNewRole(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && addRole()}
-              placeholder="requester / approver / admin"
+              placeholder={t("requester / approver / admin")}
               className="w-64"
             />
             <Button variant="outline" onClick={addRole}>{t("Add role")}</Button>

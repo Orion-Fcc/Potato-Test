@@ -287,7 +287,7 @@ export function CredentialsSection({
           )}
           <div className="flex-1">
             <Field label={t("Label (optional)")}>
-              <Input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="e.g. staging session" />
+              <Input value={label} onChange={(e) => setLabel(e.target.value)} placeholder={t("e.g. staging session")} />
             </Field>
           </div>
         </div>
@@ -295,7 +295,7 @@ export function CredentialsSection({
         {type === "password" ? (
           <div className="grid gap-3 sm:grid-cols-2">
             <Field label={t("Username")}>
-              <Input value={username} onChange={(e) => setUsername(e.target.value)} placeholder="robot test account" />
+              <Input value={username} onChange={(e) => setUsername(e.target.value)} placeholder={t("robot test account")} />
             </Field>
             <Field label={t("Password")}>
               <Input type="password" value={secret} onChange={(e) => setSecret(e.target.value)} placeholder="••••••••" />

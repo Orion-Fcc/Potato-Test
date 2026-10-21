@@ -55,10 +55,10 @@ export function FeedbackTab({ pid }: { pid: number }) {
         <span className="text-xs text-ink-500">{t("Category")}</span>
         <Select value={category} onChange={(e) => setCategory(e.target.value)} className="w-40">
           <option value="">{t("All")}</option>
-          <option value="bug">bug</option>
-          <option value="feature">feature</option>
-          <option value="question">question</option>
-          <option value="other">other</option>
+          <option value="bug">{t("bug")}</option>
+          <option value="feature">{t("feature")}</option>
+          <option value="question">{t("question")}</option>
+          <option value="other">{t("other")}</option>
         </Select>
       </div>
 

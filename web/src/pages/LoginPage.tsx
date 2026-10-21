@@ -104,10 +104,10 @@ export function LoginPage() {
           <div className="tp-left">
             <div className="tp-eyebrow">
               <span className="tp-dot" />
-              01 — Secure Access
+              {t("01 — Secure Access")}
             </div>
             <h1 className="tp-h1">
-              Testing that<span className="tp-em">runs itself.</span>
+              {t("Testing that")}<span className="tp-em">{t("runs itself.")}</span>
             </h1>
             <p className="tp-sub">
               <b>{t("Write test cases in plain language; they run in a real browser and are judged automatically.")}</b>{" "}

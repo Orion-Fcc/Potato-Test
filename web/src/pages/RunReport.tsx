@@ -620,7 +620,7 @@ export function RunReport() {
                           {t("manual")}
                         </span>
                       )}
-                      {r?.flaky && <Badge status="flaky">flaky</Badge>}
+                      {r?.flaky && <Badge status="flaky">{t("flaky")}</Badge>}
                       {/* 两级判定（2026-10-11）：这条结论是复核层（更贵的模型）给出的。
                           必须标出来 —— 否则复盘时没人知道"哪些结论真动用了复核"，
                           既判断不了这套机制到底省钱还是烧钱，也调不了触发阈值。 */}

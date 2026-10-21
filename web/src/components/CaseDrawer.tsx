@@ -688,7 +688,7 @@ export function CaseDrawer({
                       </span>
                       <span className="flex shrink-0 items-center gap-2">
                         <span className="text-xs text-ink-500">{(h.latency_ms / 1000).toFixed(0)}s</span>
-                        {h.flaky && <Badge status="flaky">flaky</Badge>}
+                        {h.flaky && <Badge status="flaky">{t("flaky")}</Badge>}
                         <Badge status={h.status} />
                       </span>
                     </div>

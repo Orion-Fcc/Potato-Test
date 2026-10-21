@@ -62,6 +62,8 @@ ROLES: tuple[str, ...] = (
     # 完全没法单独指定；补一个用途让它也能被分配。
     "failattr",
     "assistant",
+    # 技术检索问答（助手里的「联网搜索」）—— 原来直接拿 pool[0]，无法单独指定模型。
+    "research",
 )
 
 # 高端模型可以挂到哪些用途上。
@@ -97,6 +99,7 @@ SUGGESTED_PREMIUM_ROLES: tuple[str, ...] = (
     "failattr",
     "narrative",
     "assistant",
+    "research",
 )
 
 # 各角色 token 占比的**结构估算**（2026-10-12）。
@@ -111,8 +114,23 @@ SUGGESTED_PREMIUM_ROLES: tuple[str, ...] = (
 # judge_escalate 仅在失败/闸门报警时才调用、narrative 仅在失败时、specgen 各一次、
 # assistant 偶发。所以 agent 占绝对多数 —— 这正是"省钱主旋钮在 agent"的量化依据。
 # 这些值之和必须为 100（前端按它做兜底占比）。
+# 用途的中文名（设置页直接显示）。新增用途时只改这里和 ROLES，前端自动多一行。
+ROLE_LABELS_ZH: dict[str, str] = {
+    "agent": "执行（每一步）",
+    "judge": "判定（每条用例一次）",
+    "judge_escalate": "判定复核",
+    "narrative": "失败叙述",
+    "specgen": "从需规生成用例",
+    "docgen": "项目文档生成",
+    "caseopt": "AI 用例优化",
+    "failattr": "失败根因分类",
+    "assistant": "助手对话与飞书",
+    "research": "技术检索问答",
+}
+
 ROLE_TOKEN_SHARE_ESTIMATE: dict[str, float] = {
-    "agent": 91.5,
+    # 新增 research 的 0.5 从 agent 里让出，保持总和 100。
+    "agent": 91.0,
     "judge": 2.5,
     "judge_escalate": 1.5,
     "specgen": 1.0,
@@ -121,6 +139,7 @@ ROLE_TOKEN_SHARE_ESTIMATE: dict[str, float] = {
     "failattr": 0.5,
     "narrative": 0.5,
     "assistant": 0.5,
+    "research": 0.5,
 }
 
 
@@ -137,10 +156,13 @@ class RoleOverride:
     base_url: str = ""
     api_key: str = ""
     provider: str = ""
+    # 指向模型池里某个条目的 name（1.0.8）。非空时 role_profile 以池条目为准，
+    # 这样池里换了地址/钥匙，用途覆盖也跟着走，而不是留下一套过期凭据。
+    pool_name: str = ""
 
     @property
     def empty(self) -> bool:
-        return not (self.model or self.base_url or self.api_key or self.provider)
+        return not (self.model or self.base_url or self.api_key or self.provider or self.pool_name)
 
 
 @dataclass(frozen=True)
@@ -211,10 +233,32 @@ class LLMProfile:
     model: str
     agent_model: str = ""  # "" => use model
     provider: str = "auto"
+    # 2026-10-21：卡片式模型池。以下字段只影响"怎么连"和界面展示，不改变协议语义。
+    vendor: str = ""  # deepseek / openai / zhipu / kimi / qwen / ollama / custom
+    # system = 跟随系统代理；direct = 强制直连；custom = 使用 proxy_url
+    proxy_mode: str = "system"
+    proxy_url: str = ""
+    context_tokens: int = 4096
+    vision: bool = True
+    tools: bool = True
+    enabled: bool = True
 
     @property
     def effective_model(self) -> str:
         return self.agent_model or self.model
+
+
+@dataclass(frozen=True)
+class LLMRouting:
+    """全局路由：默认对话模型 / 默认 Agent 模型 / 自动降级。
+
+    保存的是模型池条目的 `name`。解析不到（条目被删/改名）时静默回落到池第 1 条 ——
+    配置页显示的和实际跑的不一致，比"用回默认"更糟。
+    """
+
+    chat: str = ""   # 非 agent 用途的默认模型（判定/生成/助手…）
+    agent: str = ""  # 执行步专用模型
+    failover: bool = True
 
 
 # AppSetting key holding the pool. A single encrypted blob: a JSON array where each
@@ -222,6 +266,9 @@ class LLMProfile:
 # blob is stored secret=True so every api_key inside it is encrypted at rest.
 LLM_POOL_KEY = "llm_pool"
 LLM_PROVIDER_KEY = "llm_provider"  # legacy single-profile protocol (admin-overridable)
+# 全局路由（2026-10-21）：默认对话模型 / 默认 Agent 模型 / 自动降级开关。
+# 存的是池条目的 name（不是 index）—— 列表顺序会变，名字不会跟着漂。
+LLM_ROUTING_KEY = "llm_routing"
 
 
 _cached: LLMConfig | None = None
@@ -232,6 +279,8 @@ _two_tier_cached: bool | None = None
 _two_tier_cached_at: float = 0.0
 _premium_cached: "PremiumModel | None" = None
 _premium_cached_at: float = 0.0
+_routing_cached = None
+_routing_cached_at: float = 0.0
 _TTL_S = 30.0  # ponytail: pull-based refresh; push invalidation across processes if 30s lag hurts
 
 
@@ -242,10 +291,13 @@ def invalidate_llm_cache() -> None:
     对新端点毫无参考价值，留着只会让新配置静默继承旧结论。
     """
     global _cached, _roles_cached, _two_tier_cached, _premium_cached
+    global _routing_cached, _routing_cached_at
     _cached = None
     _roles_cached = None
     _two_tier_cached = None
     _premium_cached = None
+    _routing_cached = None
+    _routing_cached_at = 0.0
     from app.llm_protocol import invalidate_capabilities
 
     invalidate_capabilities()
@@ -292,18 +344,75 @@ async def active_profile() -> LLMProfile:
     return (await pool_for_role("agent"))[0]
 
 
+async def _load_saved_pool() -> list[LLMProfile]:
+    """只读用户**手动保存**的模型池；没有保存过就返回空列表。
+
+    绝不合成 env 条目：设置页的池列表只能用这个返回值，否则用户会看到一张
+    自己从没保存过的 "env" 卡片，并误以为它和当前选择的模型一样会被提交。
+    """
+    import json
+
+    try:
+        from app.db import db_session
+        from app.settings_store import get_setting
+
+        async with db_session() as sess:
+            raw = await get_setting(sess, LLM_POOL_KEY)
+    except Exception:  # DB unavailable (early boot / bare test) -> nothing saved
+        return []
+    if not raw:
+        return []
+    try:
+        items = json.loads(raw)
+    except Exception:  # malformed JSON -> don't take the whole platform down
+        return []
+
+    profiles: list[LLMProfile] = []
+    for i, it in enumerate(items or []):
+        if not isinstance(it, dict):
+            continue
+        bu = (it.get("base_url") or "").strip()
+        key = (it.get("api_key") or "").strip()
+        model = (it.get("model") or "").strip()
+        if not bu or not model or not key:
+            continue  # an incomplete entry is useless, skip it
+        try:
+            ctx = int(it.get("context_tokens") or 4096)
+        except (TypeError, ValueError):
+            ctx = 4096
+        profiles.append(
+            LLMProfile(
+                name=(it.get("name") or f"llm{i + 1}").strip(),
+                base_url=bu,
+                api_key=key,
+                model=model,
+                agent_model=(it.get("agent_model") or "").strip(),
+                provider=(it.get("provider") or "auto").strip() or "auto",
+                vendor=(it.get("vendor") or "").strip(),
+                proxy_mode=(it.get("proxy_mode") or "system").strip() or "system",
+                proxy_url=(it.get("proxy_url") or "").strip(),
+                context_tokens=max(256, ctx),
+                vision=bool(it.get("vision", True)),
+                tools=bool(it.get("tools", True)),
+                enabled=bool(it.get("enabled", True)),
+            )
+        )
+    return profiles
+
+
 async def _load_pool_raw() -> tuple[list[LLMProfile], str]:
     """(候选序列, 来源)。来源取值：
 
       "pool" —— 池里有完整条目，这是真正在用的配置；
-      "env"  —— 池为空或条目都不完整，回落到 env / 旧单套字段（首次启动、DB 不可用）。
+      "env"  —— 池为空，回落到 env / 旧单套字段（首次启动、DB 不可用）。
 
-    把来源单独回出来，是为了让界面能如实说明"现在生效的是哪一层"。
-    没有这个字段，设置页就只能猜，而猜错的表现正是显示一个没在跑的模型名。
+    只有运行时会走 env 回落；设置页的列表必须用 _load_saved_pool()，不能把
+    这套回落配置当成用户已保存的模型回显出去。
     """
-    import json
+    profiles = await _load_saved_pool()
+    if profiles:
+        return profiles, "pool"
 
-    # Legacy single profile (also the fallback shape).
     cfg = await llm_config()
     legacy = LLMProfile(
         name="env",
@@ -313,41 +422,6 @@ async def _load_pool_raw() -> tuple[list[LLMProfile], str]:
         agent_model=cfg.agent_model,
         provider=cfg.provider,
     )
-    try:
-        from app.db import db_session
-        from app.settings_store import get_setting
-
-        async with db_session() as sess:
-            raw = await get_setting(sess, LLM_POOL_KEY)
-    except Exception:  # DB unavailable (early boot / bare test) -> legacy only
-        raw = None
-    if not raw:
-        return [legacy], "env"
-    try:
-        items = json.loads(raw)
-        profiles: list[LLMProfile] = []
-        for i, it in enumerate(items or []):
-            if not isinstance(it, dict):
-                continue
-            bu = (it.get("base_url") or "").strip()
-            key = (it.get("api_key") or "").strip()
-            model = (it.get("model") or "").strip()
-            if not bu or not model or not key:
-                continue  # an incomplete entry is useless, skip it
-            profiles.append(
-                LLMProfile(
-                    name=(it.get("name") or f"llm{i + 1}").strip(),
-                    base_url=bu,
-                    api_key=key,
-                    model=model,
-                    agent_model=(it.get("agent_model") or "").strip(),
-                    provider=(it.get("provider") or "auto").strip() or "auto",
-                )
-            )
-        if profiles:
-            return profiles, "pool"
-    except Exception:  # malformed JSON -> don't take the whole platform down
-        pass
     return [legacy], "env"
 
 
@@ -361,7 +435,10 @@ async def load_pool() -> list[LLMProfile]:
     alternative (a process-wide cache) would make "saved but not applied" possible,
     which is exactly the class of bug this platform has been fighting.
     """
-    return (await _load_pool_raw())[0]
+    profiles = (await _load_pool_raw())[0]
+    enabled = [p for p in profiles if p.enabled]
+    # 全被禁用时不停机：回落到全部条目（界面会提示），避免 active_profile()[0] 直接崩。
+    return enabled or profiles
 
 
 async def pool_origin() -> str:
@@ -403,6 +480,7 @@ async def load_roles() -> dict[str, RoleOverride]:
                     base_url=(it.get("base_url") or "").strip(),
                     api_key=(it.get("api_key") or "").strip(),
                     provider=(it.get("provider") or "").strip(),
+                    pool_name=(it.get("pool_name") or "").strip(),
                 )
         except Exception:
             out = {}
@@ -455,6 +533,39 @@ async def load_premium() -> PremiumModel:
             out = PremiumModel()
     _premium_cached = out
     _premium_cached_at = time.monotonic()
+    return out
+
+
+async def load_routing() -> LLMRouting:
+    """全局路由配置。永不抛异常：坏了就回落到池第 1 条 + 自动降级开。"""
+    global _routing_cached, _routing_cached_at
+    if _routing_cached is not None and time.monotonic() - _routing_cached_at < _TTL_S:
+        return _routing_cached
+
+    import json
+
+    try:
+        from app.db import db_session
+        from app.settings_store import get_setting
+
+        async with db_session() as sess:
+            raw = await get_setting(sess, LLM_ROUTING_KEY)
+    except Exception:  # DB unavailable (early boot / bare test)
+        raw = None
+
+    out = LLMRouting()
+    if raw:
+        try:
+            it = json.loads(raw) or {}
+            out = LLMRouting(
+                chat=(it.get("chat") or "").strip(),
+                agent=(it.get("agent") or "").strip(),
+                failover=bool(it.get("failover", True)),
+            )
+        except Exception:
+            out = LLMRouting()
+    _routing_cached = out
+    _routing_cached_at = time.monotonic()
     return out
 
 
@@ -548,6 +659,13 @@ async def role_profile(role: str) -> LLMProfile:
     pool = await load_pool()
     base = pool[0]
 
+    # 全局路由：agent 用「默认 Agent 模型」，其余用途用「默认对话模型」。
+    # 指向不存在的名字时静默回落 base —— 删掉条目后不该让整页配置失效。
+    routing = await load_routing()
+    wanted = routing.agent if role == "agent" else routing.chat
+    if wanted:
+        base = next((p for p in pool if p.name == wanted), base)
+
     prem = await load_premium()
     pp = await _premium_target(prem)
     if pp is not None and role in prem.roles:
@@ -558,6 +676,19 @@ async def role_profile(role: str) -> LLMProfile:
     ov = (await load_roles()).get(role)
     if ov is None or ov.empty:
         return base
+    # 1.0.8：用途覆盖可以直接指向池里的某一条。此时**整条凭据**都以池条目为准，
+    # 绝不用"新模型名 + 默认网关钥匙"的拼接方式（那正是跨厂商报错的来源）。
+    if ov.pool_name:
+        target = next((p for p in pool if p.name == ov.pool_name), None)
+        if target is not None:
+            return LLMProfile(
+                name=f"{role}:{target.name}",
+                base_url=target.base_url,
+                api_key=target.api_key,
+                model=target.model,
+                agent_model="",
+                provider=target.provider,
+            )
     return LLMProfile(
         name=f"{role}:{ov.model or base.model}",
         base_url=ov.base_url or base.base_url,
@@ -620,11 +751,15 @@ async def roles_for_ui() -> dict[str, dict]:
             "base_url": (ov.base_url if ov else "") or "",
             "provider": (ov.provider if ov else "") or "",
             "api_key_set": bool(ov and ov.api_key),
+            # 用途覆盖直接指向池条目时，界面用它回显下拉框（legacy 的行是空串）。
+            "pool_name": (ov.pool_name if ov else "") or "",
             # 生效值：界面直接显示"这个用途现在实际用哪个模型"，而不是让人自己推算继承。
             "effective_model": eff.model,
             "effective_base_url": eff.base_url,
             # 生效值来自哪一层（pool / premium / override）。
             "source": await role_source(role),
+            # 用途中文名：界面不再硬编码用途清单/标签，后端加用途即自动出现。
+            "label": ROLE_LABELS_ZH.get(role, role),
         }
     return out
 
@@ -643,6 +778,77 @@ def _is_rate_limited(exc: BaseException) -> bool:
         return True
     name = type(exc).__name__
     return name in ("RateLimitError", "RateLimit")
+
+
+def _http_status(exc: BaseException) -> int | None:
+    code = getattr(exc, "status_code", None)
+    if not isinstance(code, int):
+        resp = getattr(exc, "response", None)
+        code = getattr(resp, "status_code", None)
+    return code if isinstance(code, int) else None
+
+
+def _is_switchable_error(exc: BaseException) -> bool:
+    """是否可以换下一套模型重试。
+
+    2026-10-21 扩展：原来只认 429。用户要的兜底是"主模型超时 / 5xx / 连不上"也立刻切。
+    401/403/404/400 仍然不切 —— 那是配置错误，换一套只会把报错搞模糊。
+    """
+    if _is_rate_limited(exc):
+        return True
+    if isinstance(
+        exc,
+        (httpx.TimeoutException, httpx.ConnectError, httpx.NetworkError, ConnectionError, TimeoutError),
+    ):
+        return True
+    code = _http_status(exc)
+    if code is not None and code >= 500:
+        return True
+    name = type(exc).__name__.lower()
+    if "timeout" in name or "connection" in name or "network" in name:
+        return True
+    text = str(exc).lower()
+    return any(
+        k in text
+        for k in (
+            "timed out",
+            "timeout",
+            "connection refused",
+            "connection error",
+            "connect error",
+            "network is unreachable",
+            "network error",
+        )
+    )
+
+
+def proxy_client_kwargs(profile) -> dict:
+    """按 profile 的网络策略构造 httpx 参数。
+
+    A 跟随系统：trust_env=True（吃 HTTP(S)_PROXY）
+    B 强制直连：trust_env=False，且不设 proxy
+    C 自定义：trust_env=False + 显式 proxy
+    TLS 校验始终跟随全局 gateway_verify_ssl（企业自签网关的既有行为不变）。
+    """
+    s = get_settings()
+    mode = (getattr(profile, "proxy_mode", "") or "system").strip().lower()
+    kw: dict[str, Any] = {"verify": s.gateway_verify_ssl}
+    if mode == "direct":
+        kw["trust_env"] = False
+    elif mode == "custom":
+        kw["trust_env"] = False
+        url = (getattr(profile, "proxy_url", "") or "").strip()
+        if url:
+            kw["proxy"] = url
+    else:
+        kw["trust_env"] = True
+    return kw
+
+
+def http_client_for(profile, *, timeout: float | httpx.Timeout = 60.0) -> httpx.AsyncClient:
+    kw = proxy_client_kwargs(profile)
+    kw["timeout"] = timeout if isinstance(timeout, httpx.Timeout) else httpx.Timeout(timeout)
+    return httpx.AsyncClient(**kw)
 
 
 async def probe_profile(profile: LLMProfile) -> bool:
@@ -664,11 +870,7 @@ async def probe_profile(profile: LLMProfile) -> bool:
     if not profile.base_url or not profile.model:
         return False
     caps = await capabilities_for(profile)
-    http = httpx.AsyncClient(
-        verify=s.gateway_verify_ssl,
-        timeout=httpx.Timeout(30.0),
-        trust_env=not s.gateway_ignore_proxy,
-    )
+    http = http_client_for(profile, timeout=30.0)
     client: Any = None
     try:
         if caps.protocol == "anthropic":
@@ -756,10 +958,7 @@ async def pick_active_profile() -> tuple[LLMProfile, list[LLMProfile]]:
 
 async def client_for(profile: LLMProfile, *, timeout: float = 60.0) -> AsyncOpenAI:
     """An AsyncOpenAI client bound to one specific pool profile (proxy/TLS mirrored)."""
-    s = get_settings()
-    http = httpx.AsyncClient(
-        verify=s.gateway_verify_ssl, timeout=timeout, trust_env=not s.gateway_ignore_proxy
-    )
+    http = http_client_for(profile, timeout=timeout)
     return AsyncOpenAI(
         base_url=profile.base_url,
         api_key=profile.api_key,
@@ -793,9 +992,7 @@ async def _build_agent_llm(profile: LLMProfile):
 
     s = get_settings()
     caps = await capabilities_for(profile)
-    http = httpx.AsyncClient(
-        verify=s.gateway_verify_ssl, timeout=120, trust_env=not s.gateway_ignore_proxy
-    )
+    http = http_client_for(profile, timeout=120)
     max_tokens = s.agent_max_tokens or s.gateway_max_tokens
 
     if caps.protocol == "anthropic":

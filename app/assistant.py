@@ -1868,11 +1868,8 @@ async def _web_search(query: str) -> dict:
     try:
         from app import llm
 
-        pool = await llm.pool_for_role("assistant")
-        if not pool:
-            return {"error": "没有可用的模型配置，无法联网搜索"}
         res = await llm.chat(
-            pool[0],
+            role="research",
             system=(
                 "你是测试领域的技术检索助手。只回答**通用标准与常识**类问题，"
                 "用简洁要点作答；不确定就说不确定，不要编造具体规范编号或版本号。"

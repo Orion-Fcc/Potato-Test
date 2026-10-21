@@ -297,8 +297,16 @@ export interface LlmStatus {
   // pool_source 说明这套配置来自哪里：pool = 已保存的池；env = 池为空、回落 .env。
   pool_source?: "pool" | "env";
   pool_count?: number;
+  // 全局路由：默认对话模型 / 默认 Agent 模型（池条目 name）/ 自动降级开关。
+  routing?: LlmRouting;
   // 平台级「高端模型」（贵、聪明，可选）。默认关。
   premium?: LlmPremiumStatus;
+}
+
+export interface LlmRouting {
+  chat: string;
+  agent: string;
+  failover: boolean;
 }
 
 // 平台级「高端模型」的现状。2026-10-12 起：高端模型**只从模型池里选一套**
@@ -320,10 +328,14 @@ export interface LlmPremiumStatus {
 // 一个用途的配置现状。model/base_url/provider 为空 = 跟随默认；
 // effective_* 永远有值，界面直接显示"这个用途现在实际用哪个模型"。
 interface LlmRoleStatus {
+  // 用途中文名，由后端 ROLE_LABELS_ZH 给出；界面不再硬编码用途清单。
+  label?: string;
   model: string;
   base_url: string;
   provider: string;
   api_key_set: boolean;
+  // 这个用途直接引用的模型池条目 name（空 = 旧式覆盖或跟随默认）。
+  pool_name?: string;
   effective_model: string;
   effective_base_url: string;
   // 生效值来自哪一层：pool（池第 1 套）/ premium（高端模型）/ override（这张卡自己配的）。
@@ -337,6 +349,8 @@ interface LlmRoleIn {
   base_url?: string;
   api_key?: string;
   provider?: string;
+  // 直接引用模型池条目（后端取它的整条凭据）。
+  pool_name?: string;
 }
 
 export interface LlmSettingsIn {
@@ -349,6 +363,7 @@ export interface LlmSettingsIn {
   roles?: Record<string, LlmRoleIn>; // when present it fully replaces the per-purpose map
   judge_two_tier?: boolean; // two-tier judging on/off; omitted = leave unchanged
   premium?: LlmPremiumIn; // when present it fully replaces the premium slot
+  routing?: Partial<LlmRouting>;
 }
 
 // 保存平台级「高端模型」。整体替换语义：发上去的就是全部。
@@ -362,13 +377,20 @@ interface LlmPremiumIn {
 
 // 池里的一套网关（多套时按顺序 429 兜底）。api_key 是只写的：留空表示
 // "保持同位置已存的那把钥匙"（界面只显示掩码，不允许被编辑动作意外清空）。
-interface LlmPoolIn {
+export interface LlmPoolIn {
   name?: string;
   base_url: string;
   model: string;
   agent_model?: string;
   provider?: string;
   api_key?: string;
+  vendor?: string;
+  proxy_mode?: "system" | "direct" | "custom";
+  proxy_url?: string;
+  context_tokens?: number;
+  vision?: boolean;
+  tools?: boolean;
+  enabled?: boolean;
 }
 
 export interface LlmPoolEntry {
@@ -377,7 +399,38 @@ export interface LlmPoolEntry {
   model: string;
   agent_model: string;
   provider: string;
+  vendor?: string;
+  proxy_mode?: "system" | "direct" | "custom";
+  proxy_url?: string;
+  context_tokens?: number;
+  vision?: boolean;
+  tools?: boolean;
+  enabled?: boolean;
   api_key_set: boolean;
+  /** 后端只回掩码，明文永远不出后端。 */
+  api_key_masked?: string;
+}
+
+export interface LlmModelsIn {
+  base_url: string;
+  api_key?: string;
+  proxy_mode?: "system" | "direct" | "custom";
+  proxy_url?: string;
+}
+
+export interface LlmBatchAddIn extends LlmModelsIn {
+  models: string[];
+  vendor?: string;
+  context_tokens?: number;
+  vision?: boolean;
+  tools?: boolean;
+  make_default?: boolean;
+}
+
+export interface LlmBatchActionResult {
+  action: "enable" | "disable" | "delete";
+  affected: number;
+  total: number;
 }
 
 // 探活结果：不只是"通不通"，还把实测到的协议与能力一起报出来 ——
@@ -395,6 +448,10 @@ export interface LlmTestResult {
   tools?: boolean;
   vision?: boolean;
   probed?: boolean;
+  api_key_masked?: string;
+  latency_ms?: number;
+  context_tokens?: number;
+  context_inferred?: boolean;
   ok: boolean;
   error?: string;
 }
@@ -1778,16 +1835,33 @@ export const api = {
   /** 轮询安装进度。单次很快，超时给 15 秒足够。 */
   getAppUpdateInstall: () =>
     req<AppUpdateInstallState>("/app/update/install/status", { timeoutMs: 15_000 }),
-  // ★ 池为空时这里回一条从 .env 读出来的**回显**条目（seeded=true），而不是空列表 ——
-  // 空列表会让界面显示"没有配置"，而实际上平台正在用 .env 那一套跑。
+  // 只返回用户真实保存过的条目；池为空就是空列表（source="env" 表示运行时回落 .env）。
   getLlmPool: () =>
-    req<{ pool: LlmPoolEntry[]; count: number; source: "pool" | "env"; seeded: boolean }>(
+    req<{ pool: LlmPoolEntry[]; count: number; source: "pool" | "env"; configured: boolean }>(
       "/admin/settings/llm/pool",
     ),
   testLlmSettings: (names?: string[]) =>
     req<LlmTestReport>("/admin/settings/llm/test", {
       method: "POST",
       body: names && names.length ? JSON.stringify({ names }) : undefined,
+    }),
+  /** 拉取厂商模型列表（/v1/models）。 */
+  pullLlmModels: (b: LlmModelsIn) =>
+    req<{ models: string[]; count: number; url: string }>("/admin/settings/llm/models", {
+      method: "POST",
+      body: JSON.stringify(b),
+    }),
+  /** 批量新增：每个模型一条独立池记录，第一条成为默认。 */
+  addLlmPoolBatch: (b: LlmBatchAddIn) =>
+    req<{ added: string[]; count: number; default: string; total: number }>(
+      "/admin/settings/llm/pool/batch",
+      { method: "POST", body: JSON.stringify(b) },
+    ),
+  /** 批量启用 / 禁用 / 删除。 */
+  batchActionLlmPool: (names: string[], action: "enable" | "disable" | "delete") =>
+    req<LlmBatchActionResult>("/admin/settings/llm/pool/batch-action", {
+      method: "POST",
+      body: JSON.stringify({ names, action }),
     }),
   // 各角色 token 占比：真实实测（执行流 by_role 聚合）优先，无数据回退结构估算。
   getLlmTokenShare: () =>

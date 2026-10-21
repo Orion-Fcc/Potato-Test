@@ -29,26 +29,8 @@ type PoolRow = LlmPoolEntry & { api_key: string };
 const MODEL_CACHE_KEY = "potato.llm.models";
 const modelKey = (baseUrl: string) => (baseUrl || "").trim().toLowerCase().replace(/\/+$/, "");
 
-// 用途清单与后端 app/llm.py::ROLES 对齐。顺序按"花费从大到小"排：
-// 真库实测 agent 每步调用占全部 token 的约 95%，所以"执行"这一行是省钱的唯一大旋钮，
-// 判定/生成量小而质量敏感，值得留强模型。
-// judge_escalate 是复核层：只有初判 failed 或确定性闸门报警时才调用，
-// 所以它可以放比 judge 更贵的模型 —— 没触发就一分钱不花。
-// 这两个用途的"默认值"就是第一层的两个全局下拉框，单独列出来是同一配置出现两遍。
-// 只在用户**已经单独配过**（存在非空覆盖）时才显示，避免老配置凭空消失。
-const BASE_MIRROR_ROLES = ["agent", "assistant"];
-
-const ROLE_LABEL: Record<string, string> = {
-  agent: "Execution (agent, every step)",
-  judge: "Judging (once per case)",
-  judge_escalate: "Judge escalation (review)",
-  narrative: "Failure narrative / case memory",
-  specgen: "Case generation from spec",
-  docgen: "Project docs generation (overview / flowchart)",
-  caseopt: "AI case optimization (rewrite cases)",
-  failattr: "Failure root-cause classification",
-  assistant: "Assistant chat & Feishu",
-};
+// 用途清单与中文名完全由后端 roles_for_ui() 驱动（app/llm.py::ROLES / ROLE_LABELS_ZH），
+// 前端不再维护硬编码的用途数组 —— 后端加一个用途，这里自动多一行。
 
 // 能力徽标只用符号，不引入新的文案键（服务端实测出来的布尔值无歧义）
 function mark(ok: boolean) {
@@ -106,22 +88,6 @@ function CardTitle({ title, hint, right }: { title: string; hint?: string; right
 
 // 一个用途行在"还没从后端拿到"时的空壳（含 effective_* 的占位），
 // 免得每个 onChange 都要判 null。
-// 平台级「高端模型」可以挂到哪些用途上（与服务端 app/llm.py::PREMIUM_ROLES 对齐）。
-//
-// agent 排在最后并且**默认不勾**：它占全部 token 的约 95%，把执行步换成贵模型
-// 等于把省钱的唯一大旋钮关掉。放在这里是因为"我就想要最高质量"也该被允许，
-// 但要勾就得先看到那句警告 —— 不能让人拨个总开关就悄悄多花一大笔。
-const PREMIUM_ROLES = [
-  "judge_escalate",
-  "judge",
-  "specgen",
-  "docgen",
-  "caseopt",
-  "failattr",
-  "narrative",
-  "assistant",
-  "agent",
-] as const;
 function RowTestResult({ result }: { result: LlmTestResult }) {
   const { t } = useTranslation();
   const mark = (b?: boolean) => (b ? "✓" : "✕");
@@ -182,9 +148,11 @@ export function AdminSettingsPage() {
   const [pullingRow, setPullingRow] = useState<Set<number>>(new Set());
   const [modelMenu, setModelMenu] = useState<number | null>(null);
 
-  // 特定环节覆盖：key 存在 = 勾选；value = 模型池条目的 name（"" = 勾了但还没选）。
-  // 未勾选的环节静默跟随第一层「基础运行模型」，不报错、不提示。
+  // 按用途覆盖：key 存在 = 勾选；value = 模型池条目的 name（"" = 勾了但还没选）。
+  // 未勾选的用途使用池里第一套，不报错、不提示。
   const [roleModels, setRoleModels] = useState<Record<string, string>>({});
+  // 用途清单与显示名来自后端（roles_for_ui），前端只负责渲染。
+  const [roleCatalog, setRoleCatalog] = useState<{ key: string; label: string }[]>([]);
   // 「模型分配」只用这一个保存按钮和一个 saving 标记。
   const [savingModels, setSavingModels] = useState(false);
 
@@ -220,6 +188,13 @@ export function AdminSettingsPage() {
           }
         }
         setRoleModels(nextRoles);
+        // 顺序即后端 ROLES 的顺序；label 缺失时回退到 key（老后端也能用）。
+        setRoleCatalog(
+          Object.entries(s.llm.roles || {}).map(([key, r]) => ({
+            key,
+            label: r.label || key,
+          })),
+        );
         setRouting({
           chat: s.llm.routing?.chat || "",
           agent: s.llm.routing?.agent || "",
@@ -305,8 +280,10 @@ export function AdminSettingsPage() {
     }
   };
 
-  // 保存「模型分配」：基础的对话/执行路由 + 特定环节覆盖一次提交。
-  // 环节覆盖按模型池条目 name 提交，后端取该条目的整条凭据（网关/钥匙/协议），
+  // 保存「模型分配」：只提交用途覆盖与自动降级开关。
+  // ★ routing 原样回传：routing.chat / routing.agent 是加载进来的旧值，界面已不再提供
+  //   修改入口，但**不能传空** —— 后端把这两个字段当作全局路由保存，丢了就等于重置用户配置。
+  // 用途覆盖按模型池条目 name 提交，后端取该条目的整条凭据（网关/钥匙/协议），
   // 避免"换了模型却沿用另一家网关的钥匙"。旧 premium 槽位同时清空 ——
   // 新版界面不再有这层，留着会让它继续悄悄接管环节。
   const saveModels = async () => {
@@ -539,13 +516,9 @@ export function AdminSettingsPage() {
     }
   };
 
-  // 第一层「基础运行模型」的下拉框显示：优先显示池条目的模型名。
+  // 下拉框展示：优先显示池条目的模型名。
   const modelOf = (name: string) =>
     (pool || []).find((p) => p.name === name)?.model || name;
-  const baseAgentModel = routing.agent
-    ? modelOf(routing.agent)
-    : (pool?.[0]?.model || llm?.agent_model || llm?.model || "—");
-
   // 一张卡片 = 一次完整配置。固定四行：
   //   ① 厂商预设 + 模型名称  ② Base URL  ③ API Key  ④ 拉取模型
   // 顶部只留用户自定义的「配置名称」和行操作。没有序号，也没有自动生成的 llm1。
@@ -977,80 +950,23 @@ export function AdminSettingsPage() {
         )}
       </Card>
 
-      {/* 「模型分配」三层结构（2026-10-21 重构）：
-          ① 基础运行模型：全局对话 / 全局执行。绝大多数任务只用这一层。
-          ② 特定环节模型覆盖：勾选才出现下拉框；未勾选的环节静默跟随第一层。
-          ③ 勾了却没选模型 → 只在该行标红，不再有底部黄框。 */}
+      {/* 「模型分配」只剩一层：按用途指定。
+          用途清单、顺序、中文名全部来自后端 roles_for_ui()；未勾选的用途使用池里第一套，
+          429 时按池顺序自动换下一套。routing.chat / routing.agent 只回传、不在界面修改。 */}
       <Card className="max-w-2xl space-y-4 p-4">
-        <CardTitle
-          title={t("Model assignment")}
-          right={t("Current global default: {{model}}", { model: baseAgentModel })}
-        />
+        <CardTitle title={t("Model assignment")} />
 
-        {/* ── 第一层：基础运行模型（绝对主力） ── */}
         <div className="space-y-2 rounded-lg border border-[var(--line)] p-3">
           <div className="text-[13px] font-medium text-ink-900">
-            {t("Base run model")}
-          </div>
-          <div className="grid gap-2 sm:grid-cols-2">
-            <label className="space-y-1 text-[11px] text-ink-500">
-              <span>{t("Global chat model")}</span>
-              <Select
-                value={routing.chat}
-                onChange={(e) => setRouting((r) => ({ ...r, chat: e.target.value }))}
-              >
-                <option value="">{t("Automatic (pool entry 1)")}</option>
-                {poolNames.map((n) => (
-                  <option key={n} value={n}>
-                    {n} · {modelOf(n)}
-                  </option>
-                ))}
-                {routing.chat && !poolNames.includes(routing.chat) && (
-                  <option value={routing.chat}>{routing.chat}</option>
-                )}
-              </Select>
-            </label>
-            <label className="space-y-1 text-[11px] text-ink-500">
-              <span>{t("Global execution / Agent model")}</span>
-              <Select
-                value={routing.agent}
-                onChange={(e) => setRouting((r) => ({ ...r, agent: e.target.value }))}
-              >
-                <option value="">{t("Automatic (pool entry 1)")}</option>
-                {poolNames.map((n) => (
-                  <option key={n} value={n}>
-                    {n} · {modelOf(n)}
-                  </option>
-                ))}
-                {routing.agent && !poolNames.includes(routing.agent) && (
-                  <option value={routing.agent}>{routing.agent}</option>
-                )}
-              </Select>
-            </label>
-          </div>
-          <label className="flex items-center gap-2 text-[11px] text-ink-600">
-            <Checkbox
-              checked={routing.failover}
-              onChange={(e) => setRouting((r) => ({ ...r, failover: e.target.checked }))}
-            />
-            {t("Failover on timeout / 5xx / connection failure")}
-          </label>
-        </div>
-
-        {/* ── 第二层：特定环节模型覆盖 ── */}
-        <div className="space-y-2 rounded-lg border border-[var(--line)] p-3">
-          <div className="text-[13px] font-medium text-ink-900">
-            {t("Specific step model overrides")}
+            {t("Model per purpose")}
           </div>
           <div className="text-[11px] text-ink-500">
-            {t("Unchecked steps follow the base run model.")}
+            {t(
+              "Assign models per purpose — checked purposes show a dropdown; unchecked ones use the first pool entry (on 429 the next entry in pool order takes over).",
+            )}
           </div>
           <div className="space-y-1.5">
-            {PREMIUM_ROLES.filter(
-              // agent / assistant 不勾选时本来就跟随第一层，默认不重复展示；
-              // 只要 state 里存在这个 key，就说明用户配过（或正在配），保留该行。
-              (r) => !BASE_MIRROR_ROLES.includes(r) || r in roleModels,
-            ).map((r) => {
+            {roleCatalog.map(({ key: r, label }) => {
               const checked = r in roleModels;
               const value = roleModels[r] ?? "";
               const missing = checked && !value.trim();
@@ -1068,7 +984,7 @@ export function AdminSettingsPage() {
                         })
                       }
                     />
-                    <span className="text-[12px] text-ink-700">{t(ROLE_LABEL[r])}</span>
+                    <span className="text-[12px] text-ink-700">{label}</span>
                   </label>
                   {checked && (
                     <>
@@ -1100,6 +1016,13 @@ export function AdminSettingsPage() {
               );
             })}
           </div>
+          <label className="flex items-center gap-2 border-t border-[var(--line)] pt-2 text-[11px] text-ink-600">
+            <Checkbox
+              checked={routing.failover}
+              onChange={(e) => setRouting((r) => ({ ...r, failover: e.target.checked }))}
+            />
+            {t("On 429 / timeout, switch to the next pool entry in order")}
+          </label>
         </div>
 
         <div className="flex flex-wrap items-center gap-3 border-t border-[var(--line)] pt-3">
@@ -1107,7 +1030,7 @@ export function AdminSettingsPage() {
             {savingModels ? t("Saving…") : t("Save model assignment")}
           </Button>
           <span className="text-[11px] text-ink-500">
-            {t("One save submits the base model and step overrides.")}
+            {t("Only purpose overrides and failover are saved; routing is kept as loaded.")}
           </span>
         </div>
       </Card>

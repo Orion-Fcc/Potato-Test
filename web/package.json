@@ -8,6 +8,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@ai-sdk/react": "^4.0.152",
     "@hookform/resolvers": "^5.9.2",
     "@radix-ui/react-select": "^2.3.7",
     "@radix-ui/react-tabs": "^1.2.1",
@@ -25,6 +26,7 @@
     "@tiptap/react": "^3.32.0",
     "@tiptap/starter-kit": "^3.32.0",
     "@vidstack/react": "^1.15.6",
+    "ai": "^7.0.148",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "dompurify": "^3.4.17",

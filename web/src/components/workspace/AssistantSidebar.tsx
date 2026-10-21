@@ -1,3 +1,4 @@
+import { useChat } from "@ai-sdk/react";
 import {
   CircleStop,
   GitBranch,
@@ -9,57 +10,48 @@ import {
   Wrench,
   X,
 } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useParams } from "react-router-dom";
 import { api, type AssistantAttachment } from "../../lib/api";
-import { markdownToHtml } from "../../lib/markdown";
-import { latestMermaidSource, mermaidHtml } from "../../lib/mermaidSource";
-import { readSSE, type SSEEvent } from "../../lib/sse";
 import {
-  EMPTY_SELECTION,
-  useWorkspaceStore,
-  type SelectionInfo,
-} from "../../state/workspaceStore";
+  createAssistantTransport,
+  dataPart,
+  messageText,
+  type Applied,
+  type AssistantMessage,
+  type Mode,
+  type SendBody,
+  type SendKind,
+  type ToolAction,
+  type TurnKind,
+} from "../../lib/assistantTransport";
+import { markdownToHtml } from "../../lib/markdown";
+import { mermaidHtml } from "../../lib/mermaidSource";
+import { useWorkspaceStore } from "../../state/workspaceStore";
 import { Button } from "../ui";
 import { useToast } from "../toast";
 import { MarkdownBody } from "./MarkdownBody";
 import { SuggestionCard } from "./SuggestionCard";
 
-type TurnRole = "user" | "assistant";
-type TurnKind = "text" | "flow";
-type TurnStatus = "streaming" | "done" | "error";
-type Applied = "replace" | "insert" | "discard";
-/** doc = 只读写左侧当前文档；global = 走原「助手」页的全局能力（工具调用）。 */
-type Mode = "doc" | "global";
-type ToolAction = { tool: string; args: Record<string, unknown>; ok: boolean };
+const HISTORY_LIMIT = 60;
 
-type Turn = {
+/** 合并前存下的旧对话结构，只用于一次性迁移。 */
+type LegacyTurn = {
   id: string;
-  role: TurnRole;
+  role: "user" | "assistant";
   content: string;
   kind?: TurnKind;
-  status?: TurnStatus;
+  status?: "streaming" | "done" | "error";
   error?: string;
   note?: string;
   applied?: Applied;
-  /** 缺失时按 doc 处理（兼容合并前存下的旧对话）。 */
   origin?: Mode;
-  /** 全局模式下的工具调用记录。 */
   actions?: ToolAction[];
 };
 
-const HISTORY_LIMIT = 60;
-const MAX_TURNS_TO_MODEL = 12;
-
-let seq = 0;
-function nextId(): string {
-  seq += 1;
-  return `${Date.now().toString(36)}-${seq}`;
-}
-
 /** 去掉模型偶尔带上的围栏标记。 */
-export function stripFences(raw: string): string {
+function stripFences(raw: string): string {
   let s = (raw || "").trim();
   const fence = /^```[a-zA-Z]*\s*\n?([\s\S]*?)\n?```$/;
   const m = fence.exec(s);
@@ -67,7 +59,34 @@ export function stripFences(raw: string): string {
   return s.replace(/^~~~[a-zA-Z]*\s*\n?/, "").replace(/\n?~~~$/, "").trim();
 }
 
-function loadTurns(pid: number): Turn[] {
+function legacyToMessage(turn: LegacyTurn): AssistantMessage {
+  const parts: AssistantMessage["parts"] = [
+    { type: "data-origin", data: { mode: turn.origin ?? "doc", kind: turn.kind ?? "text" } },
+  ];
+  if (turn.content) parts.push({ type: "text", text: turn.content, state: "done" });
+  if (turn.note) parts.push({ type: "data-note", data: { text: turn.note } });
+  if (turn.actions?.length) parts.push({ type: "data-actions", data: { actions: turn.actions } });
+  if (turn.status === "error") {
+    parts.push({ type: "data-error", data: { message: turn.error || "生成失败" } });
+  }
+  return {
+    id: `legacy-${turn.id}`,
+    role: turn.role,
+    metadata: turn.applied ? { applied: turn.applied } : undefined,
+    parts,
+  };
+}
+
+function normalizeMessage(message: AssistantMessage): AssistantMessage {
+  return {
+    ...message,
+    parts: message.parts.map((part) =>
+      part.type === "text" && part.state === "streaming" ? { ...part, state: "done" as const } : part,
+    ),
+  };
+}
+
+function loadMessages(pid: number): AssistantMessage[] {
   if (!Number.isFinite(pid)) return [];
   try {
     const raw =
@@ -76,16 +95,35 @@ function loadTurns(pid: number): Turn[] {
     if (!raw) return [];
     const parsed: unknown = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
-    return parsed
-      .filter((x): x is Turn => {
-        if (!x || typeof x !== "object") return false;
-        const t = x as Partial<Turn>;
-        return (t.role === "user" || t.role === "assistant") && typeof t.content === "string";
-      })
-      .map((t) => ({ ...t, status: t.status ?? "done" }))
-      .slice(-HISTORY_LIMIT);
+    const out: AssistantMessage[] = [];
+    for (const item of parsed) {
+      if (!item || typeof item !== "object") continue;
+      const obj = item as Record<string, unknown>;
+      if (
+        (obj.role === "user" || obj.role === "assistant") &&
+        typeof obj.id === "string" &&
+        Array.isArray(obj.parts)
+      ) {
+        out.push(normalizeMessage(item as AssistantMessage));
+      } else if ((obj.role === "user" || obj.role === "assistant") && typeof obj.content === "string") {
+        out.push(legacyToMessage(item as unknown as LegacyTurn));
+      }
+    }
+    return out.slice(-HISTORY_LIMIT);
   } catch {
     return [];
+  }
+}
+
+function saveMessages(pid: number, messages: AssistantMessage[]): void {
+  if (!Number.isFinite(pid)) return;
+  try {
+    localStorage.setItem(
+      `tp.workspace.chat.${pid}`,
+      JSON.stringify(messages.slice(-HISTORY_LIMIT).map(normalizeMessage)),
+    );
+  } catch {
+    /* 存储满了不影响对话 */
   }
 }
 
@@ -115,11 +153,16 @@ function describeAction(a: ToolAction): string {
  *    失败与问题，也可以直接改用例；回复下方展示实际操作记录。
  *
  * 对话按项目存在同一个 localStorage key 里，刷新 / 切模式都不丢。
+ * 切项目时用 key 重建面板，避免 useChat 状态和持久化串到另一个项目。
  */
 export function AssistantSidebar() {
-  const { t } = useTranslation();
   const { pid: pidRaw } = useParams();
   const pid = Number(pidRaw);
+  return <AssistantPanel key={pid} pid={pid} />;
+}
+
+function AssistantPanel({ pid }: { pid: number }) {
+  const { t } = useTranslation();
   const toast = useToast();
   // 按字段订阅：正文逐键变化不会触发侧栏重渲染。
   const doc = useWorkspaceStore((s) => s.currentDoc);
@@ -127,9 +170,7 @@ export function AssistantSidebar() {
   const setStreaming = useWorkspaceStore((s) => s.setStreaming);
   const setFlowTrigger = useWorkspaceStore((s) => s.setFlowTrigger);
 
-  const [turns, setTurns] = useState<Turn[]>(() => loadTurns(pid));
   const [input, setInput] = useState("");
-  const [busy, setBusy] = useState(false);
   const [mode, setModeState] = useState<Mode>(() => loadMode(pid));
 
   // 全局模式的附件（粘贴 / 拖入 / 点选）。文件先由后端解析成文本再随这一轮发出。
@@ -137,42 +178,35 @@ export function AssistantSidebar() {
   const [attBusy, setAttBusy] = useState(false);
   const [drag, setDrag] = useState(false);
   const attRef = useRef<HTMLInputElement>(null);
-
-  const turnsRef = useRef<Turn[]>(turns);
-  turnsRef.current = turns;
-  const busyRef = useRef(false);
-  const abortRef = useRef<AbortController | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
-  const firstPersist = useRef(true);
 
-  const docRef = useRef(doc);
-  docRef.current = doc;
+  const transport = useMemo(() => createAssistantTransport(pid), [pid]);
+  const initialMessages = useMemo(() => loadMessages(pid), [pid]);
+  const chat = useChat<AssistantMessage>({
+    id: `assistant-${pid}`,
+    messages: initialMessages,
+    transport,
+    // SDK 自带的节流，代替原先手写的 50ms 合批。
+    throttle: 50,
+    onError: (err) => toast("error", err.message || t("生成失败，请稍后重试。")),
+  });
+  const { messages, status, sendMessage, setMessages, stop } = chat;
+  const busy = status === "submitted" || status === "streaming";
 
   useEffect(() => {
-    setTurns(loadTurns(pid));
-    setModeState(loadMode(pid));
-  }, [pid]);
-
-  useEffect(() => {
-    if (firstPersist.current) {
-      firstPersist.current = false;
-      return;
-    }
-    if (!Number.isFinite(pid)) return;
-    try {
-      localStorage.setItem(
-        `tp.workspace.chat.${pid}`,
-        JSON.stringify(turns.slice(-HISTORY_LIMIT)),
-      );
-    } catch {
-      /* 存储满了不影响对话 */
-    }
-  }, [turns, pid]);
+    if (status === "submitted" || status === "streaming") return;
+    saveMessages(pid, messages);
+  }, [messages, pid, status]);
 
   useEffect(() => {
     const el = scrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [turns]);
+  }, [messages, busy]);
+
+  useEffect(() => {
+    setStreaming(mode === "doc" && busy);
+    return () => setStreaming(false);
+  }, [busy, mode, setStreaming]);
 
   const changeMode = useCallback(
     (next: Mode) => {
@@ -186,10 +220,6 @@ export function AssistantSidebar() {
     },
     [pid],
   );
-
-  const patchTurn = useCallback((id: string, patch: Partial<Turn>) => {
-    setTurns((prev) => prev.map((x) => (x.id === id ? { ...x, ...patch } : x)));
-  }, []);
 
   /** 解析并挂上文件。逐个失败逐个报，不让一个坏文件把好的也丢掉。 */
   const addFiles = useCallback(
@@ -212,197 +242,33 @@ export function AssistantSidebar() {
     [pid, toast],
   );
 
-  const begin = useCallback(
-    async (kind: "chat" | "flow" | "global", message: string) => {
-      if (busyRef.current || !Number.isFinite(pid)) return;
-      const isGlobal = kind === "global";
-      const ctx = isGlobal ? null : useWorkspaceStore.getState().getContext();
-      const docMeta = ctx?.doc ?? docRef.current;
-      const sel: SelectionInfo = ctx?.selection ?? EMPTY_SELECTION;
-      const sentAtts = isGlobal ? atts : [];
-
+  const dispatch = useCallback(
+    (kind: SendKind, message: string, attachments?: AssistantAttachment[]) => {
+      if (busy) return;
+      const sent = attachments ?? [];
       // 对话里显示附件名，回看历史时知道这一轮基于什么；正文只随请求发送。
-      const label =
-        sentAtts.length > 0
-          ? `${message || t("（见附件）")}\n📎 ${sentAtts.map((a) => a.filename).join("、")}`
-          : message;
-
-      const userTurn: Turn = {
-        id: nextId(),
-        role: "user",
-        content: label,
-        status: "done",
-        origin: isGlobal ? "global" : "doc",
+      const label = sent.length
+        ? `${message || t("（见附件）")}\n📎 ${sent.map((a) => a.filename).join("、")}`
+        : message;
+      const body: SendBody = {
+        kind,
+        message: message || (sent.length ? t("请看附件内容。") : ""),
+        attachments: sent.length ? sent : undefined,
       };
-      const replyId = nextId();
-      const replyTurn: Turn = {
-        id: replyId,
-        role: "assistant",
-        content: "",
-        kind: kind === "flow" ? "flow" : "text",
-        status: "streaming",
-        origin: isGlobal ? "global" : "doc",
-      };
-      setTurns((prev) => [...prev, userTurn, replyTurn]);
-      if (isGlobal) setAtts([]);
-
-      busyRef.current = true;
-      setBusy(true);
-      if (!isGlobal) setStreaming(true);
-      const ac = new AbortController();
-      abortRef.current = ac;
-      let acc = "";
-      // 流式 token 可能每秒几十个；每帧都 setState 会让长文档卡顿。
-      // 攒 50ms 刷一次气泡，肉眼仍是实时输出。
-      let flushTimer: ReturnType<typeof setTimeout> | null = null;
-      let lastFlush = 0;
-      const cancelFlush = () => {
-        if (flushTimer) {
-          clearTimeout(flushTimer);
-          flushTimer = null;
-        }
-      };
-      const flush = () => {
-        flushTimer = null;
-        lastFlush = Date.now();
-        patchTurn(replyId, { content: acc });
-      };
-      const scheduleFlush = () => {
-        const wait = 50 - (Date.now() - lastFlush);
-        if (wait <= 0) {
-          cancelFlush();
-          flush();
-          return;
-        }
-        if (!flushTimer) flushTimer = setTimeout(flush, wait);
-      };
-
-      const handle = (ev: SSEEvent) => {
-        let data: Record<string, unknown> = {};
-        try {
-          data = JSON.parse(ev.data) as Record<string, unknown>;
-        } catch {
-          data = { text: ev.data };
-        }
-        if (ev.event === "token") {
-          if (typeof data.text === "string") {
-            acc += data.text;
-            scheduleFlush();
-          }
-          return;
-        }
-        if (ev.event === "done") {
-          if (kind === "flow" && typeof data.mermaid === "string") acc = data.mermaid;
-          cancelFlush();
-          patchTurn(replyId, {
-            content: acc,
-            status: "done",
-            note: typeof data.note === "string" && data.note.trim() ? data.note.trim() : undefined,
-          });
-          return;
-        }
-        if (ev.event === "error") {
-          const msg =
-            (typeof data.message === "string" && data.message) ||
-            (typeof data.error === "string" && data.error) ||
-            (typeof data.detail === "string" && data.detail) ||
-            t("生成失败，请稍后重试。");
-          throw new Error(msg);
-        }
-      };
-
-      try {
-        if (isGlobal) {
-          const history = turnsRef.current
-            .filter((x) => x.status !== "streaming" && x.status !== "error" && x.content.trim())
-            .slice(-MAX_TURNS_TO_MODEL)
-            .map((x) => ({ role: x.role, content: x.content.slice(0, 4000) }));
-          const res = await api.assistant(
-            pid,
-            { message: message || t("请看附件内容。"), history, attachments: sentAtts },
-            { signal: ac.signal },
-          );
-          acc = res.reply || "";
-          patchTurn(replyId, {
-            content: acc,
-            status: acc.trim() ? "done" : "error",
-            error: acc.trim() ? undefined : t("没有收到回复。"),
-            actions: res.actions,
-          });
-        } else if (kind === "flow") {
-          await readSSE(`/projects/${pid}/docs/flow/stream`, {
-            instruction: message,
-            current: latestMermaidSource(ctx?.html ?? ""),
-            selection: sel,
-          }, { onEvent: handle, signal: ac.signal });
-        } else {
-          const history = turnsRef.current
-            .filter((x) => x.status !== "streaming" && x.status !== "error" && x.content.trim())
-            .slice(-MAX_TURNS_TO_MODEL)
-            .map((x) => ({ role: x.role, content: x.content.slice(0, 4000) }));
-          await readSSE(`/projects/${pid}/assistant/stream`, {
-            message,
-            history,
-            doc: docMeta,
-            selection: sel,
-            content: (ctx?.html ?? "").slice(-12000),
-          }, { onEvent: handle, signal: ac.signal });
-        }
-        // 服务端没发 done（连接被中途关闭）时也要收尾，不能永远转圈。
-        cancelFlush();
-        if (!isGlobal) {
-          setTurns((prev) =>
-            prev.map((x) =>
-              x.id === replyId && x.status === "streaming"
-                ? {
-                    ...x,
-                    content: acc,
-                    status: acc.trim() ? "done" : "error",
-                    error: acc.trim() ? undefined : t("没有收到回复。"),
-                  }
-                : x,
-            ),
-          );
-        }
-      } catch (e) {
-        cancelFlush();
-        if (ac.signal.aborted) {
-          setTurns((prev) =>
-            prev.map((x) =>
-              x.id === replyId
-                ? { ...x, content: acc, status: "done", note: acc.trim() ? x.note : t("已停止生成。") }
-                : x,
-            ),
-          );
-        } else {
-          const msg = e instanceof Error ? e.message : String(e);
-          setTurns((prev) =>
-            prev.map((x) =>
-              x.id === replyId ? { ...x, content: acc, status: "error", error: msg } : x,
-            ),
-          );
-        }
-      } finally {
-        cancelFlush();
-        busyRef.current = false;
-        setBusy(false);
-        if (!isGlobal) setStreaming(false);
-        abortRef.current = null;
-      }
+      void sendMessage({ text: label }, { body });
     },
-    [atts, patchTurn, pid, setStreaming, t],
+    [busy, sendMessage, t],
   );
 
-  const stop = useCallback(() => abortRef.current?.abort(), []);
+  const dispatchRef = useRef(dispatch);
+  dispatchRef.current = dispatch;
 
-  // 工具栏上的「AI 流式生成」复用它。挂 ref 而不是把 begin 透传下去，
+  // 工具栏上的「AI 流式生成」复用它。挂 ref 而不是把 dispatch 透传下去，
   // 是为了让侧栏内部状态变化不引起整页重渲染。
-  const beginRef = useRef(begin);
-  beginRef.current = begin;
   useEffect(() => {
     setFlowTrigger((instruction?: string) => {
       const text = (instruction ?? "").trim() || t("请根据左侧文档和项目需规，画一张主要业务流程图。");
-      void beginRef.current("flow", text);
+      dispatchRef.current("flow", text);
     });
     return () => {
       setFlowTrigger(null);
@@ -411,52 +277,66 @@ export function AssistantSidebar() {
 
   const startFlow = () => {
     if (busy) return;
-    void begin("flow", input.trim() || t("请根据左侧文档和项目需规，画一张主要业务流程图。"));
+    const text = input.trim() || t("请根据左侧文档和项目需规，画一张主要业务流程图。");
     setInput("");
+    dispatch("flow", text);
   };
 
   const send = () => {
     const text = input.trim();
     if (busy) return;
     if (mode === "global" ? !text && atts.length === 0 : !text) return;
+    const sent = mode === "global" ? atts : [];
     setInput("");
-    void begin(mode === "global" ? "global" : "chat", text);
+    if (mode === "global") setAtts([]);
+    dispatch(mode === "global" ? "global" : "chat", text, sent);
   };
 
   const apply = useCallback(
-    (turn: Turn, applyMode: "replace" | "insert") => {
-      const api = useWorkspaceStore.getState();
-      if (!turn.content.trim()) return;
-      if (applyMode === "replace" && !window.confirm(t("这会替换左侧文档的当前正文，确定吗？"))) return;
+    (message: AssistantMessage, applyMode: "replace" | "insert") => {
+      const origin = dataPart(message, "origin");
+      const mermaid = dataPart(message, "mermaid")?.source;
+      const content = stripFences(mermaid ?? messageText(message));
+      if (!content.trim()) return;
+      if (applyMode === "replace" && !window.confirm(t("这会替换左侧文档的当前正文，确定吗？"))) {
+        return;
+      }
 
-      const html =
-        turn.kind === "flow" ? mermaidHtml(stripFences(turn.content)) : markdownToHtml(turn.content);
+      const html = origin?.kind === "flow" ? mermaidHtml(content) : markdownToHtml(content);
+      const store = useWorkspaceStore.getState();
 
       if (applyMode === "insert") {
-        const ok = api.insertContent(html);
+        const ok = store.insertContent(html);
         if (!ok) {
           toast("info", t("当前文档无法插入：流程图只能整份替换，或编辑器尚未就绪。"));
           return;
         }
       } else {
-        api.replaceContent(html);
+        store.replaceContent(html);
       }
-      patchTurn(turn.id, { applied: applyMode });
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === message.id ? { ...m, metadata: { ...m.metadata, applied: applyMode } } : m,
+        ),
+      );
     },
-    [patchTurn, t, toast],
+    [setMessages, t, toast],
   );
 
-  const applyRef = useRef(apply);
-  applyRef.current = apply;
-
   const discard = useCallback(
-    (turn: Turn) => patchTurn(turn.id, { applied: "discard" }),
-    [patchTurn],
+    (message: AssistantMessage) => {
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === message.id ? { ...m, metadata: { ...m.metadata, applied: "discard" } } : m,
+        ),
+      );
+    },
+    [setMessages],
   );
 
   const clearChat = () => {
     if (busy) return;
-    setTurns([]);
+    setMessages([]);
   };
 
   const kindLabel =
@@ -483,6 +363,8 @@ export function AssistantSidebar() {
       ]
   ).map((s) => t(s));
 
+  const awaitingReply = busy && (messages.length === 0 || messages[messages.length - 1].role === "user");
+
   return (
     <aside
       className={
@@ -506,10 +388,13 @@ export function AssistantSidebar() {
       <div className="flex items-center gap-2 border-b border-[var(--line)] px-3 py-2.5">
         <Sparkles className="h-4 w-4 shrink-0 text-brand-600" />
         <span className="shrink-0 text-[13px] font-medium text-ink-900">{t("AI 协同助手")}</span>
-        <span className="ml-auto truncate text-[11px] text-ink-400" title={mode === "doc" ? doc?.title || "" : ""}>
+        <span
+          className="ml-auto truncate text-[11px] text-ink-400"
+          title={mode === "doc" ? doc?.title || "" : ""}
+        >
           {mode === "doc" ? `${kindLabel}${doc?.title ? ` · ${doc.title}` : ""}` : t("全局项目")}
         </span>
-        {turns.length > 0 && (
+        {messages.length > 0 && (
           <button
             type="button"
             onClick={clearChat}
@@ -562,7 +447,7 @@ export function AssistantSidebar() {
       </div>
 
       <div ref={scrollRef} className="flex-1 space-y-3 overflow-y-auto px-3 py-3">
-        {turns.length === 0 && (
+        {messages.length === 0 && !busy && (
           <div className="rounded-lg border border-dashed border-[var(--line)] px-3 py-5 text-center text-[12px] leading-relaxed text-ink-400">
             <p>
               {mode === "doc"
@@ -576,7 +461,7 @@ export function AssistantSidebar() {
                   type="button"
                   onClick={() => {
                     if (busy) return;
-                    void begin(mode === "global" ? "global" : "chat", ex);
+                    dispatch(mode === "global" ? "global" : "chat", ex);
                   }}
                   disabled={busy}
                   className="rounded-full border border-[var(--line)] px-2.5 py-1 text-[11.5px] text-ink-700 outline-none transition-[background-color,border-color,transform] hover:border-brand-200 hover:bg-brand-50 focus-visible:ring-2 focus-visible:ring-brand-100 active:translate-y-px disabled:opacity-50"
@@ -587,72 +472,95 @@ export function AssistantSidebar() {
             </div>
           </div>
         )}
-        {turns.map((turn) => (
-          <div key={turn.id} className={turn.role === "user" ? "flex justify-end" : "flex justify-start"}>
-            <div className={"max-w-[96%] " + (turn.role === "user" ? "text-right" : "")}>
-              {turn.role === "assistant" && turn.kind !== "flow" ? (
-                <div className="break-words rounded-lg rounded-bl-sm bg-[var(--panel2)] px-3 py-2 text-[12.5px] leading-relaxed text-ink-800">
-                  {turn.content ? (
-                    <MarkdownBody content={turn.content} />
-                  ) : turn.status === "streaming" ? (
-                    t("正在生成…")
-                  ) : null}
-                  {turn.status === "streaming" && turn.content && (
-                    <span className="ml-0.5 inline-block h-3.5 w-1 animate-pulse bg-brand-500 align-middle" />
-                  )}
-                </div>
-              ) : (
-                <div
-                  className={
-                    turn.role === "user"
-                      ? "inline-block whitespace-pre-wrap break-words rounded-lg rounded-br-sm bg-brand-600 px-3 py-2 text-left text-[12.5px] leading-relaxed text-white"
-                      : "whitespace-pre-wrap break-words rounded-lg rounded-bl-sm bg-[var(--panel2)] px-3 py-2 font-mono text-[11.5px] leading-relaxed text-ink-800"
-                  }
-                >
-                  {turn.content || (turn.status === "streaming" ? t("正在生成…") : "")}
-                  {turn.status === "streaming" && turn.content && (
-                    <span className="ml-0.5 inline-block h-3.5 w-1 animate-pulse bg-brand-500 align-middle" />
-                  )}
-                </div>
-              )}
-              {turn.status === "error" && (
-                <p className="mt-1 text-[11px] text-[var(--bad-fg)]">{turn.error || t("生成失败")}</p>
-              )}
-              {turn.note && turn.status !== "error" && (
-                <p className="mt-1 text-[11px] text-ink-400">{turn.note}</p>
-              )}
-              {turn.role === "assistant" && !!turn.actions?.length && (
-                <div className="mt-1.5 space-y-1 rounded-lg border border-[var(--line)] bg-[var(--panel)] px-2.5 py-1.5 text-left">
-                  <div className="flex items-center gap-1.5 text-[10.5px] font-semibold uppercase tracking-wider text-ink-400">
-                    <Wrench className="h-3 w-3" />
-                    {t("操作记录")}
+
+        {messages.map((message, index) => {
+          const isUser = message.role === "user";
+          const origin = dataPart(message, "origin");
+          const kind: TurnKind = origin?.kind === "flow" ? "flow" : "text";
+          const content = messageText(message);
+          const mermaid = dataPart(message, "mermaid")?.source;
+          // 流式期间显示 token，结束后用后端校验通过的源码。
+          const shown = !isUser && kind === "flow" && mermaid ? mermaid : content;
+          const error = dataPart(message, "error")?.message;
+          const note = dataPart(message, "note")?.text;
+          const actions = dataPart(message, "actions")?.actions ?? [];
+          const applied = message.metadata?.applied;
+          const streaming = busy && index === messages.length - 1 && !isUser;
+          const canApply =
+            !isUser &&
+            !streaming &&
+            !error &&
+            origin?.mode !== "global" &&
+            !actions.length &&
+            !!(mermaid?.trim() || content.trim());
+
+          return (
+            <div key={message.id} className={isUser ? "flex justify-end" : "flex justify-start"}>
+              <div className={"max-w-[96%] " + (isUser ? "text-right" : "")}>
+                {!isUser && kind !== "flow" ? (
+                  <div className="break-words rounded-lg rounded-bl-sm bg-[var(--panel2)] px-3 py-2 text-[12.5px] leading-relaxed text-ink-800">
+                    {content ? (
+                      <MarkdownBody content={content} />
+                    ) : streaming ? (
+                      t("正在生成…")
+                    ) : null}
+                    {streaming && content && (
+                      <span className="ml-0.5 inline-block h-3.5 w-1 animate-pulse bg-brand-500 align-middle" />
+                    )}
                   </div>
-                  {turn.actions.map((a, i) => (
-                    <div key={i} className="break-all font-mono text-[11px] text-ink-700">
-                      <span className={a.ok ? "text-[var(--ok-fg)]" : "text-[var(--bad-fg)]"}>
-                        {a.ok ? "✓" : "✗"}
-                      </span>{" "}
-                      {describeAction(a)}
+                ) : (
+                  <div
+                    className={
+                      isUser
+                        ? "inline-block whitespace-pre-wrap break-words rounded-lg rounded-br-sm bg-brand-600 px-3 py-2 text-left text-[12.5px] leading-relaxed text-white"
+                        : "whitespace-pre-wrap break-words rounded-lg rounded-bl-sm bg-[var(--panel2)] px-3 py-2 font-mono text-[11.5px] leading-relaxed text-ink-800"
+                    }
+                  >
+                    {shown || (streaming ? t("正在生成…") : "")}
+                    {streaming && content && (
+                      <span className="ml-0.5 inline-block h-3.5 w-1 animate-pulse bg-brand-500 align-middle" />
+                    )}
+                  </div>
+                )}
+                {error && <p className="mt-1 text-[11px] text-[var(--bad-fg)]">{error}</p>}
+                {note && !error && <p className="mt-1 text-[11px] text-ink-400">{note}</p>}
+                {!isUser && actions.length > 0 && (
+                  <div className="mt-1.5 space-y-1 rounded-lg border border-[var(--line)] bg-[var(--panel)] px-2.5 py-1.5 text-left">
+                    <div className="flex items-center gap-1.5 text-[10.5px] font-semibold uppercase tracking-wider text-ink-400">
+                      <Wrench className="h-3 w-3" />
+                      {t("操作记录")}
                     </div>
-                  ))}
-                </div>
-              )}
-              {turn.role === "assistant" &&
-                turn.status === "done" &&
-                turn.content.trim() &&
-                turn.origin !== "global" &&
-                !turn.actions?.length && (
+                    {actions.map((a, i) => (
+                      <div key={i} className="break-all font-mono text-[11px] text-ink-700">
+                        <span className={a.ok ? "text-[var(--ok-fg)]" : "text-[var(--bad-fg)]"}>
+                          {a.ok ? "✓" : "✗"}
+                        </span>{" "}
+                        {describeAction(a)}
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {canApply && (
                   <SuggestionCard
-                    content={stripFences(turn.content)}
-                    kind={turn.kind === "flow" ? "flow" : "text"}
-                    applied={turn.applied}
-                    onApply={(applyMode) => applyRef.current(turn, applyMode)}
-                    onDiscard={() => discard(turn)}
+                    content={stripFences(mermaid ?? content)}
+                    kind={kind}
+                    applied={applied}
+                    onApply={(applyMode) => apply(message, applyMode)}
+                    onDiscard={() => discard(message)}
                   />
                 )}
+              </div>
+            </div>
+          );
+        })}
+
+        {awaitingReply && (
+          <div className="flex justify-start">
+            <div className="rounded-lg rounded-bl-sm bg-[var(--panel2)] px-3 py-2 text-[12.5px] leading-relaxed text-ink-800">
+              {t("正在生成…")}
             </div>
           </div>
-        ))}
+        )}
       </div>
 
       <div className="border-t border-[var(--line)] p-2.5">
@@ -740,7 +648,7 @@ export function AssistantSidebar() {
           </span>
           <div className="ml-auto flex items-center gap-1.5">
             {busy ? (
-              <Button size="sm" variant="outline" onClick={stop}>
+              <Button size="sm" variant="outline" onClick={() => void stop()}>
                 <CircleStop className="h-3.5 w-3.5" />
                 {t("停止")}
               </Button>

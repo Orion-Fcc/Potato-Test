@@ -195,3 +195,5 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
 **回滚点**：`chore: 重构前置备份` 提交。
 
 **止损原则**：依赖大版本升级失败时，功能重构优先，版本升级可以放弃。
+
+Phase 3 已完成，采用 ChatTransport 适配自定义 SSE，替换了手写流解析。

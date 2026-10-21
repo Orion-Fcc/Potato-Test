@@ -1675,42 +1675,36 @@ const zh: Record<string, string> = {
   "附加文件：点回形针、粘贴或拖入": "附加文件：点回形针、粘贴或拖入",
   "项目总览": "项目总览",
 
-  // AI 用量页 + 模型池手工价格（2026-10-22）
+  // AI 用量页（2026-10-22，只统计 token / 调用次数 / 缓存命中）
   "AI usage": "AI 用量",
   "All models": "全部模型",
   "All roles": "全部角色",
   "All time": "全部时间",
   "By model": "按模型",
   "By role": "按角色",
-  "Costs are estimated from the prices you enter manually in the model pool (¥ per million tokens). They are not measured bill amounts.":
-    "成本按你在模型池中手工填写的价格估算（¥/百万 token），不是实际账单金额。",
+  "Cache hit rate": "缓存命中率",
+  "Cached": "命中缓存",
   "Daily consumption": "每日消耗",
-  "Estimated cost": "估算成本",
-  "Estimated from manually configured prices": "按手工配置价格估算",
-  "Every model that has no price is left out of the cost total.": "未配置价格的模型不计入成本合计。",
   "Failed to load usage data.": "用量数据加载失败。",
   "Hide results": "收起结果",
   "Input": "输入",
-  "Input price (¥ per million tokens)": "输入价格（¥/百万 token）",
+  "Input tokens": "输入 token",
   "Last {{n}} days": "近 {{n}} 天",
   "No model dimension data": "暂无模型维度数据",
   "No usage data": "暂无用量数据",
-  "Not priced": "未配置价格",
   "Output": "输出",
-  "Output price (¥ per million tokens)": "输出价格（¥/百万 token）",
-  "Prices are manually configured and only used to estimate cost on the AI usage page.":
-    "价格为手工配置，仅用于「AI 用量」页估算成本。",
+  "Output tokens": "输出 token",
   "Run a test and the token usage will show up here. Older runs without per-role usage are not included.":
     "运行一次测试后，token 用量会显示在这里。没有按角色记录用量的历史运行不计入。",
-  "Set prices in the model pool": "请在模型池中配置价格",
   "Show results": "展开结果",
+  "Some historical data did not record cache.": "部分历史数据未记录缓存。",
   "Test all model connectivity": "检测所有模型连通性",
-  "Token consumption and estimated cost by day, role and model.":
-    "按天、角色和模型查看 token 消耗与估算成本。",
+  "Token consumption and cache hit rate by day, role and model.":
+    "按天、角色和模型查看 token 消耗与缓存命中率。",
   "Total": "总计",
   "Total calls": "总调用次数",
+  "Uncached": "未命中缓存",
   "Unrecorded": "未记录",
-  "Unset": "未设置",
 
 };
 

@@ -250,8 +250,6 @@ export function AdminSettingsPage() {
           vision: r.vision !== false,
           tools: r.tools !== false,
           enabled: r.enabled !== false,
-          price_in: (r.price_in || "").trim(),
-          price_out: (r.price_out || "").trim(),
           // 留空 → 后端保持同位置已存的那把钥匙
           api_key: r.api_key.trim() || undefined,
         }));
@@ -422,8 +420,6 @@ export function AdminSettingsPage() {
         provider: "auto",
         api_key_set: false,
         api_key: "",
-        price_in: "",
-        price_out: "",
       },
     ]);
     setPoolDirty(true);
@@ -712,27 +708,6 @@ export function AdminSettingsPage() {
                   onChange={(e) => setRow(i, { context_tokens: Number(e.target.value) || 4096 })}
                 />
               </label>
-            </div>
-            <div className="grid grid-cols-2 gap-2">
-              <label className="space-y-1 text-[11px] text-ink-500">
-                <span>{t("Input price (¥ per million tokens)")}</span>
-                <Input
-                  value={row.price_in || ""}
-                  onChange={(e) => setRow(i, { price_in: e.target.value })}
-                  placeholder={t("Unset")}
-                />
-              </label>
-              <label className="space-y-1 text-[11px] text-ink-500">
-                <span>{t("Output price (¥ per million tokens)")}</span>
-                <Input
-                  value={row.price_out || ""}
-                  onChange={(e) => setRow(i, { price_out: e.target.value })}
-                  placeholder={t("Unset")}
-                />
-              </label>
-            </div>
-            <div className="text-[11px] text-ink-500">
-              {t("Prices are manually configured and only used to estimate cost on the AI usage page.")}
             </div>
             {row.proxy_mode === "custom" && (
               <Input

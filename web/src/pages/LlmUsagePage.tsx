@@ -1,8 +1,6 @@
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
-  Area,
-  AreaChart,
   Bar,
   BarChart,
   CartesianGrid,
@@ -19,26 +17,12 @@ import { chartTooltip } from "../components/table";
 import { Empty, PageSkeleton } from "../components/feedback";
 
 const RANGE_DAYS = [7, 30, 90, 0] as const;
-type Metric = "total" | "prompt" | "completion";
-
-// 只用设计令牌，不写死颜色（深色/浅色主题都跟着走）。
-const ROLE_COLORS = [
-  "var(--brand-500)",
-  "var(--brand-600)",
-  "var(--brand-700)",
-  "var(--ok)",
-  "var(--warn)",
-  "var(--bad-fg)",
-  "var(--muted)",
-];
-
 export function LlmUsagePage() {
   const { t } = useTranslation();
   const signal = useAbortSignal();
   const [days, setDays] = useState<number>(30);
   const [role, setRole] = useState("");
   const [model, setModel] = useState("");
-  const [metric, setMetric] = useState<Metric>("total");
   const [report, setReport] = useState<LlmUsageReport | null>(null);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
@@ -74,23 +58,35 @@ export function LlmUsagePage() {
   }
   if (!report) return <PageSkeleton />;
 
-  const daily = report.series.map((d) => ({ ...d, label: d.date.slice(5) }));
+  const daily = report.series.map((d) => ({
+    ...d,
+    label: d.date.slice(5),
+    uncached: Math.max(0, d.prompt - d.cached),
+  }));
   const roleRows = Object.entries(report.by_role)
-    .map(([key, v]) => ({ key, label: report.role_labels[key] || key, total: v.total }))
+    .map(([key, v]) => ({
+      key,
+      label: report.role_labels[key] || key,
+      cached: v.cached,
+      uncached: Math.max(0, v.prompt - v.cached),
+      total: v.total,
+    }))
     .sort((a, b) => b.total - a.total);
-  const roleChartData = [
-    { name: t("Tokens"), ...Object.fromEntries(roleRows.map((r) => [r.key, r.total])) },
-  ];
   const modelRows = Object.entries(report.by_model)
     .map(([name, v]) => ({ name, total: v.total, calls: v.calls }))
     .sort((a, b) => b.total - a.total);
-  const costText = report.unpriced ? t("Not priced") : `¥${report.totals.cost.toFixed(2)}`;
+
+  // prompt = 0 时没有可比的输入量，显示「—」而不是误导性的 0%。
+  const hitRate =
+    report.totals.prompt > 0
+      ? Math.round((report.totals.cached / report.totals.prompt) * 100)
+      : null;
 
   return (
     <div className="space-y-6">
       <PageHeader
         title={t("AI usage")}
-        subtitle={t("Token consumption and estimated cost by day, role and model.")}
+        subtitle={t("Token consumption and cache hit rate by day, role and model.")}
         actions={
           <div className="flex flex-wrap items-center gap-1.5">
             {RANGE_DAYS.map((d) => (
@@ -107,26 +103,25 @@ export function LlmUsagePage() {
         }
       />
 
-      <div className="tp-rise grid gap-4 sm:grid-cols-3">
+      <div className="tp-rise grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <Stat label={t("Total tokens")} value={fmt(report.totals.total)} />
-        <Stat label={t("Total calls")} value={fmt(report.totals.calls)} />
         <Stat
-          label={t("Estimated cost")}
-          value={costText}
-          tone={report.unpriced ? "warn" : undefined}
-          sub={
-            report.unpriced
-              ? t("Set prices in the model pool")
-              : t("Estimated from manually configured prices")
-          }
+          label={t("Input tokens")}
+          value={fmt(report.totals.prompt)}
+          sub={`${t("Cached")} ${fmt(report.totals.cached)}`}
         />
+        <Stat label={t("Output tokens")} value={fmt(report.totals.completion)} />
+        <Stat label={t("Total calls")} value={fmt(report.totals.calls)} />
       </div>
 
-      <div className="rounded-lg border border-[var(--line)] bg-[var(--panel2)] px-3 py-2 text-[11px] text-ink-500">
-        {t("Costs are estimated from the prices you enter manually in the model pool (¥ per million tokens). They are not measured bill amounts.")}
-        {report.unpriced
-          ? ` ${t("Every model that has no price is left out of the cost total.")}`
-          : ""}
+      <div className="flex flex-wrap items-center gap-2 text-[12px] text-ink-600">
+        <span>
+          {t("Cache hit rate")}：
+          <span className="font-medium text-ink-900">{hitRate === null ? "—" : `${hitRate}%`}</span>
+        </span>
+        {report.has_missing_cached && (
+          <span className="text-ink-500">· {t("Some historical data did not record cache.")}</span>
+        )}
       </div>
 
       <Card className="space-y-3 p-4">
@@ -166,23 +161,9 @@ export function LlmUsagePage() {
           />
         ) : (
           <>
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <div className="text-[13px] font-medium text-ink-900">{t("Daily consumption")}</div>
-              <div className="flex items-center gap-1.5">
-                {(["total", "prompt", "completion"] as Metric[]).map((m) => (
-                  <Button
-                    key={m}
-                    variant={metric === m ? "primary" : "ghost"}
-                    className="h-7 text-[11px]"
-                    onClick={() => setMetric(m)}
-                  >
-                    {m === "total" ? t("Total") : m === "prompt" ? t("Input") : t("Output")}
-                  </Button>
-                ))}
-              </div>
-            </div>
+            <div className="text-[13px] font-medium text-ink-900">{t("Daily consumption")}</div>
             <ResponsiveContainer width="100%" height={260}>
-              <AreaChart data={daily} margin={{ top: 6, right: 8, left: 0, bottom: 0 }}>
+              <BarChart data={daily} margin={{ top: 6, right: 8, left: 0, bottom: 0 }}>
                 <CartesianGrid stroke="var(--line)" strokeDasharray="3 3" vertical={false} />
                 <XAxis
                   dataKey="label"
@@ -198,16 +179,11 @@ export function LlmUsagePage() {
                   tickFormatter={(v) => fmt(Number(v))}
                 />
                 <Tooltip {...chartTooltip} formatter={(v) => fmt(Number(v))} />
-                <Area
-                  type="monotone"
-                  dataKey={metric}
-                  stroke="var(--brand-600)"
-                  fill="var(--brand-500)"
-                  fillOpacity={0.18}
-                  strokeWidth={2}
-                  dot={false}
-                />
-              </AreaChart>
+                <Legend wrapperStyle={{ fontSize: 11 }} />
+                <Bar dataKey="cached" name={t("Cached")} stackId="input" fill="var(--brand-500)" />
+                <Bar dataKey="uncached" name={t("Uncached")} stackId="input" fill="var(--brand-700)" />
+                <Bar dataKey="completion" name={t("Output")} fill="var(--muted)" />
+              </BarChart>
             </ResponsiveContainer>
           </>
         )}
@@ -220,32 +196,31 @@ export function LlmUsagePage() {
             <div className="py-8 text-center text-[12px] text-ink-500">{t("No usage data")}</div>
           ) : (
             <ResponsiveContainer width="100%" height={230}>
-              <BarChart data={roleChartData} margin={{ top: 6, right: 8, left: 0, bottom: 0 }}>
-                <CartesianGrid stroke="var(--line)" strokeDasharray="3 3" vertical={false} />
+              <BarChart
+                data={roleRows}
+                layout="vertical"
+                margin={{ top: 6, right: 16, left: 0, bottom: 0 }}
+              >
+                <CartesianGrid stroke="var(--line)" strokeDasharray="3 3" horizontal={false} />
                 <XAxis
-                  dataKey="name"
+                  type="number"
                   tick={{ fill: "var(--muted)", fontSize: 11 }}
                   tickLine={false}
                   axisLine={{ stroke: "var(--line)" }}
+                  tickFormatter={(v) => fmt(Number(v))}
                 />
                 <YAxis
+                  type="category"
+                  dataKey="label"
+                  width={130}
                   tick={{ fill: "var(--muted)", fontSize: 11 }}
                   tickLine={false}
                   axisLine={false}
-                  width={52}
-                  tickFormatter={(v) => fmt(Number(v))}
                 />
                 <Tooltip {...chartTooltip} formatter={(v) => fmt(Number(v))} />
                 <Legend wrapperStyle={{ fontSize: 11 }} />
-                {roleRows.map((r, i) => (
-                  <Bar
-                    key={r.key}
-                    dataKey={r.key}
-                    name={r.label}
-                    stackId="role"
-                    fill={ROLE_COLORS[i % ROLE_COLORS.length]}
-                  />
-                ))}
+                <Bar dataKey="cached" name={t("Cached")} stackId="role" fill="var(--brand-500)" />
+                <Bar dataKey="uncached" name={t("Uncached")} stackId="role" fill="var(--brand-700)" />
               </BarChart>
             </ResponsiveContainer>
           )}

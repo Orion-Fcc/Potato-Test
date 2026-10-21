@@ -646,8 +646,6 @@ async def _merge_into_pool_head(
         "vision": head.vision if head else True,
         "tools": head.tools if head else True,
         "enabled": head.enabled if head else True,
-        "price_in": head.price_in if head else "",
-        "price_out": head.price_out if head else "",
     }
     if not entry["base_url"] or not entry["model"] or not entry["api_key"]:
         logging.getLogger("potato-test.api").warning(
@@ -671,8 +669,6 @@ async def _merge_into_pool_head(
                 "vision": p.vision,
                 "tools": p.tools,
                 "enabled": p.enabled,
-                "price_in": p.price_in,
-                "price_out": p.price_out,
             }
             for p in profiles[1:]
         ]
@@ -760,11 +756,6 @@ async def set_admin_llm(body: LlmSettingsIn) -> dict:
                         "vision": p.vision if p.vision is not None else (prev.vision if prev else True),
                         "tools": p.tools if p.tools is not None else (prev.tools if prev else True),
                         "enabled": p.enabled if p.enabled is not None else (prev.enabled if prev else True),
-                        # None = 保留；"" = 显式清空（价格可以真的为空）。
-                        "price_in": (p.price_in if p.price_in is not None
-                                     else (prev.price_in if prev else "")).strip(),
-                        "price_out": (p.price_out if p.price_out is not None
-                                      else (prev.price_out if prev else "")).strip(),
                     }
                 )
             if missing:
@@ -942,8 +933,6 @@ async def get_admin_llm_pool() -> dict:
             "vision": p.vision,
             "tools": p.tools,
             "enabled": p.enabled,
-            "price_in": p.price_in,
-            "price_out": p.price_out,
             "api_key_set": bool(p.api_key),
             # 只回掩码：前端永远拿不到明文钥匙。
             "api_key_masked": _mask_key(p.api_key),
@@ -983,8 +972,6 @@ def _pool_entry(p) -> dict:
         "vision": p.vision,
         "tools": p.tools,
         "enabled": p.enabled,
-        "price_in": p.price_in,
-        "price_out": p.price_out,
     }
 
 
@@ -1124,8 +1111,6 @@ async def add_llm_pool_batch(body: LlmBatchAddIn) -> dict:
                 "vision": True if body.vision is None else bool(body.vision),
                 "tools": True if body.tools is None else bool(body.tools),
                 "enabled": True,
-                "price_in": "",
-                "price_out": "",
             }
         )
         if not first_name:
@@ -1254,8 +1239,9 @@ async def get_admin_llm_usage(
     `Run.created_at`。老运行没有 by_role → 不进入统计（不是 0，是"没记录"）；
     老账本没有 model 字段 → 归到「未记录」，绝不猜一个模型名。
 
-    cost 只用模型池里**手工填写**的 `price_in/price_out`（¥/百万 token）估算。
-    池里一个价格都没填时返回 `unpriced=true`，前端显示「未配置价格」而不是 ¥0。
+    只统计 token 与调用次数。缓存命中用 `cached / prompt` 表示；老账本没有
+    cached 键时按 0 处理，同时返回 `has_missing_cached`，前端据此提示
+    「部分历史数据未记录缓存」，避免把缺失显示成误导性的 0%。
     """
     from app import llm as llm_mod
 
@@ -1264,31 +1250,16 @@ async def get_admin_llm_usage(
     role_filter = (role or "").strip()
     model_filter = (model or "").strip()
 
-    def _num(v: Any) -> float | None:
-        try:
-            f = float(str(v).strip())
-        except (TypeError, ValueError):
-            return None
-        return f if f >= 0 else None
-
     def _norm(v: Any) -> str:
         return str(v or "").strip().lower()
 
     def _blank() -> dict:
-        return {"prompt": 0, "completion": 0, "cached": 0, "total": 0, "calls": 0, "cost": 0.0}
+        return {"prompt": 0, "completion": 0, "cached": 0, "total": 0, "calls": 0}
 
-    # 模型池：价格 + 名称→模型名（下拉里选的是池条目名）。
+    # 名称→模型名：下拉里选的是池条目名，账本记的是模型名。
     pool = await llm_mod._load_saved_pool()
-    price_by_model: dict[str, tuple[float, float]] = {}
     model_by_name: dict[str, str] = {}
-    priced = False
     for p in pool:
-        pin, pout = _num(p.price_in), _num(p.price_out)
-        if pin is not None or pout is not None:
-            priced = True
-            pair = (pin or 0.0, pout or 0.0)
-            price_by_model.setdefault(_norm(p.model), pair)
-            price_by_model.setdefault(_norm(p.name), pair)
         model_by_name[_norm(p.name)] = _norm(p.model)
 
     today = datetime.now(UTC).date()
@@ -1318,13 +1289,7 @@ async def get_admin_llm_usage(
     all_roles: set[str] = set()
     all_models: set[str] = set()
     all_unrecorded = False
-
-    def _cost_of(model_name: Any, b: dict) -> float:
-        pair = price_by_model.get(_norm(model_name))
-        if pair is None:
-            return 0.0
-        pin, pout = pair
-        return (b["prompt"] / 1_000_000.0) * pin + (b["completion"] / 1_000_000.0) * pout
+    has_missing_cached = False
 
     def _date_of(dt: Any) -> Any:
         if isinstance(dt, datetime):
@@ -1358,20 +1323,13 @@ async def get_admin_llm_usage(
                 continue
             if wanted and _norm(m) not in wanted and not (m == "" and "未记录" in wanted):
                 continue
-            calls = int(u.get("calls") or 0)
+            if u.get("cached") is None:
+                has_missing_cached = True
             prompt = int(u.get("prompt") or 0)
             completion = int(u.get("completion") or 0)
             cached = int(u.get("cached") or 0)
             total = int(u.get("total") or 0)
-            b = {
-                "prompt": prompt,
-                "completion": completion,
-                "cached": cached,
-                "total": total,
-                "calls": calls,
-                "cost": 0.0,
-            }
-            b["cost"] = _cost_of(m, b)
+            calls = int(u.get("calls") or 0)
 
             day_key = date.isoformat()
             ds = series_map.setdefault(day_key, _blank())
@@ -1383,7 +1341,6 @@ async def get_admin_llm_usage(
                 target["cached"] += cached
                 target["total"] += total
                 target["calls"] += calls
-                target["cost"] += b["cost"]
 
     # 补零：固定区间必须每个日期都有点，否则折线会把"没有运行"画成"跳到下一天"。
     if cutoff is not None:
@@ -1392,14 +1349,6 @@ async def get_admin_llm_usage(
             series_map.setdefault(d.isoformat(), _blank())
             d += timedelta(days=1)
     series = [{"date": k, **v} for k, v in sorted(series_map.items())]
-    for v in series:
-        v["cost"] = round(v["cost"], 6)
-    for bucket in (by_role, by_model, totals):
-        if bucket is totals:
-            bucket["cost"] = round(bucket["cost"], 6)
-        else:
-            for v in bucket.values():
-                v["cost"] = round(v["cost"], 6)
 
     # 下拉选项：池条目名在前（用户认得），再补账本里出现但池里已没有的模型名。
     model_options: list[str] = []
@@ -1422,9 +1371,9 @@ async def get_admin_llm_usage(
         "by_role": by_role,
         "by_model": by_model,
         "totals": totals,
-        "unpriced": not priced,
         "has_data": totals["calls"] > 0,
         "has_unrecorded": all_unrecorded,
+        "has_missing_cached": has_missing_cached,
         "models": model_options,
         "roles": role_options,
         "role_labels": role_labels,

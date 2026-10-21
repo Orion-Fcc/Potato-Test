@@ -391,9 +391,6 @@ export interface LlmPoolIn {
   vision?: boolean;
   tools?: boolean;
   enabled?: boolean;
-  /** 手工价格：¥ / 百万 token。空串 = 未配置。 */
-  price_in?: string;
-  price_out?: string;
 }
 
 export interface LlmPoolEntry {
@@ -409,8 +406,6 @@ export interface LlmPoolEntry {
   vision?: boolean;
   tools?: boolean;
   enabled?: boolean;
-  price_in?: string;
-  price_out?: string;
   api_key_set: boolean;
   /** 后端只回掩码，明文永远不出后端。 */
   api_key_masked?: string;
@@ -474,8 +469,6 @@ export interface LlmUsageBucket {
   cached: number;
   total: number;
   calls: number;
-  /** 仅按模型池里手工填写的价格估算；未配置价格时恒为 0，由 unpriced 区分。 */
-  cost: number;
 }
 
 export interface LlmUsageDay extends LlmUsageBucket {
@@ -488,9 +481,10 @@ export interface LlmUsageReport {
   by_role: Record<string, LlmUsageBucket>;
   by_model: Record<string, LlmUsageBucket>;
   totals: LlmUsageBucket;
-  unpriced: boolean;
   has_data: boolean;
   has_unrecorded: boolean;
+  /** 部分历史账本没有 cached 键，命中率仅供参考。 */
+  has_missing_cached: boolean;
   models: string[];
   roles: { key: string; label: string }[];
   role_labels: Record<string, string>;

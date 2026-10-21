@@ -1,14 +1,16 @@
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { Controller, useFieldArray, useForm } from "react-hook-form";
+import { zodResolver } from "@hookform/resolvers/zod";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { z } from "zod";
 import {
   api,
   relTime,
   type CasePriority,
   type CaseStatus,
-  type CaseResult,
   type CaseType,
   type TestCase,
-  type TestStep,
 } from "../lib/api";
 import { Badge, Button, Card, Checkbox, Field, Input, Select, Textarea } from "./ui";
 import { CASE_STATUS_LABELS, CASE_TYPE_LABELS, PRIORITY_LABELS, label } from "../lib/labels";
@@ -45,6 +47,27 @@ const MEMORY_LABELS: [keyof NonNullable<TestCase["memory"]>, string][] = [
   ["element_notes", "Element tips"],
 ];
 
+type CaseFormValues = {
+  name: string;
+  module: string;
+  priority: CasePriority;
+  type: CaseType;
+  status: CaseStatus;
+  owner: string;
+  roles: string[];
+  references: string;
+  preconditions: string;
+  prompt: string;
+  steps: { action: string; expected: string }[];
+  test_data: string;
+  data_files_text: string;
+  data_hygiene: string;
+  expected: string;
+  start_url: string;
+  tags: string;
+  enabled: boolean;
+};
+
 export function CaseDrawer({
   caseData,
   onClose,
@@ -60,102 +83,168 @@ export function CaseDrawer({
   const { t, i18n } = useTranslation();
   const lang = i18n.language;
   const isNew = caseData.id === 0;
-  const [c, setC] = useState<TestCase>(caseData);
-  const [tags, setTags] = useState((caseData.tags ?? []).join(", "));
-  const [history, setHistory] = useState<CaseResult[]>([]);
-  const [clearingMemory, setClearingMemory] = useState(false);
-  const [roles, setRoles] = useState<string[]>([]);
-  const [saving, setSaving] = useState(false);
-  const [err, setErr] = useState("");
-  // 测试数据文件声明。用文本编辑而不是做表单控件：JSON 嵌套两层以上，
-  // 表单会把"哪些字段是必填"藏起来，而这里一眼能看出整份声明长什么样。
-  const [dataFilesText, setDataFilesText] = useState(() =>
-    caseData.data_files ? JSON.stringify(caseData.data_files, null, 2) : "",
+  const queryClient = useQueryClient();
+
+  // 经验笔记不参与保存（它由后端在运行时写入），所以只保留本地副本。
+  const [memory, setMemory] = useState(caseData.memory ?? null);
+  const [memoryStale, setMemoryStale] = useState(Boolean(caseData.memory_stale));
+
+  // 表单里用 textarea 编辑 JSON，语法错在本地就显示，不用等一个网络往返。
+  // 语义校验（文件名/上限/占位符）仍由后端做，它才是权威。
+  const caseFormSchema = useMemo(
+    () =>
+      z.object({
+        name: z
+          .string()
+          .max(300, t("At most 300 characters"))
+          .refine((v) => v.trim().length > 0, t("Name is required")),
+        module: z.string(),
+        priority: z.enum(["P0", "P1", "P2", "P3"]),
+        type: z.enum(["functional", "smoke", "regression", "acceptance", "negative"]),
+        status: z.enum(["draft", "active", "deprecated", "blocked"]),
+        owner: z.string(),
+        roles: z.array(z.string()),
+        references: z.string(),
+        preconditions: z.string(),
+        prompt: z.string().refine((v) => v.trim().length > 0, t("Agent task is required")),
+        steps: z.array(z.object({ action: z.string(), expected: z.string() })),
+        test_data: z.string(),
+        data_files_text: z.string().superRefine((val, ctx) => {
+          const s = val.trim();
+          if (!s) return;
+          try {
+            JSON.parse(s);
+          } catch (e) {
+            ctx.addIssue({ code: z.ZodIssueCode.custom, message: String(e) });
+          }
+        }),
+        data_hygiene: z.string(),
+        expected: z.string(),
+        start_url: z
+          .string()
+          .refine(
+            (v) => !v.trim() || /^https?:\/\/[^\s]+$/i.test(v.trim()),
+            t("Enter a valid http(s) URL"),
+          ),
+        tags: z.string(),
+        enabled: z.boolean(),
+      }),
+    [t],
   );
-  // 客户端只查 JSON 语法；语义校验（文件名/上限/占位符）由后端做，它才是权威。
-  // 两边都查的意义是：语法错在本地下就显示，不用等一个网络往返。
-  const dataFilesJsonError = useMemo(() => {
-    const s = dataFilesText.trim();
-    if (!s) return "";
-    try {
-      JSON.parse(s);
-      return "";
-    } catch (e) {
-      return String(e);
-    }
-  }, [dataFilesText]);
 
-  useEffect(() => {
-    if (!isNew) api.getCaseResults(caseData.id).then(setHistory).catch(() => {});
-  }, [caseData.id, isNew]);
-  useEffect(() => {
-    api.getRoles(caseData.project_id).then((r) => setRoles(r.roles)).catch(() => {});
-  }, [caseData.project_id]);
+  const defaultValues = useMemo<CaseFormValues>(
+    () => ({
+      name: caseData.name,
+      module: caseData.module ?? "",
+      priority: caseData.priority,
+      type: caseData.type,
+      status: caseData.status,
+      owner: caseData.owner ?? "",
+      roles: caseData.roles ?? [],
+      references: caseData.references,
+      preconditions: caseData.preconditions,
+      prompt: caseData.prompt,
+      steps: caseData.steps ?? [],
+      test_data: caseData.test_data,
+      data_files_text: caseData.data_files ? JSON.stringify(caseData.data_files, null, 2) : "",
+      data_hygiene: caseData.data_hygiene ?? "",
+      expected: caseData.expected,
+      start_url: caseData.start_url ?? "",
+      tags: (caseData.tags ?? []).join(", "),
+      enabled: caseData.enabled,
+    }),
+    [caseData],
+  );
 
-  const set = <K extends keyof TestCase>(k: K, v: TestCase[K]) => setC((p) => ({ ...p, [k]: v }));
-  const setStep = (i: number, patch: Partial<TestStep>) =>
-    setC((p) => ({ ...p, steps: p.steps.map((s, j) => (j === i ? { ...s, ...patch } : s)) }));
-  const addStep = () => setC((p) => ({ ...p, steps: [...p.steps, { action: "", expected: "" }] }));
-  const removeStep = (i: number) => setC((p) => ({ ...p, steps: p.steps.filter((_, j) => j !== i) }));
+  const {
+    control,
+    handleSubmit,
+    setValue,
+    watch,
+    setError,
+    clearErrors,
+    formState: { errors },
+  } = useForm<CaseFormValues>({
+    defaultValues,
+    resolver: zodResolver(caseFormSchema),
+  });
 
-  const save = async () => {
-    setSaving(true);
-    setErr("");
-    const body = {
-      name: c.name,
-      module: c.module || null,
-      priority: c.priority,
-      type: c.type,
-      status: c.status,
-      owner: c.owner || null,
-      // 2026-10-04 多角色：roles 传完整序列，role 传首项保持向后兼容。
-      // 不能直接传 c.role —— 用户可能只动过 roles 没动 role，后端归一化
-      // 会把 role 拼到 roles 前面，导致顺序错乱（"先当审批人" 变成 "先当申请人"）。
-      // 传首项让 role 永远是 roles[0]，两列永远自洽。
-      roles: c.roles ?? [],
-      role: (c.roles ?? [])[0] ?? c.role ?? null,
-      references: c.references,
-      preconditions: c.preconditions,
-      prompt: c.prompt,
-      steps: c.steps.filter((s) => s.action.trim() || s.expected.trim()),
-      test_data: c.test_data,
-      // 空文本 -> null（后端看到 null 就不会生成文件）。
-      // 语法错时也发 null：后端的校验只对"有内容"的声明负责，
-      // 而把半截 JSON 发过去只会得到一句更难懂的报错。
-      data_files: dataFilesText.trim() && !dataFilesJsonError
-        ? JSON.parse(dataFilesText)
-        : null,
-      data_hygiene: c.data_hygiene ?? "",
-      expected: c.expected,
-      start_url: c.start_url || null,
-      tags: tags.split(",").map((x) => x.trim()).filter(Boolean),
-      enabled: c.enabled,
-    };
-    try {
-      if (isNew) await api.createCase(c.project_id, body);
-      else await api.updateCase(caseData.id, body);
+  const { fields, append, remove } = useFieldArray({ control, name: "steps" });
+  const roles = watch("roles");
+
+  const historyQuery = useQuery({
+    queryKey: ["case-results", caseData.id],
+    queryFn: () => api.getCaseResults(caseData.id),
+    enabled: !isNew,
+  });
+  const historyQueryData = historyQuery.data ?? [];
+
+  const rolesQuery = useQuery({
+    queryKey: ["roles", caseData.project_id],
+    queryFn: () => api.getRoles(caseData.project_id).then((r) => r.roles),
+    staleTime: 5 * 60_000,
+  });
+  const availableRoles = rolesQuery.data ?? [];
+
+  const saveMutation = useMutation({
+    mutationFn: async (values: CaseFormValues) => {
+      const body: Partial<TestCase> = {
+        name: values.name.trim(),
+        module: values.module.trim() || null,
+        priority: values.priority,
+        type: values.type,
+        status: values.status,
+        owner: values.owner.trim() || null,
+        // 2026-10-04 多角色：roles 传完整序列，role 传首项保持向后兼容。
+        // 不能直接传 caseData.role —— 用户可能只动过 roles 没动 role，后端归一化
+        // 会把 role 拼到 roles 前面，导致顺序错乱（"先当审批人" 变成 "先当申请人"）。
+        roles: values.roles,
+        role: values.roles[0] ?? caseData.role ?? null,
+        references: values.references,
+        preconditions: values.preconditions,
+        prompt: values.prompt,
+        steps: values.steps.filter((s) => s.action.trim() || s.expected.trim()),
+        test_data: values.test_data,
+        // 空文本 -> null（后端看到 null 就不会生成文件）。
+        data_files: values.data_files_text.trim() ? JSON.parse(values.data_files_text) : null,
+        data_hygiene: values.data_hygiene,
+        expected: values.expected,
+        start_url: values.start_url.trim() || null,
+        tags: values.tags
+          .split(",")
+          .map((x) => x.trim())
+          .filter(Boolean),
+        enabled: values.enabled,
+      };
+      return isNew
+        ? api.createCase(caseData.project_id, body)
+        : api.updateCase(caseData.id, body);
+    },
+    onSuccess: () => {
+      // 列表以 ["cases", pid] 为键。失效后由 CasesPage 的 useQuery 自动重拉，
+      // 不再需要调用方手工 load()。
+      void queryClient.invalidateQueries({ queryKey: ["cases", caseData.project_id] });
       onSaved();
-    } catch (e) {
-      setErr(String(e));
-    } finally {
-      setSaving(false);
-    }
-  };
+    },
+    onError: (e) => setError("root", { message: String(e) }),
+  });
 
   // 清空经验笔记。用例内容一变，后端本来就会靠指纹把旧笔记作废；
   // 但"页面改版了、用例却没改"这种情况指纹发现不了，所以得留一个手动出口。
-  const clearMemory = async () => {
-    setClearingMemory(true);
-    try {
-      const updated = await api.clearCaseMemory(caseData.id);
+  const clearMemoryMutation = useMutation({
+    mutationFn: () => api.clearCaseMemory(caseData.id),
+    onSuccess: (updated) => {
       // 就地更新，不关闭抽屉 —— 用户清完通常还想接着看别的
-      setC((p) => ({ ...p, memory: updated.memory ?? null, memory_stale: false }));
-    } catch (e) {
-      setErr(String(e));
-    } finally {
-      setClearingMemory(false);
-    }
-  };
+      setMemory(updated.memory ?? null);
+      setMemoryStale(false);
+    },
+    onError: (e) => setError("root", { message: String(e) }),
+  });
+
+  const onSubmit = handleSubmit((values) => {
+    clearErrors("root");
+    saveMutation.mutate(values);
+  });
 
   return (
     <Modal onClose={onClose} className="max-w-2xl">
@@ -165,7 +254,7 @@ export function CaseDrawer({
             <div className="flex items-center gap-2">
               {!isNew && (
                 <span className="font-mono text-xs text-ink-500">
-                  {c.case_key ?? `#${caseData.id}`}
+                  {caseData.case_key ?? `#${caseData.id}`}
                 </span>
               )}
               <span className="font-medium text-ink-900">
@@ -177,8 +266,8 @@ export function CaseDrawer({
             </Button>
           </div>
 
-          <div className="space-y-4 p-5">
-            {err && <div className="tp-alert tp-alert-bad">{err}</div>}
+          <form onSubmit={onSubmit} className="space-y-4 p-5">
+            {errors.root?.message && <div className="tp-alert tp-alert-bad">{errors.root.message}</div>}
 
             {firstCase && isNew && (
               <div className="space-y-1.5 rounded-lg border border-brand-100 bg-brand-50 px-3 py-2.5 text-xs text-ink-700">
@@ -196,47 +285,83 @@ export function CaseDrawer({
               </div>
             )}
 
-            <Field label={t("Name")}>
-              <Input value={c.name} onChange={(e) => set("name", e.target.value)} />
-            </Field>
+            <Controller
+              control={control}
+              name="name"
+              render={({ field }) => (
+                <Field label={t("Name")} error={errors.name?.message}>
+                  <Input value={field.value} onChange={(e) => field.onChange(e.target.value)} />
+                </Field>
+              )}
+            />
 
             <div className="grid grid-cols-2 gap-3">
-              <Field label={t("Module")}>
-                <Input value={c.module ?? ""} onChange={(e) => set("module", e.target.value)} placeholder="采购/询价" />
-              </Field>
-              <Field label={t("Owner")}>
-                <Input value={c.owner ?? ""} onChange={(e) => set("owner", e.target.value)} placeholder={t("unassigned")} />
-              </Field>
+              <Controller
+                control={control}
+                name="module"
+                render={({ field }) => (
+                  <Field label={t("Module")}>
+                    <Input value={field.value} onChange={(e) => field.onChange(e.target.value)} placeholder="采购/询价" />
+                  </Field>
+                )}
+              />
+              <Controller
+                control={control}
+                name="owner"
+                render={({ field }) => (
+                  <Field label={t("Owner")}>
+                    <Input value={field.value} onChange={(e) => field.onChange(e.target.value)} placeholder={t("unassigned")} />
+                  </Field>
+                )}
+              />
             </div>
 
             <div className="grid grid-cols-3 gap-3">
-              <Field label={t("Priority")}>
-                <Select value={c.priority} onChange={(e) => set("priority", e.target.value as CasePriority)}>
-                  {PRIORITIES.map((p) => (
-                    <option key={p} value={p}>
-                      {label(PRIORITY_LABELS, p, lang)}
-                    </option>
-                  ))}
-                </Select>
-              </Field>
-              <Field label={t("Type")}>
-                <Select value={c.type} onChange={(e) => set("type", e.target.value as CaseType)}>
-                  {TYPES.map((x) => (
-                    <option key={x} value={x}>
-                      {label(CASE_TYPE_LABELS, x, lang)}
-                    </option>
-                  ))}
-                </Select>
-              </Field>
-              <Field label={t("Status")}>
-                <Select value={c.status} onChange={(e) => set("status", e.target.value as CaseStatus)}>
-                  {STATUSES.map((x) => (
-                    <option key={x} value={x}>
-                      {label(CASE_STATUS_LABELS, x, lang)}
-                    </option>
-                  ))}
-                </Select>
-              </Field>
+              <Controller
+                control={control}
+                name="priority"
+                render={({ field }) => (
+                  <Field label={t("Priority")}>
+                    <Select value={field.value} onChange={(e) => field.onChange(e.target.value as CasePriority)}>
+                      {PRIORITIES.map((p) => (
+                        <option key={p} value={p}>
+                          {label(PRIORITY_LABELS, p, lang)}
+                        </option>
+                      ))}
+                    </Select>
+                  </Field>
+                )}
+              />
+              <Controller
+                control={control}
+                name="type"
+                render={({ field }) => (
+                  <Field label={t("Type")}>
+                    <Select value={field.value} onChange={(e) => field.onChange(e.target.value as CaseType)}>
+                      {TYPES.map((x) => (
+                        <option key={x} value={x}>
+                          {label(CASE_TYPE_LABELS, x, lang)}
+                        </option>
+                      ))}
+                    </Select>
+                  </Field>
+                )}
+              />
+              <Controller
+                control={control}
+                name="status"
+                render={({ field }) => (
+                  <Field label={t("Status")}>
+                    <Select value={field.value} onChange={(e) => field.onChange(e.target.value as CaseStatus)}>
+                      {STATUSES.map((x) => (
+                        <option key={x} value={x}>
+                          {label(CASE_STATUS_LABELS, x, lang)}
+                        </option>
+                      ))}
+                    </Select>
+                  </Field>
+                )}
+              />
             </div>
 
             <Field label={t("Runs as (role) — which account executes this case")}>
@@ -247,23 +372,23 @@ export function CaseDrawer({
                     // 2026-10-04 多角色：下拉里选一个角色 = 追加到切换序列末尾。
                     // 顺序即执行时的切换顺序，所以追加而不是替换。
                     if (!v) return;
-                    set("roles", [...(c.roles ?? []), v]);
+                    setValue("roles", [...roles, v], { shouldDirty: true });
                   }}
                 >
                   <option value="">{t("— add a role to the sequence —")}</option>
-                  {roles
-                    .filter((r) => !(c.roles ?? []).includes(r))
+                  {availableRoles
+                    .filter((r) => !roles.includes(r))
                     .map((r) => (
                       <option key={r} value={r}>{r}</option>
                     ))}
                 </Select>
 
-                {(c.roles ?? []).length > 0 && (
+                {roles.length > 0 && (
                   <div className="space-y-1">
                     <div className="text-xs text-muted-foreground">
                       {t("Switch order — the case starts as the first one and switches through the rest:")}
                     </div>
-                    {(c.roles ?? []).map((r, i) => (
+                    {roles.map((r, i) => (
                       <div
                         key={r}
                         className="flex items-center gap-2 rounded-md border px-2 py-1 text-sm"
@@ -278,9 +403,9 @@ export function CaseDrawer({
                           size="sm"
                           disabled={i === 0}
                           onClick={() => {
-                            const next = [...(c.roles ?? [])];
+                            const next = [...roles];
                             [next[i - 1], next[i]] = [next[i], next[i - 1]];
-                            set("roles", next);
+                            setValue("roles", next, { shouldDirty: true });
                           }}
                           title={t("Move up")}
                         >
@@ -290,11 +415,11 @@ export function CaseDrawer({
                           type="button"
                           variant="ghost"
                           size="sm"
-                          disabled={i === (c.roles ?? []).length - 1}
+                          disabled={i === roles.length - 1}
                           onClick={() => {
-                            const next = [...(c.roles ?? [])];
+                            const next = [...roles];
                             [next[i + 1], next[i]] = [next[i], next[i + 1]];
-                            set("roles", next);
+                            setValue("roles", next, { shouldDirty: true });
                           }}
                           title={t("Move down")}
                         >
@@ -304,7 +429,7 @@ export function CaseDrawer({
                           type="button"
                           variant="ghost"
                           size="sm"
-                          onClick={() => set("roles", (c.roles ?? []).filter((x) => x !== r))}
+                          onClick={() => setValue("roles", roles.filter((x) => x !== r), { shouldDirty: true })}
                           title={t("Remove")}
                         >
                           ×
@@ -316,42 +441,72 @@ export function CaseDrawer({
               </div>
             </Field>
 
-            <Field label={t("References (linked requirements / tickets)")}>
-              <Input value={c.references} onChange={(e) => set("references", e.target.value)} placeholder="REQ-000123, #12" />
-            </Field>
+            <Controller
+              control={control}
+              name="references"
+              render={({ field }) => (
+                <Field label={t("References (linked requirements / tickets)")}>
+                  <Input value={field.value} onChange={(e) => field.onChange(e.target.value)} placeholder="REQ-000123, #12" />
+                </Field>
+              )}
+            />
 
-            <Field label={t("Preconditions")}>
-              <Textarea rows={2} value={c.preconditions} onChange={(e) => set("preconditions", e.target.value)} placeholder={t("State the app must be in before this runs.")} />
-            </Field>
+            <Controller
+              control={control}
+              name="preconditions"
+              render={({ field }) => (
+                <Field label={t("Preconditions")}>
+                  <Textarea rows={2} value={field.value} onChange={(e) => field.onChange(e.target.value)} placeholder={t("State the app must be in before this runs.")} />
+                </Field>
+              )}
+            />
 
-            <Field label={t("Agent task (natural language — this is what runs)")}>
-              <Textarea
-                rows={3}
-                value={c.prompt}
-                onChange={(e) => set("prompt", e.target.value)}
-                placeholder="登录后进入 采购 › 询价，新建一条询价单，选择厂区A、料号 X，数量 10，提交。"
-              />
-            </Field>
+            <Controller
+              control={control}
+              name="prompt"
+              render={({ field }) => (
+                <Field label={t("Agent task (natural language — this is what runs)")} error={errors.prompt?.message}>
+                  <Textarea
+                    rows={3}
+                    value={field.value}
+                    onChange={(e) => field.onChange(e.target.value)}
+                    placeholder="登录后进入 采购 › 询价，新建一条询价单，选择厂区A、料号 X，数量 10，提交。"
+                  />
+                </Field>
+              )}
+            />
 
             <div>
               <div className="mb-1 flex items-center justify-between">
                 <span className="text-xs font-medium text-ink-500">{t("Steps (documentation)")}</span>
-                <Button variant="outline" size="sm" onClick={addStep}>
+                <Button type="button" variant="outline" size="sm" onClick={() => append({ action: "", expected: "" })}>
                   {t("+ Step")}
                 </Button>
               </div>
-              {c.steps.length === 0 ? (
+              {fields.length === 0 ? (
                 <div className="rounded-lg border border-dashed border-[var(--line)] py-3 text-center text-xs text-ink-500">
                   {t("No steps. These document the case for humans; the agent runs the task above.")}
                 </div>
               ) : (
                 <div className="space-y-2">
-                  {c.steps.map((s, i) => (
-                    <div key={i} className="flex items-start gap-2">
+                  {fields.map((s, i) => (
+                    <div key={s.id} className="flex items-start gap-2">
                       <span className="mt-2 w-5 shrink-0 text-right text-xs text-ink-500">{i + 1}</span>
-                      <Input value={s.action} onChange={(e) => setStep(i, { action: e.target.value })} placeholder={t("action")} />
-                      <Input value={s.expected} onChange={(e) => setStep(i, { expected: e.target.value })} placeholder={t("expected")} />
-                      <Button variant="ghost" size="sm" onClick={() => removeStep(i)}>
+                      <Controller
+                        control={control}
+                        name={`steps.${i}.action`}
+                        render={({ field }) => (
+                          <Input value={field.value} onChange={(e) => field.onChange(e.target.value)} placeholder={t("action")} />
+                        )}
+                      />
+                      <Controller
+                        control={control}
+                        name={`steps.${i}.expected`}
+                        render={({ field }) => (
+                          <Input value={field.value} onChange={(e) => field.onChange(e.target.value)} placeholder={t("expected")} />
+                        )}
+                      />
+                      <Button type="button" variant="ghost" size="sm" onClick={() => remove(i)}>
                         ✕
                       </Button>
                     </div>
@@ -361,97 +516,139 @@ export function CaseDrawer({
             </div>
 
             <div className="grid grid-cols-2 gap-3">
-              <Field label={t("Test data")}>
-                <Textarea rows={2} value={c.test_data} onChange={(e) => set("test_data", e.target.value)} placeholder="厂区A / 料号 X" />
-              </Field>
+              <Controller
+                control={control}
+                name="test_data"
+                render={({ field }) => (
+                  <Field label={t("Test data")}>
+                    <Textarea rows={2} value={field.value} onChange={(e) => field.onChange(e.target.value)} placeholder="厂区A / 料号 X" />
+                  </Field>
+                )}
+              />
               {/* 测试数据文件声明。放在"测试数据"旁边而不是另开一节：
                   两者在用户脑子里是同一件事（"这条用例要准备什么数据"），
                   分成两处会让人以为它们互不相干。 */}
-              <Field
-                label={t("Test data files (Excel / CSV / TXT)")}
-                hint={t("Test data files hint")}
-                error={dataFilesJsonError || c.data_files_error || undefined}
-              >
-                <div className="flex gap-2 items-start">
-                  <Textarea
-                    rows={7}
-                    className="font-mono text-xs"
-                    value={dataFilesText}
-                    onChange={(e) => setDataFilesText(e.target.value)}
-                    placeholder={'{\n  "files": [ ... ]\n}'}
-                  />
-                  <Button
-                    type="button"
-                    onClick={() => setDataFilesText(DATA_FILES_TEMPLATE)}
-                    title={t("Insert a template")}
+              <Controller
+                control={control}
+                name="data_files_text"
+                render={({ field }) => (
+                  <Field
+                    label={t("Test data files (Excel / CSV / TXT)")}
+                    hint={t("Test data files hint")}
+                    error={errors.data_files_text?.message || caseData.data_files_error || undefined}
                   >
-                    {t("Template")}
-                  </Button>
-                </div>
-              </Field>
-              <Field
-                label={t("Data isolation note")}
-                hint={t("Filled in when your expected result hard-codes a count (like \"1 row\"): the app's data is changed by other cases, so the note tells the agent not to treat leftovers as a defect. Empty = not injected.")}
-              >
-                <Textarea
-                  rows={3}
-                  value={c.data_hygiene ?? ""}
-                  onChange={(e) => set("data_hygiene", e.target.value)}
-                  placeholder={t("Leave empty unless the expected result mentions a specific number of rows")}
-                />
-              </Field>
-              <Field label={t("Expected outcome (for the judge)")}>
-                <Textarea
-                  rows={2}
-                  value={c.expected}
-                  onChange={(e) => set("expected", e.target.value)}
-                  placeholder="列表里出现该询价单，状态为“待报价”，且无错误提示。"
-                />
-              </Field>
+                    <div className="flex gap-2 items-start">
+                      <Textarea
+                        rows={7}
+                        className="font-mono text-xs"
+                        value={field.value}
+                        onChange={(e) => field.onChange(e.target.value)}
+                        placeholder={'{\n  "files": [ ... ]\n}'}
+                      />
+                      <Button
+                        type="button"
+                        onClick={() => setValue("data_files_text", DATA_FILES_TEMPLATE, { shouldValidate: true, shouldDirty: true })}
+                        title={t("Insert a template")}
+                      >
+                        {t("Template")}
+                      </Button>
+                    </div>
+                  </Field>
+                )}
+              />
+              <Controller
+                control={control}
+                name="data_hygiene"
+                render={({ field }) => (
+                  <Field
+                    label={t("Data isolation note")}
+                    hint={t("Filled in when your expected result hard-codes a count (like \"1 row\"): the app's data is changed by other cases, so the note tells the agent not to treat leftovers as a defect. Empty = not injected.")}
+                  >
+                    <Textarea
+                      rows={3}
+                      value={field.value}
+                      onChange={(e) => field.onChange(e.target.value)}
+                      placeholder={t("Leave empty unless the expected result mentions a specific number of rows")}
+                    />
+                  </Field>
+                )}
+              />
+              <Controller
+                control={control}
+                name="expected"
+                render={({ field }) => (
+                  <Field label={t("Expected outcome (for the judge)")}>
+                    <Textarea
+                      rows={2}
+                      value={field.value}
+                      onChange={(e) => field.onChange(e.target.value)}
+                      placeholder="列表里出现该询价单，状态为“待报价”，且无错误提示。"
+                    />
+                  </Field>
+                )}
+              />
             </div>
 
             <div className="grid grid-cols-2 gap-3">
-              <Field label={t("Start URL (optional, overrides project base URL)")}>
-                <Input value={c.start_url ?? ""} onChange={(e) => set("start_url", e.target.value)} placeholder="https://…" />
-              </Field>
-              <Field label={t("Tags (comma-separated)")}>
-                <Input value={tags} onChange={(e) => setTags(e.target.value)} placeholder="询价, 只读" />
-              </Field>
+              <Controller
+                control={control}
+                name="start_url"
+                render={({ field }) => (
+                  <Field label={t("Start URL (optional, overrides project base URL)")} error={errors.start_url?.message}>
+                    <Input value={field.value} onChange={(e) => field.onChange(e.target.value)} placeholder="https://…" />
+                  </Field>
+                )}
+              />
+              <Controller
+                control={control}
+                name="tags"
+                render={({ field }) => (
+                  <Field label={t("Tags (comma-separated)")}>
+                    <Input value={field.value} onChange={(e) => field.onChange(e.target.value)} placeholder="询价, 只读" />
+                  </Field>
+                )}
+              />
             </div>
 
-            <label className="flex items-center gap-2 text-sm text-ink-700">
-              <Checkbox checked={c.enabled} onChange={(e) => set("enabled", e.target.checked)} />
-              {t("Enabled (included in “run all enabled”)")}
-            </label>
+            <Controller
+              control={control}
+              name="enabled"
+              render={({ field }) => (
+                <label className="flex items-center gap-2 text-sm text-ink-700">
+                  <Checkbox checked={field.value} onChange={(e) => field.onChange(e.target.checked)} />
+                  {t("Enabled (included in “run all enabled”)")}
+                </label>
+              )}
+            />
 
             <div className="flex gap-2">
-              <Button onClick={save} disabled={saving || !c.name.trim() || !c.prompt.trim()}>
-                {saving ? t("Saving…") : isNew ? t("Create") : t("Save")}
+              <Button type="submit" disabled={saveMutation.isPending}>
+                {saveMutation.isPending ? t("Saving…") : isNew ? t("Create") : t("Save")}
               </Button>
-              <Button variant="outline" onClick={close}>
+              <Button type="button" variant="outline" onClick={close}>
                 {t("Cancel")}
               </Button>
             </div>
 
-            {!isNew && (c.memory || c.memory_stale) && (
+            {!isNew && (memory || memoryStale) && (
             <div className="border-t border-[var(--line)] pt-4">
               <div className="mb-2 flex items-center justify-between">
                 <div className="text-sm font-medium text-ink-900">
                   {t("What it learned (experience notes)")}
                 </div>
-                <Button size="sm" variant="ghost" onClick={clearMemory} disabled={clearingMemory}>
-                  {clearingMemory ? t("Clearing…") : t("Clear")}
+                <Button type="button" size="sm" variant="ghost" onClick={() => clearMemoryMutation.mutate()} disabled={clearMemoryMutation.isPending}>
+                  {clearMemoryMutation.isPending ? t("Clearing…") : t("Clear")}
                 </Button>
               </div>
 
-              {c.memory_stale ? (
+              {memoryStale ? (
                 <p className="text-[13px] text-ink-500">
                   {t("This case was edited after these notes were written, so they are ignored when it runs. They will be rebuilt on the next run.")}
                 </p>
               ) : (
                 <div className="space-y-1.5">
                   {MEMORY_LABELS.map(([key, label]) => {
-                    const items = (c.memory?.[key] as string[] | undefined) ?? [];
+                    const items = (memory?.[key] as string[] | undefined) ?? [];
                     if (!items.length) return null;
                     return (
                       <div key={key} className="text-[13px]">
@@ -466,9 +663,9 @@ export function CaseDrawer({
               <p className="mt-2 text-xs text-ink-500">
                 {t("Notes only record how to get around — navigation paths and page quirks. They deliberately never record whether a run passed: that would turn the next run into copying an answer instead of testing.")}
               </p>
-              {c.memory_updated_at && (
+              {caseData.memory_updated_at && (
                 <p className="mt-1 text-xs text-ink-500">
-                  {t("Updated")}: {relTime(c.memory_updated_at)}
+                  {t("Updated")}: {relTime(caseData.memory_updated_at)}
                 </p>
               )}
             </div>
@@ -477,13 +674,13 @@ export function CaseDrawer({
             {!isNew && (
             <div className="border-t border-[var(--line)] pt-4">
               <div className="mb-2 text-sm font-medium text-ink-900">
-                {t("Run history")} ({history.length})
+                {t("Run history")} ({historyQueryData.length})
               </div>
-              {history.length === 0 ? (
+              {historyQueryData.length === 0 ? (
                 <div className="py-4 text-center text-sm text-ink-500">{t("This case hasn't run yet.")}</div>
               ) : (
                 <div className="divide-y divide-[var(--line)]">
-                  {history.map((h) => (
+                  {historyQueryData.map((h) => (
                     <div key={h.result_id} className="flex items-center justify-between py-2 text-sm">
                       <span className="min-w-0">
                         <span className="truncate text-ink-900">{h.run_name}</span>
@@ -500,7 +697,7 @@ export function CaseDrawer({
               )}
             </div>
             )}
-          </div>
+          </form>
         </Card>
       )}
     </Modal>

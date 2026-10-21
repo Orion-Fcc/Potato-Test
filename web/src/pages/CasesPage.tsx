@@ -1,9 +1,10 @@
 import { FlaskConical as FlaskConicalIcon, Wand2 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { api, relTime, type CasePriority, type CaseStatus, type CaseType, type TestCase } from "../lib/api";
-import { useAbortSignal, useDebounced } from "../lib/hooks";
+import { useDebounced } from "../lib/hooks";
 import { rateColor, rateTone } from "../lib/metrics";
 import { Badge, Button, Card, Checkbox, Field, Input, PageHeader, Select, Stat, StatRing } from "../components/ui";
 import { CASE_STATUS_LABELS, CASE_TYPE_LABELS, PRIORITY_LABELS, label } from "../lib/labels";
@@ -46,6 +47,8 @@ const blankCase = (pid: number): TestCase => ({
   enabled: true,
 });
 
+const EMPTY_CASES: TestCase[] = [];
+
 const PRIORITY_STYLE: Record<string, string> = {
   P0: "bg-[var(--bad-bg)] text-[var(--bad-fg)]",
   P1: "bg-[var(--warn-bg)] text-[var(--warn-fg)]",
@@ -60,8 +63,8 @@ export function CasesPage() {
   const fail = useErrorToast();
   const { t, i18n } = useTranslation();
   const lang = i18n.language;
-  const [cases, setCases] = useState<TestCase[]>([]);
   const xlsxRef = useRef<HTMLInputElement>(null);
+  const queryClient = useQueryClient();
 
   // ★ 深链筛选（2026-10-12）：`?keys=TC-001,TC-002` 只显示这几条。
   //
@@ -120,21 +123,20 @@ export function CasesPage() {
   // 由弹窗收集原因后再提交 —— 而不是直接提交一个没有解释的状态。
   const [bulkStatus, setBulkStatus] = useState<"active" | "blocked" | null>(null);
 
-  const signal = useAbortSignal();
-  const load = useMemo(
-    () => () =>
-      api
-        .listCases(pid, { signal })
-        .then(setCases)
-        .catch((e) => {
-          fail(e);
-        }),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [pid, signal],
-  );
+  // 列表由 React Query 持有：挂载即拉取，窗口聚焦/缓存过期自动重拉。
+  const casesQuery = useQuery({
+    queryKey: ["cases", pid],
+    queryFn: ({ signal }) => api.listCases(pid, { signal }),
+  });
+  const cases = casesQuery.data ?? EMPTY_CASES;
   useEffect(() => {
-    load();
-  }, [load]);
+    if (casesQuery.error) fail(casesQuery.error);
+  }, [casesQuery.error, fail]);
+
+  // 写操作用缓存失效代替手工 setCases：重新拉取、去重、并发请求由 Query 负责。
+  const load = useCallback(() => {
+    void queryClient.invalidateQueries({ queryKey: ["cases", pid] });
+  }, [pid, queryClient]);
 
   const allTags = useMemo(
     () => Array.from(new Set(cases.flatMap((c) => c.tags ?? []))).sort(),
@@ -805,10 +807,7 @@ export function CasesPage() {
           caseData={editing}
           firstCase={cases.length === 0}
           onClose={() => setEditing(null)}
-          onSaved={() => {
-            setEditing(null);
-            load();
-          }}
+          onSaved={() => setEditing(null)}
         />
       )}
 

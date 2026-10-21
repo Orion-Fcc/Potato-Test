@@ -63,7 +63,7 @@ export function Layout() {
   const current = projects.find((p) => p.id === pid);
 
   return (
-    <div className="flex min-h-screen">
+    <div className="flex h-screen overflow-hidden">
       <Sidebar
         projects={projects}
         groups={groups}
@@ -79,8 +79,8 @@ export function Layout() {
         groups={groups}
         pid={pid}
       />
-      <div className="flex min-w-0 flex-1 flex-col">
-        <div className="tp-topbar sticky top-0 z-30 flex h-12 items-center gap-2 border-b border-[var(--line)] px-4 text-[13px]">
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+        <div className="tp-topbar sticky top-0 z-30 flex h-12 shrink-0 items-center gap-2 border-b border-[var(--line)] px-4 text-[13px]">
           <button
             onClick={toggleSidebar}
             title={`${t(collapsed ? "Expand sidebar" : "Collapse sidebar")} ⌘B`}
@@ -152,8 +152,8 @@ export function Layout() {
             <NotificationBell />
           </div>
         </div>
-        <main className="flex-1 overflow-auto">
-          <div className="tp-page mx-auto w-full max-w-[80rem] px-6 py-7 lg:px-10 lg:py-9">
+        <main className="flex min-h-0 flex-1 flex-col overflow-hidden">
+          <div className="tp-page mx-auto flex h-full min-h-0 w-full max-w-[80rem] flex-col overflow-y-auto px-6 py-7 lg:px-10 lg:py-9">
             <Outlet />
           </div>
         </main>

@@ -111,3 +111,10 @@ project_settings_backup.json
 # 数据库迁移前快照（app/db.py 用 VACUUM INTO 生成，启动时自动写）。
 # 里面是整库副本，可能含加密凭据与账号信息，只应留在本机 —— 不入库。
 .potato-backups/
+
+# 本地 MSI 工具链（.NET SDK + WiX），从网络安装，不进仓库。
+.tools/
+
+# WiX 扩展缓存与 harvest 生成的组件清单：均由 scripts/build_msi.py 重建，不入库。
+.wix/
+installer/Components.wxs

@@ -39,36 +39,89 @@ WORK = ROOT / "build" / "desktop"
 NAME = "PotatoTest"
 
 
-# 打包后删掉**确定用不到**的运行时文件（2026-10-19）。
-# 每条都要能说清"为什么删了不会坏" —— 删错会让应用启动即崩，所以只挑有测试验证过的。
-_PRUNE = [
+# 打包后删掉**确定用不到**的运行时文件。
+# 业务代码、业务依赖、前端资源一律不动；只清缓存/调试符号/误打包的 UI 库。
+_PRUNE_FILES = [
     (
         "**/cv2/opencv_videoio_ffmpeg*.dll",
-        "cv2 的视频解码后端（约 29 MB）。OCR 只做图片解码，cv2 对它是**懒加载**："
-        "实测删掉后 import cv2 与 cvtColor 都正常，只有 VideoCapture 会失败（本产品不读视频）",
+        "cv2 的视频解码后端（约 29 MB）。OCR 只做图片解码，cv2 对它懒加载："
+        "实测删掉后 import cv2 与 cvtColor 正常，只有 VideoCapture 会失败（本产品不读视频）",
     ),
     (
         "**/playwright/driver/package/**/*.js.map",
-        "playwright 驱动的 JS source map（只给调试器用，运行时不需要）",
+        "playwright 驱动的 JS source map（只给调试器用）",
     ),
     (
         "**/playwright/driver/package/**/*.d.ts",
         "playwright 驱动的 TypeScript 类型声明（编译期用）",
     ),
+    ("**/*.pyc", "Python 字节码缓存（包内副本永远用不到，导入时会重新生成）"),
+    ("**/*.pdb", "调试符号（发行版不需要）"),
+    ("**/*.map", "Source Map（只给调试器用）"),
+    ("**/Qt5*.dll", "Qt 运行库（本项目用 pywebview/WebView2，不用 Qt）"),
+    ("**/Qt6*.dll", "Qt 运行库（本项目用 pywebview/WebView2，不用 Qt）"),
+    ("**/_tkinter*.pyd", "Tk 绑定（本项目不用 Tk）"),
+    ("**/tcl*.dll", "Tcl 运行库（本项目不用 Tk）"),
+    ("**/tk*.dll", "Tk 运行库（本项目不用 Tk）"),
+    ("**/web/dist/**/*.test.*", "前端测试文件（构建产物不应包含）"),
+    ("**/web/dist/**/*.spec.*", "前端测试文件（构建产物不应包含）"),
 ]
+
+_PRUNE_DIRS = {
+    "__pycache__": "Python 字节码缓存目录",
+    "PyQt5": "Qt 绑定（本项目不用 Qt）",
+    "PyQt6": "Qt 绑定（本项目不用 Qt）",
+    "PySide2": "Qt 绑定（本项目不用 Qt）",
+    "PySide6": "Qt 绑定（本项目不用 Qt）",
+    "shiboken2": "Qt 绑定的辅助库（本项目不用 Qt）",
+    "shiboken6": "Qt 绑定的辅助库（本项目不用 Qt）",
+    "tkinter": "Tk 标准库（本项目不用 Tk）",
+    "tcl": "Tcl 运行库目录（本项目不用 Tk）",
+    "node_modules": "前端依赖源码（构建产物不需要）",
+}
 
 
 def _prune_bundle(dist: Path) -> None:
     total = 0
-    for pat, why in _PRUNE:
+    removed = 0
+    for pat, why in _PRUNE_FILES:
+        n = 0
         for f in dist.glob(pat):
+            if not f.is_file():
+                continue
             try:
                 total += f.stat().st_size
                 f.unlink()
+                n += 1
             except Exception:  # noqa: BLE001
                 pass
-        print(f"  剔除 {pat}（{why}）")
-    print(f"  瘦身合计 {total / 1024 / 1024:.1f} MB")
+        removed += n
+        print(f"  剔除 {pat} x{n}（{why}）")
+
+    for name, why in _PRUNE_DIRS.items():
+        n = 0
+        for d in list(dist.rglob(name)):
+            if not d.is_dir():
+                continue
+            try:
+                size = sum(f.stat().st_size for f in d.rglob("*") if f.is_file())
+                shutil.rmtree(d)
+                total += size
+                n += 1
+            except Exception:  # noqa: BLE001
+                pass
+        removed += n
+        print(f"  剔除目录 {name} x{n}（{why}）")
+
+    print(f"  瘦身合计 {removed} 项 / {total / 1024 / 1024:.1f} MB")
+
+
+def _find_upx() -> str | None:
+    """优先用仓库内便携版，其次 PATH。找不到就只告警（PyInstaller 会跳过 UPX）。"""
+    local = sorted((ROOT / ".tools" / "upx").rglob("upx.exe"))
+    if local:
+        return str(local[0])
+    return shutil.which("upx")
 
 
 def _assert_embedding_model() -> None:
@@ -88,6 +141,24 @@ def _assert_embedding_model() -> None:
         )
 
 
+def _run_frontend_build() -> int:
+    """打包前强制重建前端。
+
+    `web/dist` 过期是最常见的发版事故：安装包里还是上一版界面，而且没有任何报错。
+    统一在这里跑，避免依赖人工记得先 `npm run build`。
+    """
+    npm = shutil.which("npm.cmd") or shutil.which("npm")
+    if not npm:
+        print("!! 找不到 npm —— 先装 Node.js，或用 --skip-web 复用现有 web/dist")
+        return 2
+    print("== 构建前端（npm run build）==")
+    rc = subprocess.call([npm, "run", "build"], cwd=str(ROOT / "web"))
+    if rc != 0:
+        print(f"!! 前端构建失败（退出码 {rc}）")
+    return rc
+
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="打包 Potato Test 桌面端")
     ap.add_argument(
@@ -95,7 +166,17 @@ def main() -> int:
         action="store_true",
         help="增量构建：跳过 PyInstaller --clean，仅供本机调试；发版仍用完整构建",
     )
+    ap.add_argument(
+        "--skip-web",
+        action="store_true",
+        help="跳过前端构建，直接复用现有 web/dist（仅供调试）",
+    )
     args = ap.parse_args()
+
+    if not args.skip_web:
+        rc = _run_frontend_build()
+        if rc != 0:
+            return rc
 
     _assert_embedding_model()  # 先查模型，别白跑 4 分钟打包
     dist = ROOT / "web" / "dist"
@@ -109,81 +190,30 @@ def main() -> int:
         print("!! 没装 PyInstaller：.venv\\Scripts\\python -m pip install pyinstaller")
         return 2
 
-    sep = os.pathsep  # Windows 是 ';'
+    upx = _find_upx()
+    if upx:
+        os.environ["PATH"] = str(Path(upx).parent) + os.pathsep + os.environ.get("PATH", "")
+        # UPX 要在 PyInstaller 的 bincache 里写临时文件；部分机器（杀软/受控文件夹访问）
+        # 会拒绝在 %LOCALAPPDATA%\pyinstaller 下创建文件，导致全部压缩失败。
+        # 把缓存放到仓库内，既避开该限制，也方便清理。
+        os.environ.setdefault("PYINSTALLER_CONFIG_DIR", str(ROOT / ".tools" / "pyinstaller-cache"))
+        print(f"== UPX：{upx} ==")
+        print(f"== PyInstaller 缓存：{os.environ['PYINSTALLER_CONFIG_DIR']} ==")
+    else:
+        print("!! 未找到 UPX —— upx=True 会被静默跳过，本次不做二进制压缩")
+
+    # 维护版 spec 里固定了 excludes / upx / upx_exclude；这里只传路径和清理开关。
     cmd = [
         sys.executable,
         "-m",
         "PyInstaller",
         "--noconfirm",
         *([] if args.fast else ["--clean"]),
-        "--name",
-        NAME,
-        "--windowed",
         "--distpath",
         str(OUT),
         "--workpath",
         str(WORK),
-        "--specpath",
-        str(WORK),
-        # 前端构建产物（app 找的是 web/dist）
-        "--add-data",
-        f"{dist}{sep}web/dist",
-        # 静态分析看不见的：playwright 的 node driver / browser_use 的动态 import
-        "--collect-all",
-        "playwright",
-        "--collect-all",
-        "browser_use",
-        # pywebview 的 Windows 后端（WebView2）
-        "--collect-all",
-        "webview",
-        # ★ 排除 imageio_ffmpeg（2026-10-19）：它自带一个 ffmpeg 二进制，占 **83 MB**，
-        # 而本项目、browser_use、playwright 都**没有引用它**（grep 确认）。
-        # 视频录制走 playwright 自己，用不到这个可执行文件。
-        "--exclude-module",
-        "imageio_ffmpeg",
-        "--exclude-module",
-        "imageio",
-        # 向量模型（2026-10-19）：bge-small-zh-v1.5 的 ONNX 文件是**数据**，
-        # PyInstaller 静态分析看不见 —— 不加 --add-data 的话，装出来的应用
-        # `embeddings.available()` 永远 False，检索会静默退回关键词（不报错，很难发现）。
-        "--add-data",
-        f"{ROOT / 'app' / 'embedding_models'}{os.pathsep}app/embedding_models",
-        # OCR（2026-10-17）：模型文件是数据，静态分析看不到 —— 不 collect-all 的话
-        # 装到别人机器上会"能跑但 OCR 报找不到模型"
-        "--collect-all",
-        "rapidocr",
-        "--collect-all",
-        "onnxruntime",
-        "--collect-all",
-        "pymupdf",
-        "--hidden-import",
-        "cv2",
-        # uvicorn 按字符串选实现
-        "--hidden-import",
-        "uvicorn.logging",
-        "--hidden-import",
-        "uvicorn.loops.auto",
-        "--hidden-import",
-        "uvicorn.loops.asyncio",
-        "--hidden-import",
-        "uvicorn.protocols.http.auto",
-        "--hidden-import",
-        "uvicorn.protocols.http.h11_impl",
-        "--hidden-import",
-        "uvicorn.protocols.websockets.auto",
-        "--hidden-import",
-        "uvicorn.lifespan.on",
-        "--hidden-import",
-        "uvicorn.lifespan.off",
-        # app 里用到但可能被漏掉的
-        "--hidden-import",
-        "aiosqlite",
-
-        "--hidden-import",
-        "pythonnet",
-        "--hidden-import",
-        "clr_loader",
-        str(ROOT / "desktop.py"),
+        str(ROOT / "PotatoTest.spec"),
     ]
 
     print("== 开始打包 ==" + ("（增量 --fast）" if args.fast else "（完整 clean）"))

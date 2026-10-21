@@ -13,8 +13,13 @@
 ; 这不是 .iss 能改的：PrivilegesRequired=lowest、[Code]、UseSetupLdr=no 都改变不了
 ; （UseSetupLdr=no 还会产成 setup.exe + *.bin 多文件，不能单文件分发）。
 ;
-; NSIS 安装器直接从自身 exe 流式读取数据写入目标目录，**不经过 %TEMP%**，且
-; RequestExecutionLevel user 不需要管理员。这是用户要求的"改代码、不提权"方案。
+; NSIS 安装器在**非 solid 压缩**下直接从自身 exe 流式读取数据写入目标目录，
+; **不经过 %TEMP%**，且 RequestExecutionLevel user 不需要管理员。
+;
+; ★ 绝对不要恢复 `SetCompressor /SOLID`：solid 压缩必须在运行时把整块数据缓存到
+;   %TEMP% 下的临时文件（大小接近解压后的全部内容）。用户机器 TEMP 不可写时，
+;   安装器会在启动阶段报 "Error writing temporary file. Make sure your temp
+;   folder is valid" —— 和 Inno 的 SetupLdr 是同一个坑。
 ;
 ; ★ 不要在这里使用任何 NSIS 插件（nsExec / InetC / nsProcess / System ...）：
 ;   插件必须先解压到 $PLUGINSDIR（又是临时目录），会把同一条路走回去。
@@ -39,7 +44,7 @@ Unicode true
 
 !define AppName "Potato Test"
 !define AppExe "PotatoTest.exe"
-!define AppVer "1.0.6"
+!define AppVer "1.0.7"
 !define AppRegKey "Software\PotatoTest"
 !define UninstRegKey "Software\Microsoft\Windows\CurrentVersion\Uninstall\PotatoTest"
 ; 旧 Inno 版安装器写入的卸载键，升级时清掉
@@ -54,7 +59,9 @@ InstallDir "$LOCALAPPDATA\Programs\PotatoTest"
 InstallDirRegKey HKCU "${AppRegKey}" "InstallDir"
 RequestExecutionLevel user
 
-SetCompressor /SOLID lzma
+; 非 solid：每个文件独立压缩，解压时直接写入目标目录，不创建临时大文件。
+; 安装包会比 solid 略大，但运行期完全不依赖 %TEMP%。
+SetCompressor lzma
 SetCompressorDictSize 32
 
 ; ── 界面 ───────────────────────────────────────────────────────────────────
@@ -141,8 +148,26 @@ Section "Uninstall"
   DeleteRegKey HKCU "${AppRegKey}"
 SectionEnd
 
+; ── 卸载初始化 ────────────────────────────────────────────────────────────
+Function un.onInit
+  ; 清理安装阶段使用的自定义临时目录。
+  ; 注意：卸载器默认会先把自身复制到 %TEMP% 再运行，TEMP 不可写时卸载器
+  ; 也会在进入本函数之前失败；此时需先修复 TEMP，或用参数 `_?=$INSTDIR`
+  ; 直接就地运行 uninstall.exe。
+  RMDir /r "$LOCALAPPDATA\PotatoTest\Temp"
+FunctionEnd
+
 ; ── 初始化 ────────────────────────────────────────────────────────────────
 Function .onInit
+  ; 防御：把后续相对路径固定到一个确定可写的 per-user 目录，先建目录再切换。
+  ; ★ 重要：NSIS 的 exehead 在**进入 .onInit 之前**就会调用 GetTempPath()，
+  ;   并在 TEMP 下创建/删除一个探测文件；TEMP 不可写时会直接弹出
+  ;   "Error writing temporary file. Make sure your temp folder is valid"。
+  ;   所以下面的 SetOutPath 无法修复启动阶段的报错，只保证安装器后续自身
+  ;   的临时写入不落到系统 %TEMP%。真正绕过启动检查的方法：先用
+  ;   Run-Setup-SafeTemp.cmd 把 TEMP/TMP 指到可写目录，再启动安装器。
+  CreateDirectory "$LOCALAPPDATA\PotatoTest\Temp"
+  SetOutPath "$LOCALAPPDATA\PotatoTest\Temp"
   ; 旧版 1.0.5 更新器用 Inno 的参数启动新安装器。识别后转成 NSIS 静默模式，
   ; 否则升级会弹出完整向导、卡在等用户点击。
   ${GetParameters} $R0

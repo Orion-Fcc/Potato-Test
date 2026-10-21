@@ -328,14 +328,14 @@ export function Sidebar({
   return (
     <aside
       className={clsx(
-        "tp-sidebar flex shrink-0 flex-col border-r border-[var(--line)] transition-[width] duration-150",
+        "tp-sidebar flex h-full min-h-0 shrink-0 flex-col border-r border-[var(--line)] transition-[width] duration-150",
         collapsed ? "w-[60px]" : "w-[218px]",
       )}
     >
       <Link
         to="/"
         className={clsx(
-          "flex h-14 items-center gap-2.5 outline-none",
+          "flex h-14 shrink-0 items-center gap-2.5 outline-none",
           collapsed ? "justify-center px-0" : "px-3.5",
         )}
       >
@@ -374,7 +374,7 @@ export function Sidebar({
       </button>
 
 
-      <nav className={clsx("flex-1 overflow-y-auto pb-2", collapsed ? "px-2" : "px-3")}>
+      <nav className={clsx("min-h-0 flex-1 overflow-y-auto pb-2", collapsed ? "px-2" : "px-3")}>
         {pid == null ? (
           <>
             <Item to="/" active Icon={LayoutGrid} label={t("Projects")} collapsed={collapsed} />
@@ -511,7 +511,7 @@ export function Sidebar({
       </nav>
 
 
-      <div className={clsx("border-t border-[var(--line)]", collapsed ? "p-2" : "p-3")}>
+      <div className={clsx("shrink-0 border-t border-[var(--line)]", collapsed ? "p-2" : "p-3")}>
         {authEnabled && user ? (
           <AccountMenu user={user} collapsed={collapsed} />
         ) : (

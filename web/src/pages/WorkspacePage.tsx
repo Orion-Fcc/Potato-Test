@@ -37,7 +37,7 @@ export function WorkspacePage() {
       orientation="horizontal"
       defaultLayout={defaultLayout}
       onLayoutChanged={onLayoutChanged}
-      className="tp-workspace min-h-[calc(100vh-7rem)]"
+      className="tp-workspace h-full min-h-0 flex-1 overflow-hidden"
     >
       <Panel id="docs" defaultSize="65%" minSize="38%" className="min-w-0 pr-1.5">
         <DocsPage />

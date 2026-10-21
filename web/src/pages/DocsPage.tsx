@@ -459,11 +459,11 @@ export function DocsPage() {
   };
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col gap-3">
+    <div className="flex h-full min-h-0 flex-1 flex-col gap-3">
       {/* 顶部：文档 Tabs（左）+ 操作区（右，固定不换行）。
           2026-10-21 用户要求改回横向 Tabs。文档多时 TabsList 横向滚动，
           不会把右侧操作区挤出视口；切换只换 `active`，编辑器由 key 强制重挂载。 */}
-      <div className="flex flex-wrap items-center gap-2 rounded-lg border border-[var(--line)] bg-[var(--panel)] px-2 py-1.5">
+      <div className="flex shrink-0 flex-wrap items-center gap-2 rounded-lg border border-[var(--line)] bg-[var(--panel)] px-2 py-1.5">
         <Tabs
           value={active ? `${active.kind}:${active.id}` : ""}
           onValueChange={(v) => {
@@ -589,7 +589,7 @@ export function DocsPage() {
         </div>
       </div>
 
-      <div className="min-w-0 flex-1 space-y-3">
+      <div className="min-h-0 min-w-0 flex-1 space-y-3 overflow-y-auto pb-12 pr-0.5">
           {/* ★ 这个空态**实际上到不了**（2026-10-12 实测确认）：后端
               `list_project_docs` 总会补上「项目总览 / 需求分析 / 流程图」三个占位，
               所以 `docs` 永远非空、`active` 也永远有值 —— 我改了这里的文案之后
@@ -791,8 +791,6 @@ export function DocsPage() {
               )}
             </>
           )}
-      </div>
-
       {/* 人工确认过的通过率（2026-10-12）。
           只认人工改判过的结果 —— 自动判定里相当一部分不是产品结论。 */}
       {cov && cov.modules.length > 0 && <CoveragePanel cov={cov} />}
@@ -801,6 +799,7 @@ export function DocsPage() {
           放在文档**下面**：这些是从库里算出来的事实，属于"读完说明书后要查的东西"，
           而不是"打开页面先看的东西"。默认全部收起，需要时再展开。 */}
       <InsightsPanel pid={pid} />
+      </div>
     </div>
   );
 }

@@ -368,7 +368,7 @@ function AssistantPanel({ pid }: { pid: number }) {
   return (
     <aside
       className={
-        "tp-ai-sidebar flex h-[calc(100vh-8.5rem)] min-h-[520px] flex-col overflow-hidden rounded-lg border bg-[var(--panel)] " +
+        "tp-ai-sidebar flex h-full min-h-0 flex-col overflow-hidden rounded-lg border bg-[var(--panel)] " +
         (drag ? "border-brand-300 ring-2 ring-brand-100" : "border-[var(--line)]")
       }
       onDragOver={(e) => {
@@ -385,7 +385,7 @@ function AssistantPanel({ pid }: { pid: number }) {
         void addFiles(Array.from(e.dataTransfer?.files ?? []));
       }}
     >
-      <div className="flex items-center gap-2 border-b border-[var(--line)] px-3 py-2.5">
+      <div className="flex shrink-0 items-center gap-2 border-b border-[var(--line)] px-3 py-2.5">
         <Sparkles className="h-4 w-4 shrink-0 text-brand-600" />
         <span className="shrink-0 text-[13px] font-medium text-ink-900">{t("AI 协同助手")}</span>
         <span
@@ -408,7 +408,7 @@ function AssistantPanel({ pid }: { pid: number }) {
         )}
       </div>
 
-      <div className="flex flex-wrap items-center gap-1.5 border-b border-[var(--line)] px-3 py-1.5 text-[11px] text-ink-400">
+      <div className="flex shrink-0 flex-wrap items-center gap-1.5 border-b border-[var(--line)] px-3 py-1.5 text-[11px] text-ink-400">
         <select
           value={mode}
           onChange={(e) => changeMode(e.target.value === "global" ? "global" : "doc")}
@@ -446,7 +446,7 @@ function AssistantPanel({ pid }: { pid: number }) {
         )}
       </div>
 
-      <div ref={scrollRef} className="flex-1 space-y-3 overflow-y-auto px-3 py-3">
+      <div ref={scrollRef} className="min-h-0 flex-1 space-y-3 overflow-y-auto px-3 py-3">
         {messages.length === 0 && !busy && (
           <div className="rounded-lg border border-dashed border-[var(--line)] px-3 py-5 text-center text-[12px] leading-relaxed text-ink-400">
             <p>
@@ -563,7 +563,7 @@ function AssistantPanel({ pid }: { pid: number }) {
         )}
       </div>
 
-      <div className="border-t border-[var(--line)] p-2.5">
+      <div className="shrink-0 border-t border-[var(--line)] p-2.5">
         {mode === "global" && atts.length > 0 && (
           <div className="mb-1.5 flex flex-wrap gap-1.5">
             {atts.map((a, i) => (

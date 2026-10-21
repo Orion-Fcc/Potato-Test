@@ -3,14 +3,14 @@
 ## 为什么需要这个脚本
 
 应用的「检查更新」读的是 **GitHub Releases 的 latest**。要让这个功能真的工作，
-GitHub 上必须有一个**带 `PotatoTest-Setup-*.exe` 资产**的 Release。手工点网页很容易漏：
+GitHub 上必须有一个**带 `PotatoTest-Setup-*.msi` 资产**的 Release。手工点网页很容易漏：
 忘了改版本号、忘了传资产、资产名写错 —— 任何一处错，用户的"检查更新"就会一直说
 "已是最新"（或者一直提示更新但下不了）。
 
 ## 用法
 
     set GITHUB_TOKEN=ghp_xxxxxxxx          &:: 需要 repo 权限的 token
-    python scripts\\release.py --bump 1.0.1  &:: 只改版本号（三处一起改）
+    python scripts\\release.py --bump 1.0.1  &:: 只改版本号（四处一起改）
     python scripts\\release.py --publish     &:: 用当前版本发 Release + 传安装包
     python scripts\\release.py --publish --notes-file notes.md
     python scripts\\release.py --check           &:: 只做发布前检查（token / 仓库 / Release / 资产）
@@ -18,11 +18,11 @@ GitHub 上必须有一个**带 `PotatoTest-Setup-*.exe` 资产**的 Release。�
 
 ## 每次发布上传两个资产
 
-`PotatoTest-Setup-x.y.z.exe` + 同名 `.sha256`。后者不是附赠品：`app/updater.py`
+`PotatoTest-Setup-x.y.z.msi` + 同名 `.sha256`。后者不是附赠品：`app/updater.py`
 拿到安装包后**必须**比对哈希，校验文件缺失或对不上就拒绝执行。`--publish` 会
 按"先校验文件、后安装包"的顺序上传，避免中途断掉留下"有包无哈希"的状态。
 
-## 三处版本号必须一致
+## 四处版本号必须一致
 
 `app/version.py` / `pyproject.toml` / `installer/potato.nsi` ——
 `tests/test_updater.py` 会检查，这里也检查一遍（发布前拦住比事后查好）。
@@ -45,6 +45,7 @@ ROOT = Path(__file__).resolve().parents[1]
 VERSION_PY = ROOT / "app" / "version.py"
 PYPROJECT = ROOT / "pyproject.toml"
 NSI = ROOT / "installer" / "potato.nsi"
+WEB_PKG = ROOT / "web" / "package.json"
 GITHUB_API = "https://api.github.com"
 
 
@@ -71,6 +72,7 @@ def bump(new: str) -> None:
         (VERSION_PY, r'(APP_VERSION\s*=\s*)"[^"]+"', rf'\g<1>"{new}"'),
         (PYPROJECT, r'(?m)^version = "[^"]+"$', f'version = "{new}"'),
         (NSI, r'(!define\s+AppVer\s+)"[^"]+"', rf'\g<1>"{new}"'),
+        (WEB_PKG, r'("version"\s*:\s*)"[^"]+"', rf'\g<1>"{new}"'),
     ):
         text = path.read_text(encoding="utf-8")
         text2, n = re.subn(pattern, repl, text, count=1)
@@ -82,14 +84,16 @@ def bump(new: str) -> None:
 
 
 def verify() -> str:
-    """三处一致才算过 —— 这是"检查更新"能不能正确工作的前提。"""
+    """四处一致才算过 —— 这是"检查更新"能不能正确工作的前提。"""
     v = _read_version()
     py = re.search(r'(?m)^version = "([^"]+)"', PYPROJECT.read_text(encoding="utf-8"))
     nsi = re.search(r'!define\s+AppVer\s+"([^"]+)"', NSI.read_text(encoding="utf-8"))
-    ok = py and nsi and py.group(1) == v and nsi.group(1) == v
+    pkg = re.search(r'"version"\s*:\s*"([^"]+)"', WEB_PKG.read_text(encoding="utf-8"))
+    ok = py and nsi and pkg and py.group(1) == v and nsi.group(1) == v and pkg.group(1) == v
     if not ok:
         raise SystemExit(
-            f"版本号不一致：version.py={v} pyproject={py and py.group(1)} nsi={nsi and nsi.group(1)}"
+            f"版本号不一致：version.py={v} pyproject={py and py.group(1)} "
+            f"nsi={nsi and nsi.group(1)} web/package.json={pkg and pkg.group(1)}"
         )
     print(f"版本号一致：{v}")
     return v
@@ -261,7 +265,7 @@ def preflight(require_installer: bool = False) -> dict:
     else:
         print(f"  Release {tag} 尚未创建")
 
-    installer = ROOT / "dist_desktop" / "installer" / f"PotatoTest-Setup-{v}.exe"
+    installer = ROOT / "dist_desktop" / "installer" / f"PotatoTest-Setup-{v}.msi"
     if require_installer:
         if not installer.is_file():
             raise SystemExit(f"找不到安装包：{installer}\n先打包，或确认当前版本号是 {v}。")
@@ -345,7 +349,7 @@ def publish(notes: str, replace: bool = False) -> None:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Potato Test 发布脚本")
-    ap.add_argument("--bump", metavar="X.Y.Z", help="改版本号（三处一起改）")
+    ap.add_argument("--bump", metavar="X.Y.Z", help="改版本号（四处一起改）")
     ap.add_argument("--check", action="store_true", help="只做发布前检查（token、仓库、Release、资产）")
     ap.add_argument("--publish", action="store_true", help="发 Release 并上传安装包")
     ap.add_argument("--replace", action="store_true", help="覆盖 Release 里已有的同名资产")

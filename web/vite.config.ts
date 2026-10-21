@@ -14,6 +14,8 @@ export default defineConfig({
     },
   },
   build: {
+    // 发行包不需要 source map：不生成 .map，避免体积与源码泄露。
+    sourcemap: false,
     // Keep the app shell small: routes are lazy (see main.tsx), and vendor libs
     // are split so a change to app code never invalidates the vendor cache.
     //

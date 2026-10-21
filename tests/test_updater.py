@@ -2,9 +2,9 @@
 
 这组守的是四件事，缺一条这个功能就会变成风险：
 
-1. **版本号只有一个源** —— 三处（`app/version.py` / `pyproject.toml` /
-   `installer/potato.nsi`）不一致，"检查更新"就会永远判断错；
-2. **下载白名单不能漏** —— 这个接口会下载并执行一个 exe，白名单漏了就是远程代码执行；
+1. **版本号只有一个源** —— 四处（`app/version.py` / `pyproject.toml` /
+   `installer/potato.nsi` / `web/package.json`）不一致，"检查更新"就会永远判断错；
+2. **下载白名单不能漏** —— 这个接口会下载并执行一个安装包，白名单漏了就是远程代码执行；
 3. **查不到更新不能算错误** —— 断网 / 还没发 Release 都是正常状态，不该让应用显得坏了；
 4. **哈希对不上就不执行**（2026-10-20）—— 校验清单缺失、格式不对、哈希不一致，
    任何一种都必须拒装并删掉下载物。否则这个接口就是一个"下载什么就执行什么"的后门。
@@ -51,6 +51,13 @@ def test_version_matches_installer():
     assert m.group(1) == APP_VERSION, "安装包与 app/version.py 版本不一致"
 
 
+def test_version_matches_web_package():
+    text = (ROOT / "web" / "package.json").read_text(encoding="utf-8")
+    m = re.search(r'"version"\s*:\s*"([^"]+)"', text)
+    assert m, "web/package.json 里没有 version"
+    assert m.group(1) == APP_VERSION, "web/package.json 与 app/version.py 版本不一致"
+
+
 # ---- 2. 版本比较 ------------------------------------------------------------
 @pytest.mark.parametrize(
     "latest,current,expect",
@@ -68,14 +75,14 @@ def test_is_newer(latest, current, expect):
 
 # ---- 3. 下载白名单 ----------------------------------------------------------
 def test_download_whitelist_accepts_own_release():
-    url = f"https://github.com/{GITHUB_REPO}/releases/download/v1.0.1/PotatoTest-Setup-1.0.1.exe"
+    url = f"https://github.com/{GITHUB_REPO}/releases/download/v1.0.1/PotatoTest-Setup-1.0.1.msi"
     assert updater.validate_download_url(url) == url
 
 
 @pytest.mark.parametrize(
     "url",
     [
-        "https://evil.example.com/PotatoTest-Setup-1.0.1.exe",  # 别的域名
+        "https://evil.example.com/PotatoTest-Setup-1.0.1.msi",  # 别的域名
         f"https://github.com/someone/{GITHUB_REPO}/releases/download/v1/PotatoTest-Setup-1.exe",
         f"https://github.com/{GITHUB_REPO}/releases/download/v1.0.1/payload.exe",  # 名字不对
         f"https://github.com/{GITHUB_REPO}/releases/download/v1.0.1/notes.txt",
@@ -91,10 +98,10 @@ def test_download_whitelist_rejects_anything_else(url):
 def test_pick_asset_ignores_unrelated_files():
     assets = [
         {"name": "checksums.txt", "browser_download_url": "x"},
-        {"name": "PotatoTest-Setup-1.0.1.exe", "browser_download_url": "y"},
+        {"name": "PotatoTest-Setup-1.0.1.msi", "browser_download_url": "y"},
         {"name": "source.zip", "browser_download_url": "z"},
     ]
-    assert updater._pick_asset(assets)["name"] == "PotatoTest-Setup-1.0.1.exe"
+    assert updater._pick_asset(assets)["name"] == "PotatoTest-Setup-1.0.1.msi"
     assert updater._pick_asset([{"name": "a.txt"}]) is None
 
 
@@ -152,8 +159,8 @@ def test_newer_release_is_detected(monkeypatch):
                 "html_url": "https://github.com/x/y/releases/tag/v9.9.9",
                 "assets": [
                     {
-                        "name": "PotatoTest-Setup-9.9.9.exe",
-                        "browser_download_url": f"https://github.com/{GITHUB_REPO}/releases/download/v9.9.9/PotatoTest-Setup-9.9.9.exe",
+                        "name": "PotatoTest-Setup-9.9.9.msi",
+                        "browser_download_url": f"https://github.com/{GITHUB_REPO}/releases/download/v9.9.9/PotatoTest-Setup-9.9.9.msi",
                     }
                 ],
             },
@@ -164,7 +171,7 @@ def test_newer_release_is_detected(monkeypatch):
     out = asyncio.run(_run_check())
     assert out["has_update"] is True
     assert out["latest"] == "9.9.9"
-    assert out["download_url"].endswith(".exe")
+    assert out["download_url"].endswith(".msi")
     assert out["error"] is None
 
 
@@ -182,7 +189,7 @@ def test_network_failure_is_soft(monkeypatch):
 
 
 # ---- 5. 安装包完整性校验（2026-10-20） --------------------------------------
-_SETUP_URL = f"https://github.com/{GITHUB_REPO}/releases/download/v1.0.1/PotatoTest-Setup-1.0.1.exe"
+_SETUP_URL = f"https://github.com/{GITHUB_REPO}/releases/download/v1.0.1/PotatoTest-Setup-1.0.1.msi"
 _PAYLOAD = b"MZ-fake-installer-bytes" * 100
 _DIGEST = hashlib.sha256(_PAYLOAD).hexdigest()
 
@@ -209,7 +216,7 @@ def test_checksum_url_is_derived_from_installer():
 @pytest.mark.parametrize(
     "url",
     [
-        "https://evil.example.com/PotatoTest-Setup-1.0.1.exe",
+        "https://evil.example.com/PotatoTest-Setup-1.0.1.msi",
         f"https://github.com/{GITHUB_REPO}/releases/download/v1.0.1/payload.exe",
     ],
 )
@@ -221,7 +228,7 @@ def test_checksum_url_rejects_untrusted_installers(url):
 @pytest.mark.parametrize(
     "text,expect",
     [
-        (f"{_DIGEST}  PotatoTest-Setup-1.0.1.exe\n", _DIGEST),  # sha256sum 格式
+        (f"{_DIGEST}  PotatoTest-Setup-1.0.1.msi\n", _DIGEST),  # sha256sum 格式
         (_DIGEST.upper(), _DIGEST),  # 统一小写
         (f"sha256: {_DIGEST}\n", _DIGEST),
     ],
@@ -243,7 +250,7 @@ def test_download_installer_accepts_matching_hash(monkeypatch, tmp_path):
 
     assert out.is_file()
     assert out.read_bytes() == _PAYLOAD
-    assert out.name == "PotatoTest-Setup-1.0.1.exe"
+    assert out.name == "PotatoTest-Setup-1.0.1.msi"
     assert not (tmp_path / f"{out.name}.part").exists()
 
 
@@ -254,8 +261,8 @@ def test_download_installer_rejects_wrong_hash(monkeypatch, tmp_path):
     with pytest.raises(ValueError, match="校验失败"):
         asyncio.run(updater.download_installer(_SETUP_URL, tmp_path))
 
-    assert not (tmp_path / "PotatoTest-Setup-1.0.1.exe").exists()
-    assert not (tmp_path / "PotatoTest-Setup-1.0.1.exe.part").exists()
+    assert not (tmp_path / "PotatoTest-Setup-1.0.1.msi").exists()
+    assert not (tmp_path / "PotatoTest-Setup-1.0.1.msi.part").exists()
 
 
 def test_download_installer_rejects_missing_checksum(monkeypatch, tmp_path):
@@ -265,8 +272,8 @@ def test_download_installer_rejects_missing_checksum(monkeypatch, tmp_path):
     with pytest.raises(ValueError, match="取不到"):
         asyncio.run(updater.download_installer(_SETUP_URL, tmp_path))
 
-    assert not (tmp_path / "PotatoTest-Setup-1.0.1.exe").exists()
-    assert not (tmp_path / "PotatoTest-Setup-1.0.1.exe.part").exists()
+    assert not (tmp_path / "PotatoTest-Setup-1.0.1.msi").exists()
+    assert not (tmp_path / "PotatoTest-Setup-1.0.1.msi.part").exists()
 
 
 def test_download_installer_rejects_untrusted_url(monkeypatch, tmp_path):
@@ -282,7 +289,7 @@ def test_download_installer_rejects_untrusted_url(monkeypatch, tmp_path):
     with pytest.raises(ValueError):
         asyncio.run(
             updater.download_installer(
-                "https://evil.example.com/PotatoTest-Setup-1.0.1.exe", tmp_path
+                "https://evil.example.com/PotatoTest-Setup-1.0.1.msi", tmp_path
             )
         )
     assert called["n"] == 0
@@ -298,7 +305,7 @@ def test_install_runs_in_background_and_reports_progress(monkeypatch, tmp_path):
         on_progress(5, 10)
         on_verify()
         seen.append(updater.install_status())
-        return tmp_path / "PotatoTest-Setup-1.0.1.exe"
+        return tmp_path / "PotatoTest-Setup-1.0.1.msi"
 
     monkeypatch.setattr(updater, "download_installer", _fake_dl)
     monkeypatch.setattr(
@@ -320,7 +327,7 @@ def test_install_runs_in_background_and_reports_progress(monkeypatch, tmp_path):
     assert out["phase"] == "done"
     assert out["percent"] == 100
     assert seen[0]["phase"] == "verifying"
-    assert seen[-1]["launched"].endswith(".exe")
+    assert seen[-1]["launched"].endswith(".msi")
 
 
 def test_install_failure_is_reported_not_raised(monkeypatch, tmp_path):
@@ -372,7 +379,7 @@ def test_download_failure_keeps_partial_file(monkeypatch, tmp_path):
     monkeypatch.setattr(updater, "_fetch_checksum", _fake_checksum)
     monkeypatch.setattr(updater, "_download_resumable", _boom)
 
-    part = tmp_path / "PotatoTest-Setup-1.0.1.exe.part"
+    part = tmp_path / "PotatoTest-Setup-1.0.1.msi.part"
     part.write_bytes(b"half")
 
     with pytest.raises(httpx.ConnectError):
@@ -388,7 +395,7 @@ def test_expand_download_urls_official_last_and_trusted():
     assert len(urls) == len(updater._UPDATE_MIRRORS) + 1
 
     with pytest.raises(ValueError):
-        updater.expand_download_urls("https://evil.example.com/PotatoTest-Setup-1.0.1.exe")
+        updater.expand_download_urls("https://evil.example.com/PotatoTest-Setup-1.0.1.msi")
 
 
 def test_download_resumable_falls_back_to_official(monkeypatch, tmp_path):

@@ -9,9 +9,9 @@ Release 的 `latest` 接口天然给到"版本号 + 更新说明 + 资产下载�
 1. **只有桌面版能一键安装**。网页版跑在服务器上 —— 它读不到用户的文件系统，
    也不该能往用户机器上装东西。`install_supported()` 用 `sys.frozen` 判断。
 2. **只允许从本仓库的 Release 下载，且必须校验 SHA-256**。这个接口会
-   "下载一个 exe 并执行"，如果不校验来源与内容，它就等于一个远程代码执行入口。
+   "下载一个 MSI 并交给 msiexec 执行"，如果不校验来源与内容，它就等于一个远程代码执行入口。
    所以下载地址必须匹配 `https://github.com/<本仓库>/releases/download/`，资产名
-   必须是 `PotatoTest-Setup-*.exe`，而且同一次 Release 里必须有配套的
+   必须是 `PotatoTest-Setup-*.msi`，而且同一次 Release 里必须有配套的
    `<安装包名>.sha256`（`scripts/release.py` 会生成并先上传它）。地址不对、校验
    文件缺失、哈希对不上 —— 一律拒绝，不做任何"尽力而为"。
 
@@ -44,9 +44,9 @@ log = logging.getLogger("potato.updater")
 API = "https://api.github.com"
 _TIMEOUT = 8.0  # 检查更新是"顺手看一眼"，不能拖住界面
 _CACHE_TTL = timedelta(minutes=10)
-_ASSET_RE = re.compile(r"^PotatoTest-Setup-.*\.exe$", re.I)
+_ASSET_RE = re.compile(r"^PotatoTest-Setup-.*\.msi$", re.I)
 # 校验文件与安装包**同名**，只多一个 .sha256 后缀（release.py 与本文件的约定）。
-_CHECKSUM_RE = re.compile(r"^PotatoTest-Setup-.*\.exe\.sha256$", re.I)
+_CHECKSUM_RE = re.compile(r"^PotatoTest-Setup-.*\.msi\.sha256$", re.I)
 # 下载白名单：只认本仓库 release 资产（GitHub 会 302 到 objects.githubusercontent.com，
 # httpx 跟随重定向，但那已经是我们放行的地址之后的跳转，可以接受）
 _ALLOWED_PREFIX = f"https://github.com/{GITHUB_REPO}/releases/download/"
@@ -181,7 +181,7 @@ async def check(force: bool = False) -> dict:
 
 
 def validate_download_url(url: str) -> str:
-    """★ 下载白名单。这里放行 = 允许在用户机器上执行一个 exe，所以只认死地址。"""
+    """★ 下载白名单。这里放行 = 允许在用户机器上执行一个 MSI，所以只认死地址。"""
     u = (url or "").strip()
     if not u.startswith(_ALLOWED_PREFIX):
         raise ValueError("更新包地址不在本仓库的 Release 里，已拒绝下载")
@@ -488,9 +488,9 @@ def launch_installer(path: Path) -> None:
     这 6 秒里前端会关掉窗口 → 进程退出 → 安装器才动手。
     `DETACHED_PROCESS` 保证应用退出后安装器不被一起回收。
     """
-    # NSIS 的静默参数是 /S（大小写敏感）。旧版 Inno 安装器用的是
-    # /VERYSILENT，新安装器在 .onInit 里也识别它 —— 这条升级链不能断。
-    cmd = f'timeout /t 6 /nobreak >nul & "{path}" /S'
+    # MSI 静默安装：/qn 不显示界面，/norestart 不自动重启。
+    # per-user 安装不需要管理员权限，因此不会弹 UAC。
+    cmd = f'timeout /t 6 /nobreak >nul & msiexec /i "{path}" /qn /norestart'
     flags = 0
     if sys.platform == "win32":
         flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore[attr-defined]

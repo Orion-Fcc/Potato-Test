@@ -1,0 +1,79 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+  <!-- Potato Test per-user MSI（2026-10-21）。
+       设计约束：
+       * 安装到 %LOCALAPPDATA%\Programs\PotatoTest，不弹 UAC；
+       * 不做任何自定义动作 —— 用户 TEMP 不可写也不影响安装；
+       * UpgradeCode 固定，后续版本靠 MajorUpgrade 覆盖升级；
+       * 旧 NSIS / Inno 的卸载注册项在安装时清掉，避免控制面板出现两个条目。 -->
+  <Package
+      Name="Potato Test"
+      Manufacturer="Potato Test"
+      Version="$(var.Version)"
+      UpgradeCode="{5B0E2F5A-3C8D-4E71-9A62-7D4C1B8E0A93}"
+      Language="2052"
+      Scope="perUser"
+      Compressed="yes"
+      InstallerVersion="500">
+
+    <MajorUpgrade
+        AllowSameVersionUpgrades="yes"
+        DowngradeErrorMessage="已安装更高版本的 Potato Test，请先卸载。" />
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+
+    <!-- 使用中文标准界面：FilesInUse / MsiRMFilesInUse（重启管理器）对话框
+         均使用 zh-CN 资源，按钮显示「确定 / 取消」。 -->
+    <ui:WixUI Id="WixUI_InstallDir" InstallDirectory="INSTALLDIR" />
+
+    <!-- 重启管理器对话框默认选中「不关闭应用程序」：绝不由安装程序结束
+         PotatoTest.exe，用户保存并手动关闭后点「确定」即可继续。 -->
+    <SetProperty Id="WixUIRMOption" Value="DontUseRM" Before="ExecuteAction" Sequence="ui" />
+
+    <Icon Id="AppIcon" SourceFile="$(var.SourceDir)\PotatoTest.exe" />
+    <Property Id="ARPPRODUCTICON" Value="AppIcon" />
+
+    <StandardDirectory Id="LocalAppDataFolder">
+      <Directory Id="ProgramsFolder" Name="Programs">
+          <Directory Id="INSTALLDIR" Name="PotatoTest">
+
+            <Component Id="ShortcutComponent" Guid="{C4B1D2E3-8A57-4F0B-9C64-1D2E3F4A5B60}">
+              <!-- per-user 组件用 HKCU 键做 keypath：ICE38 要求，不能拿用户目录里的文件当 keypath -->
+              <RegistryValue Root="HKCU" Key="Software\PotatoTest\MSI" Name="Installed"
+                             Type="integer" Value="1" KeyPath="yes" />
+              <Shortcut Id="StartMenuShortcut" Directory="ProgramMenuDir" Name="Potato Test"
+                        Target="[INSTALLDIR]PotatoTest.exe" WorkingDirectory="INSTALLDIR"
+                        Icon="AppIcon" Advertise="no" />
+              <Shortcut Id="DesktopShortcut" Directory="DesktopFolder" Name="Potato Test"
+                        Target="[INSTALLDIR]PotatoTest.exe" WorkingDirectory="INSTALLDIR"
+                        Icon="AppIcon" Advertise="no" />
+            </Component>
+
+            <Component Id="LegacyCleanup" Guid="{D5C2E3F4-9B68-4A1C-8D75-2E3F4A5B6C71}">
+              <RegistryValue Root="HKCU" Key="Software\PotatoTest\MSI\Legacy" Name="Cleaned"
+                             Type="integer" Value="1" KeyPath="yes" />
+              <RemoveRegistryKey Root="HKCU"
+                                 Key="Software\Microsoft\Windows\CurrentVersion\Uninstall\PotatoTest"
+                                 Action="removeOnInstall" />
+              <RemoveRegistryKey Root="HKCU"
+                                 Key="Software\Microsoft\Windows\CurrentVersion\Uninstall\{8E2B7F4A-3C51-4C0E-9E77-5B2D8D1A6F31}_is1"
+                                 Action="removeOnInstall" />
+              <RemoveFile Id="RemoveLegacyUninstaller" Name="uninstall.exe" On="install" />
+            </Component>
+
+          </Directory>
+      </Directory>
+    </StandardDirectory>
+
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="ProgramMenuDir" Name="Potato Test" />
+    </StandardDirectory>
+    <StandardDirectory Id="DesktopFolder" />
+
+    <Feature Id="MainFeature" Title="Potato Test" Level="1">
+      <ComponentGroupRef Id="PayloadGroup" />
+      <ComponentRef Id="ShortcutComponent" />
+      <ComponentRef Id="LegacyCleanup" />
+    </Feature>
+  </Package>
+</Wix>

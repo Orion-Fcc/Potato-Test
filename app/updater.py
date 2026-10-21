@@ -488,10 +488,9 @@ def launch_installer(path: Path) -> None:
     这 6 秒里前端会关掉窗口 → 进程退出 → 安装器才动手。
     `DETACHED_PROCESS` 保证应用退出后安装器不被一起回收。
     """
-    cmd = (
-        f'timeout /t 6 /nobreak >nul & "{path}" '
-        "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS"
-    )
+    # NSIS 的静默参数是 /S（大小写敏感）。旧版 Inno 安装器用的是
+    # /VERYSILENT，新安装器在 .onInit 里也识别它 —— 这条升级链不能断。
+    cmd = f'timeout /t 6 /nobreak >nul & "{path}" /S'
     flags = 0
     if sys.platform == "win32":
         flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore[attr-defined]

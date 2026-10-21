@@ -32,24 +32,27 @@
 ## 2. 编译安装包
 
 ```bat
-:: 装过一次 Inno Setup 之后
-"C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\potato.iss
-:: 或者只装了当前用户
-"%LOCALAPPDATA%\InnoSetup6\ISCC.exe" installer\potato.iss
+:: NSIS 3.11+（makensis 在 PATH 里）
+makensis installer\potato.nsi
+:: 或者用便携版
+".tmp\nsis\nsis-3.11\makensis.exe" installer\potato.nsi
 ```
 
 产出 `dist_desktop\installer\PotatoTest-Setup-<版本>.exe`（约 **182 MB**）。
 
 安装包的行为：
 
+- **单文件、per-user**：装到 `%LOCALAPPDATA%\Programs\PotatoTest`，**不需要管理员**；
+- **不再先把主程序解压到 `%TEMP%`**：NSIS 直接从安装包流式写入目标目录。
+  这是为了绕开 Inno SetupLdr 在 TEMP 不可写时报的
+  `无法创建目录 is-XXXX.tmp。错误 5: 拒绝访问`；
 - **不含任何数据**：没有 `potato.db` / `artifacts` / `profiles` / `.env`，装完首次启动自动建空库；
-- 装到 `%LOCALAPPDATA%\Programs\PotatoTest`（per-user，**不需要管理员**）；
-- **桌面快捷方式默认不勾**，启动菜单必建；另有可选开机自启；
-- 卸载默认**保留用户数据**（只清 `logs`）。
+- **桌面快捷方式默认不勾**，开始菜单必建；
+- 卸载只删程序文件，`potato.db` / `artifacts` / `profiles` / `logs` / `.env` **全部保留**。
 
 > ★ **别装到 `Program Files`**：数据库、上传的原件、浏览器 profile 都落在程序目录旁边，
 > 那边对普通用户不可写 —— 症状是"能打开、一保存就报错"，而且错误只在日志里。
-> `.iss` 里加了安装前的目录可写检查，就是为了拦住这种装法。
+> `potato.nsi` 的 `.onVerifyInstDir` 会做目录可写检查，拦住这种装法。
 
 ## 3. 发布（让"检查更新"有东西可查）
 
@@ -60,7 +63,7 @@ set GITHUB_TOKEN=ghp_xxx                     &:: 需要 repo 权限的 token
 python scripts\release.py --publish          &:: 建 Release + 上传安装包
 ```
 
-版本号有**三个地方**必须一致（`app/version.py` / `pyproject.toml` / `installer/potato.iss`）——
+版本号有**三个地方**必须一致（`app/version.py` / `pyproject.toml` / `installer/potato.nsi`）——
 `tests/test_updater.py` 会检查，`release.py` 也会在发布前再校验一次。
 
 ## 4. 更新（应用内）
@@ -69,7 +72,7 @@ python scripts\release.py --publish          &:: 建 Release + 上传安装包
 
 1. 点**检查更新** → 读本仓库的 `releases/latest`；
 2. 有新版本 → **下载并安装** → 下载到临时目录 → 延迟 6 秒启动安装器 →
-   应用退出 → 静默覆盖安装（`/VERYSILENT /CLOSEAPPLICATIONS`）；
+   应用退出 → 静默覆盖安装（`/S`）；
 3. **数据不动**（数据库/原件跟程序文件是分开的）。
 
 安全边界（`app/updater.py` 文件头有完整说明）：

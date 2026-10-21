@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useParams } from "react-router-dom";
 import { api, type KnowledgeFormats, type ProjectDoc, type VerifiedCoverage } from "../lib/api";
-import { Badge, Button, Card, Input } from "../components/ui";
+import { Badge, Button, Card, Input, Select } from "../components/ui";
 import { RichTextEditor } from "../components/RichTextEditor";
 import { EMPTY_SELECTION, useWorkspace, type SelectionInfo } from "../state/WorkspaceContext";
 import { SourceViewer } from "../components/SourceViewer";
@@ -503,51 +503,46 @@ export function DocsPage() {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-3">
-      {/* 顶部：文档 Tab（左，可横向滚动）+ 操作区（右，固定不换行）。
-          2026-10-20 用户要求「干掉左侧列表、操作按钮全部上移」：
-          Tab 替代原来的左栏清单，切换时只换 `active`，编辑器由 key 强制重挂载。 */}
+      {/* 顶部：文档下拉选择（左）+ 操作区（右，固定不换行）。
+          2026-10-21 用户要求把横向 Tab 换成下拉框：文档一多 Tab 会溢出、
+          两端出现滚动箭头，且挤占顶部横向空间。下拉使用 Radix Portal
+          （挂到 body），展开时不会挤压右侧 AI 面板的 Flex 宽度。
+          切换时只换 `active`，编辑器由 key 强制重挂载。 */}
       <div className="flex flex-wrap items-center gap-2 rounded-lg border border-[var(--line)] bg-[var(--panel)] px-2 py-1.5">
-        <div
-          role="tablist"
-          aria-label={t("项目文档")}
-          className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto"
+        <Select
+          value={active ? `${active.kind}:${active.id}` : ""}
+          onValueChange={(v) => {
+            const d = docs.find((x) => `${x.kind}:${x.id}` === v);
+            if (d) setActive(d);
+          }}
+          placeholder={t("Project Docs")}
+          className="h-8 w-auto min-w-[200px] max-w-[320px]"
         >
           {docs.map((d) => {
             const Icon = KIND_ICON[d.kind] ?? FileText;
-            const on = active?.kind === d.kind && active?.id === d.id;
             return (
-              <button
-                key={`${d.kind}-${d.id}`}
-                role="tab"
-                aria-selected={on}
-                title={d.title}
-                onClick={() => setActive(d)}
-                className={
-                  "inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md px-3 py-1.5 text-[13px] transition-colors " +
-                  (on
-                    ? "bg-brand-50 font-medium text-brand-700"
-                    : "text-ink-600 hover:bg-[var(--panel2)] hover:text-ink-900")
-                }
-              >
-                <Icon className="h-3.5 w-3.5 shrink-0" />
-                <span className="max-w-[220px] truncate">{d.title}</span>
-                {d.origin === "ai" && (
-                  <span
-                    className="text-[9px] uppercase tracking-wide text-ink-400"
-                    title={t("AI 生成后还没有人改过")}
-                  >
-                    AI
-                  </span>
-                )}
-                {d.id > 0 && !d.ai_editable && (
-                  <span className="shrink-0" title={t("只有我能改（助手不能写）")}>
-                    <Lock className="h-3 w-3 text-[var(--warn-fg)]" />
-                  </span>
-                )}
-              </button>
+              <option key={`${d.kind}-${d.id}`} value={`${d.kind}:${d.id}`}>
+                <span className="inline-flex max-w-[260px] items-center gap-1.5">
+                  <Icon className="h-3.5 w-3.5 shrink-0" />
+                  <span className="truncate">{d.title}</span>
+                  {d.origin === "ai" && (
+                    <span
+                      className="text-[9px] uppercase tracking-wide text-ink-400"
+                      title={t("AI 生成后还没有人改过")}
+                    >
+                      AI
+                    </span>
+                  )}
+                  {d.id > 0 && !d.ai_editable && (
+                    <span className="shrink-0" title={t("只有我能改（助手不能写）")}>
+                      <Lock className="h-3 w-3 text-[var(--warn-fg)]" />
+                    </span>
+                  )}
+                </span>
+              </option>
             );
           })}
-        </div>
+        </Select>
 
         <div className="flex shrink-0 items-center gap-1.5">
           <input

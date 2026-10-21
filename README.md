@@ -61,7 +61,7 @@ python -m venv .venv
 ### 自己打包 / 发布
 
 见 [docs/desktop-build.md](docs/desktop-build.md)：
-`scripts\build_desktop.py` 打程序目录 → `ISCC.exe installer\potato.iss` 编译安装包 →
+`scripts\build_desktop.py` 打程序目录 → `makensis installer\potato.nsi` 编译安装包 →
 `scripts\release.py --publish` 发 Release（应用内更新靠它）。
 
 ---
@@ -169,7 +169,7 @@ tail -f logs/feishu_poll.log
     desktop.py      桌面版入口：同进程起服务 + 开窗口（唯一入口）
     desktop.py      桌面版入口：同一进程里起服务 + 开一个原生窗口（pywebview → Edge --app → 浏览器）
     scripts/        部署 / 体检 / 打包（build_desktop.py 打桌面版程序目录）
-    installer/      Inno Setup 安装包脚本 + 中文语言包（不含数据、可选桌面快捷方式）
+    installer/      NSIS 安装包脚本（per-user、不经过 %TEMP%、不含数据、可选桌面快捷方式）
     docs/           使用说明（USAGE.md）与部署、配置手册
     tests/          pytest 测试（纯逻辑，不需要浏览器）
 

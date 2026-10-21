@@ -24,7 +24,7 @@ GitHub 上必须有一个**带 `PotatoTest-Setup-*.exe` 资产**的 Release。�
 
 ## 三处版本号必须一致
 
-`app/version.py` / `pyproject.toml` / `installer/potato.iss` ——
+`app/version.py` / `pyproject.toml` / `installer/potato.nsi` ——
 `tests/test_updater.py` 会检查，这里也检查一遍（发布前拦住比事后查好）。
 """
 
@@ -44,7 +44,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 VERSION_PY = ROOT / "app" / "version.py"
 PYPROJECT = ROOT / "pyproject.toml"
-ISS = ROOT / "installer" / "potato.iss"
+NSI = ROOT / "installer" / "potato.nsi"
 GITHUB_API = "https://api.github.com"
 
 
@@ -70,7 +70,7 @@ def bump(new: str) -> None:
     for path, pattern, repl in (
         (VERSION_PY, r'(APP_VERSION\s*=\s*)"[^"]+"', rf'\g<1>"{new}"'),
         (PYPROJECT, r'(?m)^version = "[^"]+"$', f'version = "{new}"'),
-        (ISS, r'(#define\s+AppVer\s+)"[^"]+"', rf'\g<1>"{new}"'),
+        (NSI, r'(!define\s+AppVer\s+)"[^"]+"', rf'\g<1>"{new}"'),
     ):
         text = path.read_text(encoding="utf-8")
         text2, n = re.subn(pattern, repl, text, count=1)
@@ -85,11 +85,11 @@ def verify() -> str:
     """三处一致才算过 —— 这是"检查更新"能不能正确工作的前提。"""
     v = _read_version()
     py = re.search(r'(?m)^version = "([^"]+)"', PYPROJECT.read_text(encoding="utf-8"))
-    iss = re.search(r'#define\s+AppVer\s+"([^"]+)"', ISS.read_text(encoding="utf-8"))
-    ok = py and iss and py.group(1) == v and iss.group(1) == v
+    nsi = re.search(r'!define\s+AppVer\s+"([^"]+)"', NSI.read_text(encoding="utf-8"))
+    ok = py and nsi and py.group(1) == v and nsi.group(1) == v
     if not ok:
         raise SystemExit(
-            f"版本号不一致：version.py={v} pyproject={py and py.group(1)} iss={iss and iss.group(1)}"
+            f"版本号不一致：version.py={v} pyproject={py and py.group(1)} nsi={nsi and nsi.group(1)}"
         )
     print(f"版本号一致：{v}")
     return v

@@ -25,7 +25,7 @@
 |---|---|---|
 | `import app.main` | 4.48s | `python -X importtime -c "import app.main"` |
 | 桌面包 `dist_desktop` | 约 487MB（`_internal` 455MB） | `du -sh dist_desktop` |
-| 安装包 | 约 170.9MB | 查看 Inno Setup 产物 |
+| 安装包 | 约 170.9MB | 查看 Windows 安装包产物 |
 | 测试规模 | 103 个测试文件、pytest 收集 1569 条 | `pytest --collect-only -q` |
 | 覆盖率门槛 | 54%（`api.py` 28%、`executor.py` 45%） | `pytest --cov=app --cov-report=term-missing` |
 | 宽泛 `except Exception` | 231 处 | `grep -rn "except Exception" app \| wc -l` |

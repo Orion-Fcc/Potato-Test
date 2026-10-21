@@ -15,9 +15,9 @@
   1. `active_profile()` = 池的第 1 条（真正在跑的那套），不再是 env/旧单值字段；
   2. 单值字段（base_url/model/agent_model/provider/api_key）改为**合并进池第 1 条**，
      而不是写进那些永远不生效的 AppSetting；
-  3. 池为空时 `GET .../llm/pool` 回一条 .env 的**回显**（seeded=True），
-     不是空列表 —— 空列表会让界面显示"没配置"，而实际上有一套在跑；
-  4. 池的来源（pool / env）如实回给界面；
+  3. `GET .../llm/pool` **只回用户手动保存过的条目**；池为空就是空列表，
+     不再合成 .env 回显卡片（那张卡片会混进前端提交状态，造成厂商串台）；
+  4. 池的来源（pool / env）如实回给界面；运行时仍由 load_pool() 回落 .env；
   5. 拼不出完整条目时**拒绝写入** —— 半截条目会被 load_pool 忽略并回落 env，
      那正好又变回"保存了没生效"。
 """
@@ -141,7 +141,7 @@ def test_single_value_fields_are_merged_into_the_pool_head(client) -> None:
     pool = client.get("/api/admin/settings/llm/pool").json()
     assert pool["count"] == 1
     assert pool["source"] == "pool"
-    assert pool["seeded"] is False
+    assert pool["configured"] is True
 
 
 def test_merging_only_model_keeps_the_key_and_the_rest_of_the_pool(client) -> None:
@@ -207,20 +207,72 @@ def test_incomplete_config_is_refused_instead_of_being_written_half(client, monk
     assert s["pool_source"] == "env", "缺 base_url/key 时不该凭空造出一个池条目"
 
 
-def test_empty_pool_is_reported_as_env_with_one_readback_row(client) -> None:
-    """池为空时回一条 .env 的回显 + seeded=True。
+def test_empty_pool_returns_no_readback_card(client) -> None:
+    """池为空时只回空列表 + source=env；绝不再合成一张 .env 回显卡片。
 
-    回空列表会让界面显示"什么都没配"，而平台上明明有一套在跑 ——
-    "显示为空"和"有一套在跑"是最容易把人带偏的那种不一致。
+    设置页必须如实显示"还没保存过任何模型"。运行时的 env 回落仍由
+    load_pool() 负责（`pool_count` 依旧体现那套正在跑的配置）。
     """
     pool = client.get("/api/admin/settings/llm/pool").json()
     assert pool["source"] == "env"
-    assert pool["seeded"] is True
-    assert pool["count"] == 1, "至少要能看到当前实际在用的那一套"
+    assert pool["configured"] is False
+    assert pool["count"] == 0
+    assert pool["pool"] == []
 
     s = client.get("/api/admin/settings").json()["llm"]
     assert s["pool_source"] == "env"
     assert s["pool_count"] == 1
+
+
+def test_first_custom_pool_never_inherits_env_credentials(client, monkeypatch) -> None:
+    """第一条自定义模型只认自己提交的钥匙，绝不按位置继承 .env 的配置。"""
+    from app.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "gateway_base_url", "https://env.example/v1", raising=False)
+    monkeypatch.setattr(get_settings(), "gateway_api_key", "env-key", raising=False)
+
+    r = client.put(
+        "/api/admin/settings/llm",
+        json={
+            "pool": [
+                {
+                    "name": "my-deepseek",
+                    "base_url": "https://api.deepseek.com",
+                    "model": "deepseek-chat",
+                    "api_key": "sk-deepseek",
+                    "provider": "openai",
+                    "vendor": "deepseek",
+                }
+            ]
+        },
+    )
+    assert r.status_code == 200, r.text
+
+    pool = client.get("/api/admin/settings/llm/pool").json()
+    assert pool["count"] == 1
+    assert pool["pool"][0]["name"] == "my-deepseek"
+    assert pool["pool"][0]["provider"] == "openai"
+    assert pool["pool"][0]["api_key_set"] is True
+    assert pool["pool"][0]["api_key_masked"].endswith("seek")
+    assert "env-key" not in pool["pool"][0]["api_key_masked"]
+
+    # 新条目没填钥匙时整次保存失败并点名，绝不能从 .env / 别的条目借一把，
+    # 更不能顺手把已保存的池清空。
+    bad = client.put(
+        "/api/admin/settings/llm",
+        json={
+            "pool": [
+                {
+                    "name": "another",
+                    "base_url": "https://another.example/v1",
+                    "model": "m-1",
+                }
+            ]
+        },
+    )
+    assert bad.status_code == 400, bad.text
+    assert "another" in bad.text
+    assert client.get("/api/admin/settings/llm/pool").json()["count"] == 1
 
 
 def test_per_purpose_models_still_win_over_the_pool_head(client) -> None:
@@ -241,6 +293,41 @@ def test_per_purpose_models_still_win_over_the_pool_head(client) -> None:
     # 没配的用途仍然继承池第 1 条 —— 这也是"默认"的唯一含义
     assert roles["agent"]["model"] == ""
     assert roles["agent"]["effective_model"] == "base-model"
+
+
+def test_per_purpose_pool_reference_uses_the_whole_pool_entry(client) -> None:
+    """用途覆盖直接引用池条目时，网关/模型/钥匙必须整条跟着走。
+
+    只换模型名、却沿用默认网关的钥匙，就是"选了 DeepSeek 却报 Google 错"那类串台的
+    来源。pool_name 让用途只指向池条目，凭据永远来自同一条。
+    """
+    client.put(
+        "/api/admin/settings/llm",
+        json={
+            "pool": [
+                {"name": "deepseek", "base_url": "https://api.deepseek.com",
+                 "model": "deepseek-chat", "api_key": "sk-deepseek"},
+                {"name": "openai", "base_url": "https://api.openai.com/v1",
+                 "model": "gpt-4o", "api_key": "sk-openai"},
+            ]
+        },
+    )
+    r = client.put(
+        "/api/admin/settings/llm",
+        json={"roles": {"judge": {"pool_name": "openai"}}},
+    )
+    assert r.status_code == 200, r.text
+    role = client.get("/api/admin/settings").json()["llm"]["roles"]["judge"]
+    assert role["effective_model"] == "gpt-4o"
+    assert role["effective_base_url"] == "https://api.openai.com/v1"
+    assert role["source"] == "override"
+
+    bad = client.put(
+        "/api/admin/settings/llm",
+        json={"roles": {"judge": {"pool_name": "missing"}}},
+    )
+    assert bad.status_code == 400
+    assert "missing" in bad.text
 
 
 def test_test_endpoint_uses_the_agent_role_set(client, monkeypatch) -> None:

@@ -30,6 +30,12 @@ from app.llm_protocol import Capabilities, capabilities_for
 log = logging.getLogger("potato-test.llm")
 
 
+def _http_for(profile, timeout: float) -> httpx.AsyncClient:
+    """按 profile 的代理策略建客户端（系统 / 直连 / 自定义代理）。"""
+    from app import llm as _llm  # 延迟导入，避免循环依赖
+    return _llm.http_client_for(profile, timeout=timeout)
+
+
 @dataclass
 class ChatResult:
     """协议无关的回复。usage 用统一键名，跟平台里的 token 账本对齐。"""
@@ -225,6 +231,8 @@ async def chat_with_pool(
     from app import llm as _llm
 
     pool = await (_llm.pool_for_role(role) if role else _llm.load_pool())
+    # 自动降级：开关关掉时退回旧语义（只换 429），避免用户关不掉。
+    routing = await _llm.load_routing()
     last: Exception | None = None
     for prof in pool:
         try:
@@ -233,7 +241,9 @@ async def chat_with_pool(
                 json_mode=json_mode, temperature=temperature, max_tokens=max_tokens, timeout=timeout,
             ), prof
         except Exception as exc:  # noqa: BLE001
-            if _llm._is_rate_limited(exc):
+            switchable = _llm._is_switchable_error(exc) if routing.failover else _llm._is_rate_limited(exc)
+            if switchable:
+                log.warning("llm: %s 失败（%s），自动降级到下一条", prof.name, type(exc).__name__)
                 last = exc
                 continue
             raise
@@ -318,6 +328,7 @@ async def chat_stream_with_pool(
     from app import llm as _llm
 
     pool = await (_llm.pool_for_role(role) if role else _llm.load_pool())
+    routing = await _llm.load_routing()
     last: Exception | None = None
     for prof in pool:
         started = False
@@ -331,7 +342,9 @@ async def chat_stream_with_pool(
                 yield ev
             return
         except Exception as exc:  # noqa: BLE001
-            if not started and _llm._is_rate_limited(exc):
+            switchable = _llm._is_switchable_error(exc) if routing.failover else _llm._is_rate_limited(exc)
+            if not started and switchable:
+                log.warning("llm: %s 流式失败（%s），自动降级到下一条", prof.name, type(exc).__name__)
                 last = exc
                 continue
             raise
@@ -378,9 +391,7 @@ async def _chat_openai(
     if rf is not None:
         body["response_format"] = rf
 
-    http = httpx.AsyncClient(
-        verify=s.gateway_verify_ssl, timeout=httpx.Timeout(timeout), trust_env=not s.gateway_ignore_proxy
-    )
+    http = _http_for(profile, timeout)
     client = AsyncOpenAI(
         base_url=force_base_url or profile.base_url,
         api_key=profile.api_key or "not-needed",
@@ -453,9 +464,7 @@ async def _chat_anthropic(
     if temperature is not None:
         kwargs["temperature"] = temperature
 
-    http = httpx.AsyncClient(
-        verify=s.gateway_verify_ssl, timeout=httpx.Timeout(timeout), trust_env=not s.gateway_ignore_proxy
-    )
+    http = _http_for(profile, timeout)
     client = AsyncAnthropic(
         api_key=profile.api_key, base_url=profile.base_url or None,
         http_client=http, max_retries=s.llm_max_retries,
@@ -542,9 +551,7 @@ async def _chat_google(
     if json_mode:
         cfg_kwargs["response_mime_type"] = "application/json"
 
-    http = httpx.AsyncClient(
-        verify=s.gateway_verify_ssl, timeout=httpx.Timeout(timeout), trust_env=not s.gateway_ignore_proxy
-    )
+    http = _http_for(profile, timeout)
     base = (profile.base_url or "").strip().rstrip("/")
     http_options = gtypes.HttpOptions(
         httpx_async_client=http, timeout=int(timeout * 1000),
@@ -614,9 +621,7 @@ async def _chat_openai_stream(
     if rf is not None:
         body["response_format"] = rf
 
-    http = httpx.AsyncClient(
-        verify=s.gateway_verify_ssl, timeout=httpx.Timeout(timeout), trust_env=not s.gateway_ignore_proxy
-    )
+    http = _http_for(profile, timeout)
     client = AsyncOpenAI(
         base_url=force_base_url or profile.base_url,
         api_key=profile.api_key or "not-needed",
@@ -669,9 +674,7 @@ async def _chat_anthropic_stream(
     if temperature is not None:
         kwargs["temperature"] = temperature
 
-    http = httpx.AsyncClient(
-        verify=s.gateway_verify_ssl, timeout=httpx.Timeout(timeout), trust_env=not s.gateway_ignore_proxy
-    )
+    http = _http_for(profile, timeout)
     client = AsyncAnthropic(
         api_key=profile.api_key, base_url=profile.base_url or None,
         http_client=http, max_retries=s.llm_max_retries,
@@ -752,9 +755,7 @@ async def _chat_google_stream(
     if json_mode:
         cfg_kwargs["response_mime_type"] = "application/json"
 
-    http = httpx.AsyncClient(
-        verify=s.gateway_verify_ssl, timeout=httpx.Timeout(timeout), trust_env=not s.gateway_ignore_proxy
-    )
+    http = _http_for(profile, timeout)
     base = (profile.base_url or "").strip().rstrip("/")
     http_options = gtypes.HttpOptions(
         httpx_async_client=http, timeout=int(timeout * 1000), base_url=base or None,

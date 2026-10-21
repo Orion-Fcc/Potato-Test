@@ -125,6 +125,27 @@ def _hint_protocol(base_url: str) -> str | None:
     return None
 
 
+# 厂商下拉（界面上的「快捷填入厂商」）本身就是协议声明：
+# deepseek / openai / zhipu / kimi / qwen 全部说 OpenAI 兼容协议，ollama 说 Ollama。
+_VENDOR_PROTOCOL: dict[str, str] = {
+    "ollama": "ollama",
+    "anthropic": "anthropic",
+    "claude": "anthropic",
+    "google": "google",
+    "gemini": "google",
+}
+
+
+def _vendor_protocol(profile) -> str | None:
+    vendor = (getattr(profile, "vendor", "") or "").strip().lower()
+    return _VENDOR_PROTOCOL.get(vendor)
+
+
+def _profile_protocol_hint(profile) -> str:
+    """没有可实测的能力时，按厂商/地址给一个最可能的协议（默认 OpenAI 兼容）。"""
+    return _vendor_protocol(profile) or _hint_protocol(getattr(profile, "base_url", "") or "") or "openai"
+
+
 # ---------------------------------------------------------------------------
 # 探测期的 429：**协议是对的，只是配额用完了**
 #
@@ -178,6 +199,15 @@ async def capabilities_for(profile, *, force: bool = False) -> Capabilities:
             return hit[0]
 
     explicit = normalize_provider(getattr(profile, "provider", "") or "")
+    # 没有 key 就没什么可探的。以前 auto 会继续往下试：DeepSeek 地址试完 OpenAI、
+    # Anthropic 都失败，最后拿**空的** base_url 去试 Google 官方端点，Google 对空 key
+    # 回 403，被误判成「这就是 google 协议」，随后 Gemini SDK 抛出
+    # "No API key was provided ... ai.google.dev/gemini-api/docs/api-key" ——
+    # 用户明明选的是 DeepSeek。现在直接按厂商/地址给结论，真实报错会指向缺 key。
+    if explicit == "auto" and not (getattr(profile, "api_key", "") or "").strip():
+        caps = _PROTOCOL_DEFAULTS[_profile_protocol_hint(profile)]
+        _cache[key] = (caps, now)
+        return caps
     try:
         caps = await _probe(profile, explicit)
     except RateLimitedError:
@@ -201,12 +231,16 @@ async def _probe(profile, explicit: str) -> Capabilities:
     if explicit != "auto":
         order.append(explicit)
     else:
-        hint = _hint_protocol(profile.base_url)
+        hint = _vendor_protocol(profile) or _hint_protocol(profile.base_url)
         if hint:
             order.append(hint)
         for p in ("openai", "anthropic", "google", "ollama"):
             if p not in order:
                 order.append(p)
+        # 空 base_url 只可能命中 Gemini 的官方默认端点，这不是"识别"，是串台：
+        # 用户没填地址时永远不该被推断成 google。
+        if not (profile.base_url or "").strip():
+            order = [p for p in order if p != "google"]
 
     for proto in order:
         caps = await _probe_protocol(profile, proto)
@@ -236,7 +270,14 @@ async def _probe_protocol(profile, proto: str) -> Capabilities | None:
     return None
 
 
-def _http(timeout: float = 20.0) -> httpx.AsyncClient:
+def _http(timeout: float = 20.0, profile=None) -> httpx.AsyncClient:
+    """按 profile 的代理策略建客户端（每套模型可独立走系统/直连/自定义代理）。
+
+    没传 profile 时退回旧的全局设置——只给不关心代理的调用点用。
+    """
+    if profile is not None:
+        from app.llm import http_client_for
+        return http_client_for(profile, timeout=timeout)
     s = get_settings()
     return httpx.AsyncClient(
         verify=s.gateway_verify_ssl,
@@ -291,7 +332,7 @@ async def _probe_openai(profile) -> Capabilities | None:
         "max_tokens": 16,
     }
 
-    async with _http() as c:
+    async with _http(profile=profile) as c:
         try:
             r = await c.post(url, json=base_body, headers=headers)
         except Exception:  # noqa: BLE001 — 网络层不通 → 不是这个协议（或该地址不可达）
@@ -333,6 +374,8 @@ async def _probe_openai(profile) -> Capabilities | None:
 
 
 async def _probe_anthropic(profile) -> Capabilities | None:
+    if not (profile.api_key or "").strip():
+        return None  # 空 key 的 401 不能当成"这个协议可用"
     b = (profile.base_url or "").strip().rstrip("/")
     url = b if b.endswith("/messages") else f"{b}/messages"
     headers = {
@@ -345,7 +388,7 @@ async def _probe_anthropic(profile) -> Capabilities | None:
         "max_tokens": 1,
         "messages": [{"role": "user", "content": "ping"}],
     }
-    async with _http() as c:
+    async with _http(profile=profile) as c:
         try:
             r = await c.post(url, json=body, headers=headers)
         except Exception:  # noqa: BLE001
@@ -362,9 +405,11 @@ async def _probe_anthropic(profile) -> Capabilities | None:
 
 async def _probe_google(profile) -> Capabilities | None:
     """Gemini：GET 模型元数据（比 generateContent 便宜，且能确认 key + model 存在）。"""
+    if not (profile.api_key or "").strip():
+        return None  # 空 key 的 401/403 不能当成"这个协议可用"
     b = (profile.base_url or "https://generativelanguage.googleapis.com/v1beta").strip().rstrip("/")
     url = f"{b}/models/{profile.effective_model}"
-    async with _http() as c:
+    async with _http(profile=profile) as c:
         try:
             r = await c.get(url, headers={"x-goog-api-key": profile.api_key})
         except Exception:  # noqa: BLE001
@@ -386,7 +431,7 @@ async def _probe_ollama(profile) -> Capabilities | None:
         if base.endswith(suffix):
             base = base[: -len(suffix)]
             break
-    async with _http() as c:
+    async with _http(profile=profile) as c:
         try:
             r = await c.get(f"{base}/api/tags")
         except Exception:  # noqa: BLE001

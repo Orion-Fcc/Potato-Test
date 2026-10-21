@@ -363,6 +363,57 @@ class LlmProfileIn(BaseModel):
     # auto（默认，自动识别）/ openai / anthropic / google / ollama。
     # 也认 deepseek、qwen、kimi、zhipu、openrouter 等别名（归一化到 openai 兼容协议）。
     provider: str | None = None
+    # ---- 1.0.8 模型池字段 ----
+    vendor: str | None = None
+    # system（跟随系统）/ direct（强制直连）/ custom（自定义代理）
+    proxy_mode: str | None = None
+    proxy_url: str | None = None
+    context_tokens: int | None = Field(default=None, ge=256)
+    vision: bool | None = None
+    tools: bool | None = None
+    enabled: bool | None = None
+
+
+class LlmRoutingIn(BaseModel):
+    """全局路由：默认对话模型 / 默认 Agent 模型 / 自动降级开关。
+
+    存的是池条目的 name（不是下标）：列表顺序会变，名字不会跟着漂。
+    """
+
+    chat: str | None = None
+    agent: str | None = None
+    failover: bool | None = None
+
+
+class LlmModelsIn(BaseModel):
+    """拉取厂商模型列表：填好 Base URL + Key，后端打 /v1/models。"""
+
+    base_url: str = Field(min_length=1)
+    api_key: str = ""
+    proxy_mode: str | None = None
+    proxy_url: str | None = None
+
+
+class LlmBatchAddIn(BaseModel):
+    """一次把多个模型加进池：共享 Base URL / Key / 代理，每个模型一条记录。"""
+
+    base_url: str = Field(min_length=1)
+    api_key: str = ""
+    models: list[str] = Field(min_length=1)
+    vendor: str | None = None
+    proxy_mode: str | None = None
+    proxy_url: str | None = None
+    context_tokens: int | None = Field(default=None, ge=256)
+    vision: bool | None = None
+    tools: bool | None = None
+    make_default: bool = True
+
+
+class LlmBatchActionIn(BaseModel):
+    """批量启用 / 禁用 / 删除（按池条目 name）。"""
+
+    names: list[str] = Field(min_length=1)
+    action: str = Field(pattern="^(enable|disable|delete)$")
 
 
 class LlmRoleIn(BaseModel):
@@ -381,6 +432,9 @@ class LlmRoleIn(BaseModel):
     base_url: str | None = None
     api_key: str | None = None  # 只写：留空表示保留已存钥匙（界面只显示掩码）
     provider: str | None = None
+    # 1.0.8：直接引用模型池里的某个条目（按 name）。给了它就以池条目的
+    # model/base_url/api_key/provider 为准，避免"换厂商却沿用默认网关的钥匙"。
+    pool_name: str | None = None
 
 
 class LlmPremiumIn(BaseModel):
@@ -427,6 +481,8 @@ class LlmSettingsIn(BaseModel):
     judge_two_tier: bool | None = None
     # 平台级高端模型：给定时**整体替换**（None => 保持现状）。
     premium: LlmPremiumIn | None = None
+    # 全局路由（默认对话 / 默认 Agent / 自动降级）。
+    routing: LlmRoutingIn | None = None
 
 
 class FeishuSettingsIn(BaseModel):

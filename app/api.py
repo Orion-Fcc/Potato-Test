@@ -99,6 +99,9 @@ from app.schemas import (
     IssueIn,
     IssuePatch,
     KnowledgeIn,
+    LlmBatchActionIn,
+    LlmBatchAddIn,
+    LlmModelsIn,
     LlmSettingsIn,
     LlmTestIn,
     LoginIn,
@@ -584,6 +587,8 @@ async def get_admin_settings() -> dict:
     # 平台级「高端模型」：开没开、管哪几个环节、能不能真用起来。
     # 一起回出来，界面才能说清"我开的高端模型到底管到了哪几个用途"。
     llm_status["premium"] = await llm_mod.premium_for_ui()
+    routing = await llm_mod.load_routing()
+    llm_status["routing"] = {"chat": routing.chat, "agent": routing.agent, "failover": routing.failover}
     return {
         "llm": llm_status,
         "gitlab_token_set": token_set or bool(get_settings().gitlab_token),
@@ -633,6 +638,14 @@ async def _merge_into_pool_head(
         "model": _pick(model, head.model if head else ""),
         "agent_model": _pick(agent_model, head.agent_model if head else ""),
         "provider": _pick(provider, head.provider if head else "auto") or "auto",
+        # 1.0.8 高级字段：单值改动不该把它们抹掉。
+        "vendor": head.vendor if head else "",
+        "proxy_mode": head.proxy_mode if head else "system",
+        "proxy_url": head.proxy_url if head else "",
+        "context_tokens": head.context_tokens if head else 4096,
+        "vision": head.vision if head else True,
+        "tools": head.tools if head else True,
+        "enabled": head.enabled if head else True,
     }
     if not entry["base_url"] or not entry["model"] or not entry["api_key"]:
         logging.getLogger("potato-test.api").warning(
@@ -649,6 +662,13 @@ async def _merge_into_pool_head(
                 "model": p.model,
                 "agent_model": p.agent_model,
                 "provider": p.provider,
+                "vendor": p.vendor,
+                "proxy_mode": p.proxy_mode,
+                "proxy_url": p.proxy_url,
+                "context_tokens": p.context_tokens,
+                "vision": p.vision,
+                "tools": p.tools,
+                "enabled": p.enabled,
             }
             for p in profiles[1:]
         ]
@@ -688,40 +708,71 @@ async def set_admin_llm(body: LlmSettingsIn) -> dict:
             # the CURRENT pool" (the UI only shows masked keys, so editing a set must
             # not force the user to retype it). A brand-new position with no key yet
             # cannot be resolved — that entry is dropped as unusable (safe default).
-            old_pool = await llm_mod.load_pool()  # resolves the existing encrypted keys
-            old_keys = [p.api_key for p in old_pool]
-            old_providers = [p.provider for p in old_pool]
+            # 只从**已保存的池**继承钥匙/厂商：被禁用的条目也保留，否则"禁用再保存"
+            # 就丢 key。绝不能用 _load_pool_raw() —— 池为空时它返回 env 合成条目，
+            # 会把 .env 的钥匙/厂商按位置塞进用户新保存的自定义模型里（串台根源）。
+            old_pool = await llm_mod._load_saved_pool()
+            by_name = {q.name: q for q in old_pool if q.name}
             resolved: list[dict] = []
+            missing: list[str] = []
             for i, p in enumerate(body.pool):
                 if not p.base_url or not p.model:
                     continue
-                key = (p.api_key or "").strip()
-                if not key and i < len(old_keys):
-                    key = old_keys[i]  # inherit from same position
+                name = (p.name or f"llm{i + 1}").strip()
+                # 只从“同一条目”继承：先按名字匹配；改名时按同位置 + 同 Base URL 兜底。
+                # 绝不按位置无条件继承 —— 删掉/重排一行就会把上一行的钥匙和厂商
+                # 带到另一套网关上，这正是"选 DeepSeek 却报 Google"的串台来源。
+                prev = by_name.get(name)
+                if prev is None and i < len(old_pool):
+                    cand = old_pool[i]
+                    if cand.base_url.rstrip("/") == p.base_url.strip().rstrip("/"):
+                        prev = cand
+                key = (p.api_key or "").strip() or (prev.api_key if prev else "")
                 if not key:
-                    continue  # new position with no key → cannot build a usable client
-                # provider 同理：留空就继承同位置的旧值（老 UI 没有这个字段，不能因此把
-                # 一个显式配好的 anthropic 条目悄悄改回 auto）
-                provider = (p.provider or "").strip()
-                if not provider and i < len(old_providers):
-                    provider = old_providers[i]
+                    missing.append(name)  # 绝不静默丢弃：整次保存失败并点名
+                    continue
+                provider = (p.provider or "").strip() or (prev.provider if prev else "")
+                # 老 UI 没有 provider 字段时不能因此把一个显式配好的条目悄悄改回 auto。
+
+                def _inherit(new, attr, default):
+                    if new is not None and new != "":
+                        return new
+                    return getattr(prev, attr) if prev is not None else default
+
+                mode = (p.proxy_mode or "").strip().lower()
                 resolved.append(
                     {
-                        "name": (p.name or f"llm{i + 1}").strip(),
+                        "name": name,
                         "base_url": p.base_url.strip(),
                         "api_key": key,
                         "model": p.model.strip(),
                         "agent_model": (p.agent_model or "").strip(),
                         "provider": provider or "auto",
+                        "vendor": _inherit(p.vendor, "vendor", ""),
+                        "proxy_mode": mode or (prev.proxy_mode if prev else "system"),
+                        "proxy_url": _inherit(p.proxy_url, "proxy_url", ""),
+                        "context_tokens": p.context_tokens if p.context_tokens is not None
+                        else (prev.context_tokens if prev else 4096),
+                        "vision": p.vision if p.vision is not None else (prev.vision if prev else True),
+                        "tools": p.tools if p.tools is not None else (prev.tools if prev else True),
+                        "enabled": p.enabled if p.enabled is not None else (prev.enabled if prev else True),
                     }
+                )
+            if missing:
+                raise HTTPException(
+                    400, "模型池条目缺少 API Key：" + ", ".join(missing)
                 )
             if resolved:
                 await set_setting(
                     s, llm_mod.LLM_POOL_KEY,
                     json.dumps(resolved, ensure_ascii=False), secret=True,
                 )
-            else:
+            elif not body.pool:
+                # 空列表 = 用户明确清空模型池。
                 await set_setting(s, llm_mod.LLM_POOL_KEY, "", secret=False)
+            else:
+                # 有行但没一条能存：拒绝写入，绝不把已有配置顺手清掉。
+                raise HTTPException(400, "模型池没有可保存的条目（需要接口地址 + 模型名 + API Key）。")
         elif any(
             v is not None
             for v in (body.base_url, body.model, body.agent_model, body.provider)
@@ -745,19 +796,45 @@ async def set_admin_llm(body: LlmSettingsIn) -> dict:
             # 按用途分模型：整体替换（None 才表示"不动"）。未知用途直接丢弃 ——
             # 一个拼错的用途名如果被存下来，界面会显示它"已配置"而实际从不生效。
             old_roles = await llm_mod.load_roles()  # 已存的钥匙（加密），用于"留空=保留"
+            saved_pool = await llm_mod._load_saved_pool()
+            by_name = {p.name: p for p in saved_pool if p.name}
             kept: dict[str, dict] = {}
             for role, r in body.roles.items():
                 if role not in llm_mod.ROLES:
                     continue
                 prev = old_roles.get(role)
-                item = {
-                    "model": (r.model or "").strip(),
-                    "base_url": (r.base_url or "").strip(),
-                    "api_key": (r.api_key or "").strip() or (prev.api_key if prev else ""),
-                    "provider": (r.provider or "").strip(),
-                }
-                # 四项全空 = 这一行就是"跟随默认"，不存即可（省得把空壳写进库）。
-                if not (item["model"] or item["base_url"] or item["api_key"] or item["provider"]):
+                pool_name = (r.pool_name or "").strip()
+                if pool_name:
+                    # 1.0.8：用途覆盖直接引用池条目。整条凭据都从池里取，
+                    # 不允许"新模型 + 默认网关钥匙"的跨厂商拼接。
+                    target = by_name.get(pool_name)
+                    if target is None:
+                        raise HTTPException(
+                            400,
+                            f"用途 {role} 指向的模型池条目不存在：{pool_name}",
+                        )
+                    item = {
+                        "model": target.model,
+                        "base_url": target.base_url,
+                        "api_key": target.api_key,
+                        "provider": target.provider,
+                        "pool_name": pool_name,
+                    }
+                else:
+                    item = {
+                        "model": (r.model or "").strip(),
+                        "base_url": (r.base_url or "").strip(),
+                        "api_key": (r.api_key or "").strip() or (prev.api_key if prev else ""),
+                        "provider": (r.provider or "").strip(),
+                    }
+                # 全空 = 这一行就是"跟随默认"，不存即可（省得把空壳写进库）。
+                if not (
+                    item["model"]
+                    or item["base_url"]
+                    or item.get("api_key")
+                    or item["provider"]
+                    or item.get("pool_name")
+                ):
                     continue
                 kept[role] = item
             await set_setting(
@@ -789,10 +866,45 @@ async def set_admin_llm(body: LlmSettingsIn) -> dict:
                 "" if empty else json.dumps(premium_item, ensure_ascii=False),
                 secret=False,
             )
+        if body.routing is not None:
+            # 全局路由：None = 不动；空串 = 恢复"池第 1 条"。
+            prev = await llm_mod.load_routing()
+            item = {
+                "chat": prev.chat if body.routing.chat is None else (body.routing.chat or "").strip(),
+                "agent": prev.agent if body.routing.agent is None else (body.routing.agent or "").strip(),
+                "failover": prev.failover if body.routing.failover is None else bool(body.routing.failover),
+            }
+            await set_setting(
+                s, llm_mod.LLM_ROUTING_KEY, json.dumps(item, ensure_ascii=False), secret=False,
+            )
     llm_mod.invalidate_llm_cache()
     # 回真实生效的那一套（池的第 1 条 + 用途覆盖），不是旧单值字段 ——
     # 界面拿它刷新"正在使用"，两个口径必须一致。
     return _llm_status(await llm_mod.active_profile())
+
+
+_CONTEXT_RE = re.compile(r"(?<!\d)(\d+(?:\.\d+)?)\s*([mk])(?:\s*tokens?)?(?![a-z])", re.I)
+
+
+def _infer_context_tokens(model: str) -> int | None:
+    """从模型名猜上下文长度：128k / 32k / 1m。猜不到回 None。"""
+    m = _CONTEXT_RE.search((model or "").lower())
+    if not m:
+        return None
+    n = float(m.group(1))
+    unit = m.group(2).lower()
+    tokens = int(n * (1024 if unit == "k" else 1024 * 1024))
+    return tokens if tokens >= 256 else None
+
+
+def _mask_key(key: str) -> str:
+    """sk-...abcd 掩码。短 key 全遮，绝不让明文出后端。"""
+    key = (key or "").strip()
+    if not key:
+        return ""
+    if len(key) <= 8:
+        return "****"
+    return f"{key[:3]}****{key[-4:]}"
 
 
 @router.get("/admin/settings/llm/pool", dependencies=[Depends(auth.require_admin)])
@@ -800,13 +912,13 @@ async def get_admin_llm_pool() -> dict:
     """The ordered LLM pool, WITHOUT secrets. api_key is shown masked so the UI can
     display how many sets are configured and their base_url/model, not the keys.
 
-    ★ 池为空时这里回**一条从 env 读出来的条目**（`source="env"`），而不是空列表。
-    为什么：空列表会让界面显示"没有配置"，而实际上平台正在用 .env 里那一套跑。
-    用户看到的"什么都没有"和"有一套在跑"是最容易把人带偏的那种不一致。
+    这里**只返回用户手动保存过的条目**。池为空就返回空列表，绝不回显 .env：
+    那张合成的 "env" 卡片会混进前端提交的状态里，正是"选 DeepSeek 却报 Google"
+    那类串台问题的来源。运行时的 env 回落由 load_pool() 单独负责。
     """
     from app import llm as llm_mod
 
-    profiles, origin = await llm_mod._load_pool_raw()
+    profiles = await llm_mod._load_saved_pool()
     masked = [
         {
             "name": p.name,
@@ -814,17 +926,266 @@ async def get_admin_llm_pool() -> dict:
             "model": p.model,
             "agent_model": p.agent_model,
             "provider": p.provider,
+            "vendor": p.vendor,
+            "proxy_mode": p.proxy_mode,
+            "proxy_url": p.proxy_url,
+            "context_tokens": p.context_tokens,
+            "vision": p.vision,
+            "tools": p.tools,
+            "enabled": p.enabled,
             "api_key_set": bool(p.api_key),
+            # 只回掩码：前端永远拿不到明文钥匙。
+            "api_key_masked": _mask_key(p.api_key),
         }
         for p in profiles
     ]
     return {
         "pool": masked,
         "count": len(masked),
-        # "pool" = 来自模型池；"env" = 池为空，回落 .env（这一条只是回显，保存后才会成为池）
-        "source": origin,
-        "seeded": origin == "env",
+        # "env" 只表示"还没有手动保存过任何模型"，不代表列表里有 env 条目。
+        "source": "pool" if masked else "env",
+        "configured": bool(masked),
     }
+
+
+def _models_url(base_url: str) -> str:
+    b = (base_url or "").strip().rstrip("/")
+    if b.endswith("/models"):
+        return b
+    if b.endswith("/v1"):
+        return f"{b}/models"
+    return f"{b}/v1/models"
+
+
+def _pool_entry(p) -> dict:
+    return {
+        "name": p.name,
+        "base_url": p.base_url,
+        "api_key": p.api_key,
+        "model": p.model,
+        "agent_model": p.agent_model,
+        "provider": p.provider,
+        "vendor": p.vendor,
+        "proxy_mode": p.proxy_mode,
+        "proxy_url": p.proxy_url,
+        "context_tokens": p.context_tokens,
+        "vision": p.vision,
+        "tools": p.tools,
+        "enabled": p.enabled,
+    }
+
+
+@router.post("/admin/settings/llm/models", dependencies=[Depends(auth.require_admin)])
+async def pull_llm_models(body: LlmModelsIn) -> dict:
+    import types
+
+    from app import llm as llm_mod
+
+    base = body.base_url.strip().rstrip("/")
+    if not base:
+        raise HTTPException(400, "Base URL 不能为空")
+    key = (body.api_key or "").strip()
+    if not key:
+        profiles = await llm_mod._load_saved_pool()
+        for p in profiles:
+            if p.base_url.rstrip("/") == base and p.api_key:
+                key = p.api_key
+                break
+    if not key and "ollama" not in base.lower() and "11434" not in base:
+        raise HTTPException(400, "请先填写 API Key")
+
+    headers = {}
+    is_anthropic = "anthropic.com" in base.lower()
+    is_google = "generativelanguage.googleapis.com" in base.lower()
+    if is_anthropic:
+        headers = {"x-api-key": key, "anthropic-version": "2023-06-01"}
+    elif is_google:
+        headers = {"x-goog-api-key": key}
+    elif key:
+        headers = {"Authorization": f"Bearer {key}"}
+
+    def _ids(payload) -> list[str]:
+        if isinstance(payload, list):
+            items = payload
+        elif isinstance(payload, dict):
+            items = payload.get("data") or payload.get("models") or []
+        else:
+            items = []
+        out: list[str] = []
+        for it in items:
+            if isinstance(it, str):
+                mid = it
+            elif isinstance(it, dict):
+                mid = it.get("id") or it.get("name") or it.get("model") or ""
+            else:
+                mid = ""
+            mid = str(mid).strip()
+            if mid.startswith("models/"):
+                mid = mid[len("models/"):]
+            if mid and mid not in out:
+                out.append(mid)
+        return out
+
+    proxy = types.SimpleNamespace(
+        proxy_mode=(body.proxy_mode or "system"),
+        proxy_url=(body.proxy_url or ""),
+    )
+    urls = [_models_url(base)]
+    if "11434" in base or "ollama" in base.lower():
+        urls.append(f"{base}/api/tags")
+    last_err = ""
+    for url in urls:
+        try:
+            async with llm_mod.http_client_for(proxy, timeout=30.0) as c:
+                r = await c.get(url, headers=headers)
+            if r.status_code >= 400:
+                last_err = f"HTTP {r.status_code}: {r.text[:200]}"
+                continue
+            models = _ids(r.json())
+            if models:
+                return {"models": models, "count": len(models), "url": url}
+            last_err = "接口返回了空列表"
+        except Exception as exc:
+            last_err = f"{type(exc).__name__}: {exc}"
+    raise HTTPException(400, f"拉取模型失败：{last_err or '无法连接'}")
+
+
+@router.post("/admin/settings/llm/pool/batch", dependencies=[Depends(auth.require_admin)])
+async def add_llm_pool_batch(body: LlmBatchAddIn) -> dict:
+    import json
+
+    from app import llm as llm_mod
+    from app.settings_store import set_setting
+
+    models: list[str] = []
+    for m in body.models:
+        m = (m or "").strip()
+        if m and m not in models:
+            models.append(m)
+    if not models:
+        raise HTTPException(400, "没有选择任何模型")
+
+    existing = await llm_mod._load_saved_pool()
+    key = (body.api_key or "").strip()
+    if not key:
+        for p in existing:
+            if p.base_url.rstrip("/") == body.base_url.rstrip("/") and p.api_key:
+                key = p.api_key
+                break
+    if not key:
+        raise HTTPException(400, "请先填写 API Key")
+
+    used = {p.name for p in existing}
+    existing_models = {(p.base_url.rstrip("/"), p.model) for p in existing}
+    added: list[dict] = []
+    first_name = ""
+    base = body.base_url.strip().rstrip("/")
+    for m in models:
+        if (base, m) in existing_models:
+            if not first_name:
+                first_name = next(
+                    (p.name for p in existing if p.base_url.rstrip("/") == base and p.model == m),
+                    m,
+                )
+            continue
+        name = m
+        n = 2
+        while name in used:
+            name = f"{m} ({n})"
+            n += 1
+        used.add(name)
+        inferred = _infer_context_tokens(m)
+        ctx = body.context_tokens or inferred or 4096
+        added.append(
+            {
+                "name": name,
+                "base_url": base,
+                "api_key": key,
+                "model": m,
+                "agent_model": "",
+                "provider": "auto",
+                "vendor": (body.vendor or "").strip(),
+                "proxy_mode": (body.proxy_mode or "system").strip() or "system",
+                "proxy_url": (body.proxy_url or "").strip(),
+                "context_tokens": max(256, int(ctx)),
+                "vision": True if body.vision is None else bool(body.vision),
+                "tools": True if body.tools is None else bool(body.tools),
+                "enabled": True,
+            }
+        )
+        if not first_name:
+            first_name = name
+
+    if not added and not first_name:
+        raise HTTPException(400, "这些模型已在池中")
+
+    merged = added + [_pool_entry(p) for p in existing]
+    async with db_session() as s:
+        await set_setting(s, llm_mod.LLM_POOL_KEY, json.dumps(merged, ensure_ascii=False), secret=True)
+        if body.make_default and first_name:
+            prev = await llm_mod.load_routing()
+            await set_setting(
+                s,
+                llm_mod.LLM_ROUTING_KEY,
+                json.dumps(
+                    {"chat": first_name, "agent": first_name, "failover": prev.failover},
+                    ensure_ascii=False,
+                ),
+                secret=False,
+            )
+    llm_mod.invalidate_llm_cache()
+    return {
+        "added": [a["name"] for a in added],
+        "count": len(added),
+        "default": first_name,
+        "total": len(merged),
+    }
+
+
+@router.post("/admin/settings/llm/pool/batch-action", dependencies=[Depends(auth.require_admin)])
+async def batch_action_llm_pool(body: LlmBatchActionIn) -> dict:
+    import json
+
+    from app import llm as llm_mod
+    from app.settings_store import set_setting
+
+    existing = await llm_mod._load_saved_pool()
+    names = {n.strip() for n in body.names if n and n.strip()}
+    if not names:
+        raise HTTPException(400, "没有选择任何模型")
+
+    kept: list[dict] = []
+    touched = 0
+    for p in existing:
+        if p.name not in names:
+            kept.append(_pool_entry(p))
+            continue
+        touched += 1
+        if body.action == "delete":
+            continue
+        item = _pool_entry(p)
+        item["enabled"] = body.action == "enable"
+        kept.append(item)
+
+    async with db_session() as s:
+        await set_setting(
+            s, llm_mod.LLM_POOL_KEY,
+            json.dumps(kept, ensure_ascii=False) if kept else "",
+            secret=True,
+        )
+        alive = {p["name"] for p in kept}
+        prev = await llm_mod.load_routing()
+        chat = prev.chat if prev.chat in alive else ""
+        agent = prev.agent if prev.agent in alive else ""
+        if chat != prev.chat or agent != prev.agent:
+            await set_setting(
+                s,
+                llm_mod.LLM_ROUTING_KEY,
+                json.dumps({"chat": chat, "agent": agent, "failover": prev.failover}, ensure_ascii=False),
+                secret=False,
+            )
+    llm_mod.invalidate_llm_cache()
+    return {"action": body.action, "affected": touched, "total": len(kept)}
 
 
 @router.get("/admin/settings/llm/token-share", dependencies=[Depends(auth.require_admin)])
@@ -942,7 +1303,8 @@ async def test_admin_llm(body: LlmTestIn | None = None) -> dict:
     # 配置签名：把"要测哪些名字"也并进去 —— 精测单套与测全部互不串味；其余字段任一
     # 变化都会换签名 ⇒ 缓存自动失效。
     sig = (tuple(want),) + tuple(
-        (p.name, p.base_url, p.model, p.agent_model, p.provider, bool(p.api_key))
+        (p.name, p.base_url, p.model, p.agent_model, p.provider, bool(p.api_key),
+         p.proxy_mode, p.proxy_url)
         for p in profiles
     )
     cached = _LLM_TEST_CACHE
@@ -961,16 +1323,32 @@ async def test_admin_llm(body: LlmTestIn | None = None) -> dict:
         if not model:
             return {"name": p.name, "model": model, "ok": False,
                     "error": "No model name set — fill in Model first."}
+        # 缺 key 就明确说缺 key，且点名是哪家。以前空 key 会一路探测到 Gemini
+        # （空 base_url 命中 Google 官方端点，403 被当成"协议可用"），最后报
+        # "No API key was provided ... ai.google.dev" —— 和用户选的厂商完全无关。
+        if not (p.api_key or "").strip():
+            vendor = (p.vendor or "").strip()
+            label = {
+                "deepseek": "DeepSeek", "openai": "OpenAI", "zhipu": "智谱 GLM",
+                "kimi": "Kimi", "qwen": "阿里通义", "ollama": "Ollama",
+            }.get(vendor.lower(), vendor or p.name)
+            return {"name": p.name, "model": model, "ok": False,
+                    "error": f"API key is missing for {label} — paste the key and save the model pool first."}
+        started = time.monotonic()
         try:
             # 协议与能力一起报出来：换厂商之后"能不能跑"就看这几个布尔值。
             caps = await llm_mod.capabilities_for(p, force=True)
-            res = await llm_mod.chat(p, user="ping", max_tokens=16, timeout=25.0)
+            # 120s：给国内网关和大模型慢启动留足时间；25s 会误杀正常的首包。
+            res = await llm_mod.chat(p, user="ping", max_tokens=16, timeout=120.0)
+            latency_ms = int((time.monotonic() - started) * 1000)
+            inferred = _infer_context_tokens(model)
             return {
                 "name": p.name,
                 "model": model,
                 "ok": True,
                 "reply_model": getattr(res.raw, "model", model),
                 "api_key_set": bool(p.api_key),
+                "api_key_masked": _mask_key(p.api_key),
                 "base_url": p.base_url,
                 "protocol": caps.protocol,
                 "json_object": caps.json_object,
@@ -978,10 +1356,23 @@ async def test_admin_llm(body: LlmTestIn | None = None) -> dict:
                 "tools": caps.tools,
                 "vision": caps.vision,
                 "probed": caps.probed,
+                "latency_ms": latency_ms,
+                "context_tokens": inferred or p.context_tokens,
+                "context_inferred": inferred is not None,
             }
         except Exception as exc:  # noqa: BLE001 — surfaced verbatim to the operator
+            latency_ms = int((time.monotonic() - started) * 1000)
+            name = type(exc).__name__.lower()
+            text = str(exc).lower()
+            timed_out = (
+                isinstance(exc, (TimeoutError, asyncio.TimeoutError))
+                or "timeout" in name
+                or "timed out" in text
+                or "timeout" in text
+            )
+            msg = "网络超时，请检查代理或更换国内模型" if timed_out else f"{type(exc).__name__}: {exc}"
             return {"name": p.name, "model": model, "ok": False,
-                    "error": f"{type(exc).__name__}: {exc}"}
+                    "error": msg, "latency_ms": latency_ms}
 
     probed = await asyncio.gather(*[_one(p) for p in profiles])
     results = list(probed) + not_found
